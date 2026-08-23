@@ -30,29 +30,40 @@ Free hosts have ephemeral disks. If the SQLite file disappears, the app re-pulls
 months of Garmin history — around 900 requests — which is precisely the traffic
 that gets an account flagged. So use managed Postgres.
 
-Create a free database at [Neon](https://neon.tech) or
-[Supabase](https://supabase.com), then copy the connection string. Verify it
-before deploying:
+Create a free database at [Neon](https://neon.tech) (this project uses a Neon
+project in `ap-southeast-1`) or [Supabase](https://supabase.com), then copy the
+connection string into `.env` as `DATABASE_URL`. It takes precedence over
+`AEROBIC_ENGINE_DB`, so the local sync and the hosted dashboard end up reading
+and writing the same rows instead of drifting apart.
+
+Verify it, which also creates the schema:
 
 ```bash
 DATABASE_URL='postgresql://…?sslmode=require' python -c "
 from core.store import Store
-s = Store(); print('connected, tables:', s.counts()); s.close()"
+s = Store(); print('connected:', s.counts()); s.close()"
 ```
 
-That creates the schema and prints empty counts. The SQL is written once in
-SQLite's dialect and translated for Postgres, so both backends run the same code
-path — but **this repo's Postgres path has only been tested via that translation,
-not against a live server**, so run the command above and read the output rather
-than assuming.
+The SQL is written once in SQLite's dialect and translated on the way out, so
+both backends run the same code path. That translation has now been exercised
+against a live Neon server — all 13 tables built on the first attempt — rather
+than only against the dialect tests.
 
-Copy your existing local data up (optional but saves a big first sync):
+Then copy the data you already have up, which costs **zero Garmin calls**:
 
 ```bash
-python scripts/fetch.py --db "$DATABASE_URL" --metrics-only   # creates schema
-# then re-sync into Postgres directly:
-DATABASE_URL='postgresql://…' python scripts/fetch.py --days 45
+python scripts/migrate_to_postgres.py            # uses DATABASE_URL
+python scripts/migrate_to_postgres.py --dry-run  # report first, write nothing
 ```
+
+It prints per-table counts and then the destination totals, so a short copy is
+visible rather than assumed. Re-running is safe: every table upserts on its real
+key, and the id sequences are pushed past the copied rows so the next insert does
+not collide.
+
+Do **not** reach for `fetch.py --days 45` to populate a fresh hosted database.
+That re-pulls history from Garmin — hundreds of requests, from a datacenter IP,
+which is the exact pattern the rate guard exists to prevent.
 
 ## 3. Export your Garmin session
 
@@ -120,9 +131,3 @@ Watch all of that on the **Data** tab, which shows the live request budget.
 - The library used here is unofficial and credentials-based. It is fine for
   personal use, and it is your account on the line — which is why the defaults in
   this repo are conservative rather than fast.
-
-## Commercial later
-
-FastAPI + a real frontend + Postgres + real auth, likely on Azure. The analysis,
-planner, guard and auth modules carry over unchanged; only `app/streamlit_app.py`
-is thrown away.

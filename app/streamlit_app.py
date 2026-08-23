@@ -15,6 +15,7 @@ import logging
 import os
 import sys
 import time
+import zlib
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -48,10 +49,10 @@ from core.analysis import (  # noqa: E402
 from core.auth import PinGate, session_expired  # noqa: E402
 from core.garmin_guard import GarminBlocked  # noqa: E402
 from core.schemas import DAYS, ENDURANCE_SPORTS, SPORTS, Checkin, PlanDay, WeekPlan  # noqa: E402
-from core.store import DEFAULT_DB, Store, week_start_of  # noqa: E402
+from core.store import DEFAULT_DB, Store, is_postgres, week_start_of  # noqa: E402
 
 load_dotenv()
-log = logging.getLogger("iron_coach.ui")
+log = logging.getLogger("aerobic_engine.ui")
 st.set_page_config(page_title="Aerobic Engine", page_icon="🏊", layout="wide",
                    initial_sidebar_state="collapsed")
 
@@ -110,13 +111,30 @@ def _secret(name: str, default: str = "") -> str:
 
 
 def db_path() -> str:
-    return (os.getenv("AEROBIC_ENGINE_DB")
-            or os.getenv("IRON_COACH_DB")
+    # DATABASE_URL wins deliberately. A hosted deployment sets it, and a stray
+    # AEROBIC_ENGINE_DB left in the environment must not quietly point the app
+    # at an ephemeral local file instead — losing that database means re-pulling
+    # months of Garmin history, which is the traffic that gets accounts flagged.
+    return (os.getenv("DATABASE_URL")
+            or os.getenv("AEROBIC_ENGINE_DB")
             or DEFAULT_DB)
 
 
 def db_stamp() -> float:
-    p = Path(db_path())
+    """Cache key for load(): must change whenever the data could have."""
+    target = db_path()
+    if is_postgres(target):
+        # A remote database has no mtime, so the sync marker stands in. One
+        # cheap query per rerun, and unlike a constant it also notices a sync
+        # run from the command line rather than from this page.
+        try:
+            with Store(target) as s:
+                marker = s.get_state("last_sync") or ""
+            return float(zlib.crc32(marker.encode("utf-8")))
+        except Exception:  # noqa: BLE001 - a dead cache key beats a dead page
+            log.warning("could not read the sync marker for the cache key")
+            return 0.0
+    p = Path(target)
     return p.stat().st_mtime if p.exists() else 0.0
 
 
@@ -284,7 +302,7 @@ def page_today(data: dict, today: date) -> None:
     if rolled and focus_day > today:
         # Tomorrow may belong to next week's provisional plan.
         source = plan if focus_day.isocalendar()[1] == today.isocalendar()[1] \
-            else next_week_plan(today)
+            else next_week_plan(today, data.get("scoped_to"))
     todo = [d for d in (source or {}).get("week_plan", [])
             if d["day"] == day_name and d.get("purpose") != "completed"]
     done_today = [d for d in (plan or {}).get("week_plan", [])
@@ -349,7 +367,7 @@ def page_today(data: dict, today: date) -> None:
                f"{hm(wk.total_minutes)} done of a {hm(env.max_week_minutes)} ceiling")
     ui.week_strip(week_cells(plan, today))
 
-    nxt = next_week_plan(today)
+    nxt = next_week_plan(today, data.get("scoped_to"))
     if nxt:
         total = sum(d["duration_min"] for d in nxt.get("week_plan", []))
         ui.section(f"Next week · {day_label((week_start_of(today) + timedelta(weeks=1)).isoformat())} onwards",
@@ -362,20 +380,29 @@ def page_today(data: dict, today: date) -> None:
 
 
 @st.cache_data(show_spinner=False, ttl=900)
-def _next_week_plan(stamp: float, iso_today: str) -> dict | None:  # noqa: ARG001
-    """Computed on demand and cached: it is a preview, not a saved plan."""
+def _next_week_plan(stamp: float, iso_today: str,
+                    sports: tuple[str, ...] = ()) -> dict | None:  # noqa: ARG001
+    """Computed on demand and cached: it is a preview, not a saved plan.
+
+    `sports` is part of the cache key as well as the plan: filtering to run and
+    bike has to change the preview, not just the tabs around it.
+    """
     try:
         with Store(db_path()) as s:
             p = planner.plan_next_week(s, today=date.fromisoformat(iso_today),
-                                       use_ai=False, save=False)
+                                       use_ai=False, save=False,
+                                       only_sports=list(sports) or None)
         return p.model_dump(mode="json")
     except Exception as exc:  # noqa: BLE001 - a preview must never break the page
         log.warning("Next-week preview failed: %s", exc)
         return None
 
 
-def next_week_plan(today: date) -> dict | None:
-    return _next_week_plan(db_stamp(), today.isoformat())
+def next_week_plan(today: date, sports: list[str] | None = None) -> dict | None:
+    # Sorted so an unchanged selection reuses the cached preview regardless of
+    # the order the toggles happened to be clicked in.
+    return _next_week_plan(db_stamp(), today.isoformat(),
+                           tuple(sorted(sports or ())))
 
 
 def week_cells(plan: dict | None, today: date,
@@ -418,7 +445,7 @@ def page_progress(data: dict, today: date) -> None:
            "value": f"{int(tot['by_sport'].get(s, {}).get('sessions', 0))}",
            "note": f"{tot['by_sport'].get(s, {}).get('km', 0):.0f} km · "
                    f"{hm(tot['by_sport'].get(s, {}).get('minutes', 0))}"}
-          for s in ENDURANCE_SPORTS],
+          for s in shown_sports()],
     ])
 
     # --- the engine, in four numbers ----------------------------------
@@ -493,7 +520,7 @@ def intensity_block(zones: list[dict], today: date,
     st.caption(f"Last 28 days. {verdict}")
     chart_ai_note("intensity", notes)
     with st.expander("Zone breakdown by sport"):
-        for sport in ENDURANCE_SPORTS:
+        for sport in shown_sports():
             sp = zone_distribution(zones, sport=sport, since=since)
             if sum(sp.values()) <= 0:
                 continue
@@ -514,7 +541,7 @@ def efficiency_block(acts: list[dict], today: date,
     """
     drawn = False
     fig = go.Figure()
-    for sport in ENDURANCE_SPORTS:
+    for sport in shown_sports():
         pts = [p for p in ef_points(acts, sport) if p.is_steady] or \
               ef_points(acts, sport)
         if len(pts) < 2:
@@ -537,7 +564,7 @@ def efficiency_block(acts: list[dict], today: date,
     fig.update_layout(yaxis_title="% vs first session")
     ui.chart(fig, 200)
     chart_ai_note("efficiency", notes)
-    statuses = [ef_data_status(acts, s) for s in ENDURANCE_SPORTS]
+    statuses = [ef_data_status(acts, s) for s in shown_sports()]
     short = [s for s in statuses if s["total"] and s["needed_for_verdict"]]
     if short:
         st.caption(" · ".join(f"{s['sport']}: {s['steady']}/3 steady" for s in short))
@@ -568,7 +595,7 @@ def training_hr_block(acts: list[dict], today: date,
 
     fig = go.Figure()
     drawn, notes = False, []
-    for sport in ENDURANCE_SPORTS:
+    for sport in shown_sports():
         pts = [p for p in hr_points(acts, sport) if p.get(field)]
         if not pts:
             continue
@@ -778,26 +805,26 @@ def page_plan(data: dict, today: date) -> None:
                "the safety rules still cap the total.")
     existing = data["targets"]
     with st.form("targets"):
-        st.caption("Switch a sport off and it is excluded from every suggestion — "
-                   "no sessions, no long-session requirement, and its share of the "
-                   "week goes to the sports still on.")
+        st.caption("How much of each sport you want, for the sports switched on "
+                   "in the header. Use the toggle up there to drop a sport "
+                   "entirely — it then gets no sessions and no long-session "
+                   "requirement, and its share of the week goes to the rest.")
         rows = []
-        for sport in ENDURANCE_SPORTS:
+        for sport in shown_sports():
             cur = existing.get(sport) or {}
-            c = st.columns([1.1, 0.8, 1, 1], vertical_alignment="center")
+            c = st.columns([1.1, 1, 1], vertical_alignment="center")
             c[0].markdown(f"{EMOJI[sport]} **{sport.title()}**")
-            on = c[1].toggle("on", value=bool(cur.get("enabled", 1)),
-                             key=f"te_{sport}",
-                             label_visibility="collapsed" if sport != "swim" else "visible")
             rows.append({
                 "sport": sport,
-                "enabled": int(on),
-                "sessions": c[2].number_input("sessions", 0, 7,
+                # Preserved, not re-decided here: the header toggle is the one
+                # place that answers "is this sport on?".
+                "enabled": int(bool(cur.get("enabled", 1))),
+                "sessions": c[1].number_input("sessions", 0, 7,
                                               int(cur.get("sessions") or 0),
-                                              key=f"ts_{sport}", disabled=not on),
-                "minutes": c[3].number_input("minutes", 0, 900,
+                                              key=f"ts_{sport}"),
+                "minutes": c[2].number_input("minutes", 0, 900,
                                              int(cur.get("minutes") or 0), step=15,
-                                             key=f"tm_{sport}", disabled=not on),
+                                             key=f"tm_{sport}"),
             })
         b = st.columns(2)
         save = b[0].form_submit_button("Save targets", type="primary",
@@ -821,7 +848,8 @@ def page_plan(data: dict, today: date) -> None:
                 notes=(last or {}).get("notes") or "") if last else None
             with st.spinner("Rebuilding your week around that…"):
                 plan = planner.plan_week(s, checkin=ci, today=today,
-                                         use_ai=ai.available())
+                                         use_ai=ai.available(),
+                                         only_sports=data.get("scoped_to"))
         st.session_state["plan"] = plan.model_dump(mode="json")
         st.session_state.pop("plan_editor", None)
         refresh()
@@ -849,7 +877,8 @@ def page_plan(data: dict, today: date) -> None:
                 p = planner.plan_week(
                     s, checkin=Checkin(date=today, sleep=sleep, soreness=sore,
                                        motivation=moti, time_available_min=avail,
-                                       notes=notes), today=today, use_ai=use_ai)
+                                       notes=notes), today=today, use_ai=use_ai,
+                    only_sports=data.get("scoped_to"))
         st.session_state["plan"] = p.model_dump(mode="json")
         st.session_state.pop("plan_editor", None)
         refresh()
@@ -859,7 +888,8 @@ def page_plan(data: dict, today: date) -> None:
         if st.button("Build one from the rules only", disabled=not unlocked) \
                 and writes_allowed():
             with Store(db_path()) as s:
-                p = planner.plan_week(s, today=today, use_ai=False)
+                p = planner.plan_week(s, today=today, use_ai=False,
+                                      only_sports=data.get("scoped_to"))
             st.session_state["plan"] = p.model_dump(mode="json")
             refresh()
             st.rerun()
@@ -947,7 +977,8 @@ def page_plan(data: dict, today: date) -> None:
                          notes=(last or {}).get("notes") or "") if last else None
             with st.spinner("Rethinking…"):
                 p = planner.plan_week(s, checkin=ci, today=today, use_ai=True,
-                                      pushback=push, previous_plan=stored)
+                                      pushback=push, previous_plan=stored,
+                                      only_sports=data.get("scoped_to"))
         st.session_state["plan"] = p.model_dump(mode="json")
         st.session_state.pop("plan_editor", None)
         refresh()
@@ -1159,7 +1190,7 @@ def log_data(data: dict) -> None:
 # --------------------------------------------------------------------------
 
 
-def sidebar(data: dict, today: date) -> date:
+def sidebar(data: dict) -> None:
     with st.sidebar:
         st.subheader(data["name"] or "Athlete", anchor=False)
         st.caption(f"{data['counts']['activities']} activities · "
@@ -1168,14 +1199,143 @@ def sidebar(data: dict, today: date) -> date:
         unlock_control()
         sync_control()
         st.divider()
-        today = week_picker(today)
         if st.button("Reload page data", width="stretch"):
             refresh()
             st.rerun()
         st.caption(f"AI: {os.getenv('AI_BACKEND', 'anthropic')} "
                    f"({'ready' if ai.available() else 'off'})")
         st.caption("Not medical advice. Persistent tendon pain is a physio visit.")
-    return today
+
+
+# The sports a filter can actually select: what the athlete does, not what the
+# planner can schedule (which also has "rest" and the composite "brick").
+FILTER_SPORTS = ("run", "bike", "swim", "strength")
+
+
+def filter_bar(data: dict, today: date) -> tuple[date, list[str]]:
+    """Week and sport filters, top-right, above the tabs.
+
+    Deliberately not one copy per tab: Streamlit executes every tab body on
+    every rerun, so four copies would need four widget keys and would then
+    disagree with each other about what the page is showing. One row above the
+    strip stays visible on all four pages and cannot drift.
+    """
+    spacer, week_col, sport_col = st.columns([2, 2, 3], vertical_alignment="bottom")
+    with week_col:
+        today = week_picker(today)
+    with sport_col:
+        sports = sport_filter(data)
+    with spacer:
+        if set(sports) != set(FILTER_SPORTS):
+            st.caption("Recovery, HRV and sleep still cover everything — they "
+                       "are not attributable to one sport. The written summary "
+                       "is generated at sync time, so it describes all of your "
+                       "training.")
+    return today, sports
+
+
+def shown_sports() -> tuple[str, ...]:
+    """Endurance sports currently in scope, in their canonical order.
+
+    Read from session state rather than threaded through every chart helper:
+    the scope is decided once per run, before any tab renders, and passing it
+    down six call chains would be a lot of plumbing for one tuple.
+    """
+    picked = st.session_state.get("scope") or FILTER_SPORTS
+    return tuple(sp for sp in ENDURANCE_SPORTS if sp in set(picked))
+
+
+def active_sports(data: dict) -> list[str]:
+    """Sports currently switched on. No saved rows at all means everything is on."""
+    targets = data.get("targets") or {}
+    off = {sp for sp, t in targets.items() if not t.get("enabled", 1)}
+    return [sp for sp in FILTER_SPORTS if sp not in off]
+
+
+def sport_filter(data: dict) -> list[str]:
+    """Which sports the whole dashboard is about — the plan included.
+
+    Saved rather than per-session, because "I am only doing run and bike right
+    now" is a standing decision, not a passing view preference. It writes
+    weekly_targets.enabled — the same flag the planner already reads — so there
+    is one answer to "is swim on?" rather than two that can disagree.
+
+    A locked visitor still gets the filter, but only for their own session: the
+    saved default belongs to the owner, and reading a shared dashboard should not
+    let a stranger change what it plans.
+    """
+    saved = active_sports(data)
+    picked = st.pills(
+        "Sports", FILTER_SPORTS, selection_mode="multi", default=saved,
+        format_func=lambda sp: f"{EMOJI.get(sp, '•')} {sp.title()}",
+        label_visibility="collapsed", key="sport_pills",
+        help="Filters every tab and the plan. Saved until you change it.")
+
+    # Deselecting everything means "show me everything" rather than an empty
+    # dashboard — and a week with every sport disabled is not a plan the planner
+    # can honour anyway.
+    chosen = list(picked) if picked else list(FILTER_SPORTS)
+    if set(chosen) == set(saved):
+        return chosen
+
+    if not writes_allowed():
+        st.caption("🔒 This filter applies to your view only — unlock to save it "
+                   "as the default and re-plan around it.")
+        return chosen
+
+    with Store(db_path()) as store:
+        store.set_sport_enabled({sp: sp in chosen for sp in FILTER_SPORTS})
+    refresh()
+    st.rerun()
+    return chosen  # unreachable; rerun() raises
+
+
+def scope_to_sports(data: dict, sports: list[str]) -> dict:
+    """Return `data` with the activity-shaped entries narrowed to `sports`.
+
+    Whole-body signals — resting HR, HRV, readiness, sleep — are deliberately
+    left alone: they are not attributable to one sport, and filtering them would
+    invent a "running resting HR" that does not exist.
+    """
+    st.session_state["scope"] = list(sports or FILTER_SPORTS)
+    if not sports or set(sports) >= set(FILTER_SPORTS):
+        return dict(data, scoped_to=list(FILTER_SPORTS))
+    keep = set(sports)
+    # A brick counts as both its parts, so it survives a bike-only or run-only
+    # filter rather than vanishing from the record.
+    if keep & {"bike", "run"}:
+        keep.add("brick")
+
+    scoped = dict(data)
+    for key in ("activities", "all_activities"):
+        scoped[key] = [a for a in data.get(key) or [] if a.get("sport") in keep]
+    ids = {a.get("activity_id") for a in scoped["all_activities"]}
+    scoped["zones"] = [z for z in data.get("zones") or []
+                       if z.get("activity_id") in ids]
+    if "strength" not in keep:
+        scoped["strength"] = []
+        scoped["sets"] = []
+    else:
+        scoped["sets"] = [x for x in data.get("sets") or []
+                          if x.get("activity_id") in ids or not x.get("activity_id")]
+    scoped["counts"] = dict(data["counts"], activities=len(scoped["activities"]))
+    # The stored plan was built when the filter may have been wider, so filter it
+    # for display too — otherwise a run-and-bike dashboard still lists a swim.
+    plan = data.get("plan")
+    if plan and isinstance(plan.get("plan"), dict):
+        inner = dict(plan["plan"])
+        inner["week_plan"] = [d for d in inner.get("week_plan") or []
+                              if d.get("sport") in keep | {"rest"}]
+        # An adjustment about a sport that is no longer shown ("dropped 21 min
+        # swim") explains a decision the athlete can no longer see, so it reads
+        # as a contradiction rather than a reason.
+        dropped = set(FILTER_SPORTS) - keep
+        inner["adjustments_made"] = [
+            a for a in inner.get("adjustments_made") or []
+            if not any(sp in str(a).lower() for sp in dropped)]
+        scoped["plan"] = dict(plan, plan=inner)
+    scoped["scoped_to"] = sorted(sports)
+    return scoped
 
 
 def week_picker(today: date) -> date:
@@ -1263,18 +1423,32 @@ def main() -> None:
     if not read_gate():
         return
     today = date.today()
-    if not Path(db_path()).exists():
+    target = db_path()
+    # Only a local file can be "missing"; a Postgres URL either connects or
+    # raises, and Path(url).exists() is always False — which used to stop the
+    # hosted app dead before it ever tried to connect.
+    if not is_postgres(target) and not Path(target).exists():
         ui.page_title("Aerobic Engine")
         st.error("No database yet. Run `python scripts/fetch.py` first.")
         return
+    try:
+        data = load(db_stamp())
+    except Exception as exc:  # noqa: BLE001
+        ui.page_title("Aerobic Engine")
+        log.exception("Could not open the database")
+        st.error(f"Could not open the database ({type(exc).__name__}). "
+                 "Check DATABASE_URL and that the host is reachable.")
+        return
 
-    data = load(db_stamp())
-    today = sidebar(data, today)
+    sidebar(data)
     ui.page_title(
         "Aerobic Engine",
         (f"{data['name']} · " if data["name"] else "")
         + "Garmin Forerunner 265 · base phase · synced "
         + (data["last_sync"] or "never")[:16].replace("T", " "))
+
+    today, sports = filter_bar(data, today)
+    data = scope_to_sports(data, sports)
 
     today_tab, progress_tab, plan_tab, log_tab = st.tabs(
         ["Today", "Progress", "Plan", "Log"])

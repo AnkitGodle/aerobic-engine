@@ -17,12 +17,11 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-# AEROBIC_ENGINE_DB is the current name; IRON_COACH_DB is still honoured because
-# it is what existing local setups (and this repo's own .env) already use.
+# DATABASE_URL first: a hosted deployment sets it, and it must win over a local
+# file path left behind in the environment.
 DEFAULT_DB = (
     os.getenv("DATABASE_URL")
-    or os.getenv("AEROBIC_ENGINE_DB")
-    or os.getenv("IRON_COACH_DB", "data/iron_coach.db")
+    or os.getenv("AEROBIC_ENGINE_DB", "data/aerobic_engine.db")
 )
 
 PG_PREFIXES = ("postgres://", "postgresql://", "postgresql+psycopg://")
@@ -271,7 +270,7 @@ class Store:
             return statement
         out = statement.replace(
             "INTEGER PRIMARY KEY AUTOINCREMENT", "BIGSERIAL PRIMARY KEY"
-        ).replace("INSERT OR REPLACE INTO", "INSERT INTO")
+        )
         return out.replace("?", "%s")
 
     def execute(self, statement: str, params: Sequence[Any] = ()) -> Any:
@@ -477,8 +476,15 @@ class Store:
         with self.tx():
             self.execute("DELETE FROM hr_streams WHERE activity_id = ?", (activity_id,))
             self.executemany(
-                "INSERT OR REPLACE INTO hr_streams"
-                "(activity_id, t_s, hr, speed_mps, power_w) VALUES (?,?,?,?,?)",
+                # ON CONFLICT rather than SQLite's INSERT OR REPLACE: the
+                # dialect translation turns the latter into a bare INSERT, so a
+                # repeated t_s in one downsampled stream would raise a unique
+                # violation on Postgres but pass silently on SQLite.
+                "INSERT INTO hr_streams"
+                "(activity_id, t_s, hr, speed_mps, power_w) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(activity_id, t_s) DO UPDATE SET"
+                " hr=excluded.hr, speed_mps=excluded.speed_mps,"
+                " power_w=excluded.power_w",
                 [
                     (
                         activity_id,
@@ -764,6 +770,26 @@ class Store:
             )
         return len(rows)
 
+    def set_sport_enabled(self, enabled: dict[str, bool]) -> int:
+        """Flip only the on/off flag, preserving any sessions/minutes already set.
+
+        Separate from set_targets() on purpose: set_targets() writes the whole
+        row, so using it here would erase the weekly volume intent behind a sport
+        as a side effect of merely toggling that sport off and on again.
+        """
+        rows = {s: bool(v) for s, v in (enabled or {}).items() if s}
+        if not rows:
+            return 0
+        now = datetime.now().isoformat(timespec="seconds")
+        with self.tx():
+            self.executemany(
+                "INSERT INTO weekly_targets(sport, enabled, updated_at)"
+                " VALUES (?,?,?) ON CONFLICT(sport) DO UPDATE SET"
+                " enabled=excluded.enabled, updated_at=excluded.updated_at",
+                [(sport, int(on), now) for sport, on in rows.items()],
+            )
+        return len(rows)
+
     def targets(self) -> dict[str, dict[str, Any]]:
         """Rows the athlete has actually set. A disabled sport is kept, so the
         planner knows to exclude it rather than treating it as unset."""
@@ -797,10 +823,6 @@ class Store:
 
     def notes(self) -> dict[str, dict[str, Any]]:
         return {r["key"]: r for r in self.query("SELECT * FROM ai_notes")}
-
-    def clear_notes(self) -> None:
-        with self.tx():
-            self.execute("DELETE FROM ai_notes")
 
     # -- misc -----------------------------------------------------------
     def counts(self) -> dict[str, int]:
