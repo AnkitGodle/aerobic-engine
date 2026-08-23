@@ -153,3 +153,66 @@ def test_planner_falls_back_to_rules_when_groq_is_rate_limited(healthy, monkeypa
     assert plan.source == "rules"
     assert plan.week_plan
     assert any("unavailable" in f.lower() for f in plan.flags)
+
+
+# --------------------------------------------------------------------------
+# The backend chain. Preferring the Claude CLI where it exists means the chain
+# has to tolerate providers that are simply not installed.
+# --------------------------------------------------------------------------
+
+
+def test_an_unconfigured_provider_is_dropped_from_the_chain(monkeypatch):
+    """claude_cli is not installed on a web host, and that must not be an error."""
+    monkeypatch.setenv("AI_BACKEND", "claude_cli,gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("CLAUDE_CLI_BIN", "definitely-not-a-real-binary")
+    backend = ai.get_backend()
+    assert "claude_cli" not in backend.name
+    assert "gemini" in backend.name
+
+
+def test_a_chain_of_one_usable_provider_is_that_provider(monkeypatch):
+    monkeypatch.setenv("AI_BACKEND", "claude_cli,groq")
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+    monkeypatch.setenv("CLAUDE_CLI_BIN", "definitely-not-a-real-binary")
+    assert ai.get_backend().name == "groq"
+
+
+def test_a_chain_with_nothing_configured_raises(monkeypatch):
+    monkeypatch.setenv("AI_BACKEND", "claude_cli,gemini")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("AI_API_KEY", raising=False)
+    monkeypatch.setenv("CLAUDE_CLI_BIN", "definitely-not-a-real-binary")
+    with pytest.raises(ai.AIUnavailable):
+        ai.get_backend()
+
+
+def test_the_chain_falls_through_a_provider_that_refuses():
+    """A 503 from one provider should cost the call nothing but a retry."""
+    class Refuses:
+        name = "refuses"
+        def complete(self, system, user, json_mode=False):
+            raise ai.AIUnavailable("503 oversubscribed")
+
+    class Answers:
+        name = "answers"
+        model = "m"
+        def complete(self, system, user, json_mode=False):
+            return '{"ok": true}'
+
+    chain = ai.ChainBackend([Refuses(), Answers()])
+    assert chain.complete("s", "u") == '{"ok": true}'
+    assert chain.model == ""      # the first backend has no model attribute
+
+
+def test_the_chain_reports_every_failure_when_none_answer():
+    class Refuses:
+        def __init__(self, n): self.name = n
+        def complete(self, system, user, json_mode=False):
+            raise ai.AIUnavailable(f"{self.name} said no")
+
+    chain = ai.ChainBackend([Refuses("a"), Refuses("b")])
+    with pytest.raises(ai.AIUnavailable) as exc:
+        chain.complete("s", "u")
+    assert "a said no" in str(exc.value) and "b said no" in str(exc.value)

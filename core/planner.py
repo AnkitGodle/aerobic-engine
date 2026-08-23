@@ -137,6 +137,10 @@ SPACED_SPORTS = ("swim", "bike", "run", "brick")
 # athlete's own floor.
 MIN_ENDURANCE_SESSIONS = 3
 
+# What a session added to reach that floor is worth during a deload. Short
+# enough to keep the week genuinely reduced, long enough to be worth doing.
+DELOAD_SESSION_MIN = 20
+
 QUALITY_ZONES = {"Z3", "Z4", "Z5", "mixed"}
 
 # --- deload triggers (rules force these regardless of mood) ---------------
@@ -793,7 +797,12 @@ def enforce(
     # 12. Concrete heart-rate targets, from the athlete's own Garmin zones.
     _stamp_hr_targets(days, zone_bounds_map, aerobic_ceiling)
 
-    # 13. Descriptions must match the numbers that survived the steps above.
+    # 13. A rest marker cannot share a day with a session. Earlier steps move
+    # sessions between days, so a rest day can acquire one after the fact.
+    busy = {d.day for d in days if d.sport != "rest" and d.duration_min > 0}
+    days = [d for d in days if not (d.sport == "rest" and d.day in busy)]
+
+    # 14. Descriptions must match the numbers that survived the steps above.
     _relabel(days, envelope)
 
     flags = list(plan.flags)
@@ -831,12 +840,12 @@ def _ensure_minimum_endurance(
     overshoot is stated rather than hidden. Same precedent as a required long
     session.
     """
-    # A deload outranks the floor, without exception. The floor is there so a
-    # cautious budget does not erase the week; a deload is the rules deciding the
-    # week *should* be smaller, and adding sessions back would defeat the one
-    # constraint that exists to be un-negotiable.
-    if envelope.deload:
-        return days
+    # A deload cuts volume and intensity, not frequency — keeping the sessions
+    # short and easy while dropping the hours is what a deload week actually is.
+    # So the floor still applies here, but the sessions it adds are the reduced
+    # length, not the normal one. The deload's own ceilings and zone downgrades
+    # have already been applied by earlier steps and are not revisited.
+    floor_minutes = DELOAD_SESSION_MIN if envelope.deload else None
 
     order = {d: i for i, d in enumerate(DAYS)}
     live = [d for d in days if d.sport in SPACED_SPORTS and d.duration_min > 0]
@@ -877,7 +886,7 @@ def _ensure_minimum_endurance(
         if sport is None:
             break
         day = open_days.pop(0)
-        minutes = int(SESSION_FLOOR.get(sport, 25))
+        minutes = int(floor_minutes or SESSION_FLOOR.get(sport, 25))
         days.append(PlanDay(
             day=day, sport=sport, duration_min=minutes, target_zone="Z2",
             purpose=PURPOSE_FOR_ROLE.get("endurance", "aerobic base"),
@@ -889,10 +898,11 @@ def _ensure_minimum_endurance(
 
     if added:
         planned = sum(d.duration_min for d in days)
+        how = "deload-length " if envelope.deload else "short "
         notes.append(
-            f"added {added} short session(s) to reach the {MIN_ENDURANCE_SESSIONS}"
-            f"-session floor; the week is now {planned} min against a "
-            f"{envelope.max_week_minutes:.0f} min budget"
+            f"added {added} {how}session(s) to reach the "
+            f"{MIN_ENDURANCE_SESSIONS}-session floor; the week is now "
+            f"{planned} min against a {envelope.max_week_minutes:.0f} min budget"
         )
     return days
 
@@ -1376,6 +1386,41 @@ def build_payload(
             "recent_sessions": recent_sessions,
         },
     )
+
+
+def reapply_rules(
+    store: Store,
+    plan: dict[str, Any],
+    today: date | None = None,
+    only_sports: Sequence[str] | None = None,
+) -> tuple[WeekPlan, bool]:
+    """Re-run the current rules over a stored plan.
+
+    A plan is saved as data, so a plan built last week was checked against last
+    week's rules. Change a rule — the spacing constraint, the session floor, the
+    athlete's aerobic ceiling — and the saved plan silently keeps the old shape,
+    which looks exactly like the new rule not working.
+
+    Rather than versioning plans and deciding when to invalidate them, the stored
+    plan is simply pushed back through enforce(). It is the same code path that
+    checked it originally, it is deterministic and cheap, and anything that no
+    longer conforms is repaired. Returns the plan and whether anything changed.
+    """
+    facts = build_facts(store, today=today)
+    envelope = build_envelope(facts, store, only_sports=only_sports)
+    bounds = zone_bounds(store.zones(since=facts.today - timedelta(days=120)))
+    ceiling_raw = store.get_state("aerobic_ceiling_bpm")
+    ceiling = int(float(ceiling_raw)) if ceiling_raw else None
+
+    before = WeekPlan.model_validate(plan)
+    after = enforce(before, facts, envelope, store.strength_log(),
+                    zone_bounds_map=bounds, aerobic_ceiling=ceiling)
+
+    def shape(p: WeekPlan) -> list[tuple]:
+        return sorted((d.day, d.sport, d.duration_min, d.target_hr)
+                      for d in p.week_plan)
+
+    return after, shape(before) != shape(after)
 
 
 def plan_week(

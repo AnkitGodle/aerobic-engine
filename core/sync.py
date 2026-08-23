@@ -115,6 +115,7 @@ def generate_ai_notes(db: str | None = None, today: date | None = None) -> int:
             "wellness": store.wellness(), "zones": store.zones(),
             "strength": store.strength_log(), "sets": store.exercise_sets(),
             "race": store.race_predictions(),
+            "records": store.personal_records(),
         }
         model = getattr(ai.get_backend(), "model", "")
         rows: list[dict[str, Any]] = []
@@ -191,6 +192,25 @@ def _chart_inputs(data: dict[str, Any], today: date) -> list[tuple[str, str, Any
         out.append(("chart:training_hr",
                     "Heart rate at the athlete's usual pace, by sport "
                     "(bpm; falling is better)", hr))
+        # The same series over all time rather than the recent window. Read
+        # differently on purpose: the question there is the direction of travel
+        # over months, not whether this block is working.
+        out.append(("chart:lifetime_hr",
+                    "Heart rate at the athlete's usual pace across their whole "
+                    "history, by sport (bpm; falling is better). Comment on the "
+                    "overall direction and on how much history there is to "
+                    "judge it from", hr))
+
+    wl = data.get("wellness") or []
+    if wl:
+        out.append(("chart:lifetime_recovery",
+                    "Resting heart rate, overnight HRV and sleep across the "
+                    "whole record (resting HR falling and HRV rising are both "
+                    "good). Say what the long-run direction is",
+                    [{"day": r["day"], "resting_hr": r.get("resting_hr"),
+                      "hrv": r.get("hrv_last_night"),
+                      "sleep_h": round((r.get("sleep_seconds") or 0) / 3600, 1)}
+                     for r in wl]))
 
     if zones:
         out.append(("chart:intensity",

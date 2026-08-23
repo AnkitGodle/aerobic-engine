@@ -781,7 +781,11 @@ def normalize_activity(raw: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def parse_stream(details: Any, max_points: int = 600) -> list[dict[str, Any]]:
-    """`get_activity_details` -> [{t_s, hr, speed_mps, power_w}] downsampled."""
+    """`get_activity_details` -> [{t_s, hr, speed_mps, power_w, altitude_m}].
+
+    Downsampled: a two-hour ride is ~7000 samples and the maths does not need
+    them all.
+    """
     if not isinstance(details, dict):
         return []
     descriptors = details.get("metricDescriptors") or []
@@ -820,6 +824,8 @@ def parse_stream(details: Any, max_points: int = 600) -> list[dict[str, Any]]:
                 "hr": hr,
                 "speed_mps": pick(row, "directSpeed", "directGroundSpeed"),
                 "power_w": pick(row, "directPower", "directBikePower"),
+                "altitude_m": pick(row, "directElevation", "directAltitude",
+                                   "directCorrectedElevation"),
             }
         )
     # directTimestamp is epoch-ms; rebase to seconds from the start.

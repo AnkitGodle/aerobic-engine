@@ -510,8 +510,47 @@ def _retry_after_seconds(detail: str) -> float | None:
     return None
 
 
-def get_backend(name: str | None = None) -> LLMBackend:
-    name = (name or os.getenv("AI_BACKEND", "anthropic")).lower()
+class ChainBackend:
+    """Try several providers in order, within a single call.
+
+    Two different failures need different treatment, which is why this exists
+    rather than a plain try/except at the call site.
+
+    A provider that cannot be configured at all — no API key, no CLI on PATH —
+    is dropped when the chain is built, so it costs nothing on every later call.
+    A provider that is configured but momentarily refuses is skipped for this
+    call and kept for the next: Gemini's free tier answers 503 when a model is
+    oversubscribed, and that happened on thirteen consecutive calls in one sync,
+    which is exactly the case a chain should absorb rather than surface.
+
+    Order is the point. The Claude Code CLI is preferred where it exists because
+    it uses an existing subscription rather than a metered key, and it is
+    unavailable on a hosted dashboard, where the chain simply falls through.
+    """
+
+    def __init__(self, backends: list[LLMBackend]) -> None:
+        if not backends:
+            raise AIUnavailable("no usable AI backend")
+        self.backends = backends
+        self.name = "+".join(getattr(b, "name", "?") for b in backends)
+
+    @property
+    def model(self) -> str:
+        return getattr(self.backends[0], "model", "")
+
+    def complete(self, system: str, user: str, json_mode: bool = False) -> str:
+        failures: list[str] = []
+        for backend in self.backends:
+            try:
+                return backend.complete(system, user, json_mode=json_mode)
+            except AIUnavailable as exc:
+                failures.append(f"{getattr(backend, 'name', '?')}: {exc}")
+                log.info("%s unavailable, trying the next provider",
+                         getattr(backend, "name", "?"))
+        raise AIUnavailable("; ".join(failures) or "no backend answered")
+
+
+def _one_backend(name: str) -> LLMBackend:
     if name == "anthropic":
         return AnthropicBackend()
     if name == "azure":
@@ -526,6 +565,31 @@ def get_backend(name: str | None = None) -> LLMBackend:
     if name in ("none", "off", ""):
         return NullBackend()
     raise AIUnavailable(f"Unknown AI_BACKEND {name!r}")
+
+
+def get_backend(name: str | None = None) -> LLMBackend:
+    """Resolve AI_BACKEND, which may name one provider or a comma-separated
+    chain to try in order (for example `claude_cli,gemini,groq`)."""
+    raw = name or os.getenv("AI_BACKEND", "anthropic")
+    names = [n.strip().lower() for n in str(raw).split(",") if n.strip()]
+    if not names:
+        return NullBackend()
+    if len(names) == 1:
+        return _one_backend(names[0])
+
+    built: list[LLMBackend] = []
+    problems: list[str] = []
+    for n in names:
+        try:
+            built.append(_one_backend(n))
+        except AIUnavailable as exc:
+            # Reported once here rather than on every call: an unconfigured
+            # provider in the chain is a setup note, not a runtime error.
+            problems.append(f"{n}: {exc}")
+            log.info("AI backend %s is not configured (%s); skipping it", n, exc)
+    if not built:
+        raise AIUnavailable("; ".join(problems) or "no usable AI backend")
+    return built[0] if len(built) == 1 else ChainBackend(built)
 
 
 def available(name: str | None = None) -> bool:

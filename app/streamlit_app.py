@@ -203,6 +203,28 @@ class _SharedStore:
             self._store = Store(self.target)
         return self._store
 
+    def _end_transaction(self) -> None:
+        """Close the read transaction this call opened.
+
+        This is not tidiness. With autocommit off, the first SELECT opens a
+        transaction that stays open until something ends it, so a reused
+        connection sits "idle in transaction" between page views — holding a
+        snapshot and an ACCESS SHARE lock on everything it touched.
+
+        That is not a slow query, it is a full stop: an ALTER TABLE from a
+        migration queues behind it, and because Postgres queues lock waiters in
+        order, every later read of that table queues behind the ALTER. One idle
+        read had blocked hr_streams for ten minutes and taken the Log page down
+        with it. Writes have already committed inside tx(), so this only ever
+        discards a read snapshot.
+        """
+        if self._store is None or not self._store.postgres:
+            return
+        try:
+            self._store.conn.rollback()
+        except Exception:  # noqa: BLE001 - a dead handle is reopened next call
+            pass
+
     # Retried only for the failures reopening can actually fix. Retrying
     # everything meant a plain AttributeError in the read function came back as
     # "could not open the database", which sends you looking at DATABASE_URL for
@@ -212,7 +234,10 @@ class _SharedStore:
     def run(self, fn):
         with self._lock:
             try:
-                return fn(self._open())
+                try:
+                    return fn(self._open())
+                finally:
+                    self._end_transaction()
             except self.RETRYABLE:
                 log.info("database handle went stale; reopening")
                 try:
@@ -928,6 +953,14 @@ def page_plan(data: dict, today: date) -> None:
                                            disabled=not unlocked) and writes_allowed():
                     with Store(db_path()) as _s:
                         _s.set_state("aerobic_ceiling_bpm", str(int(new_ceiling)))
+                        # Every Z2 target is derived from this, so a saved ceiling
+                        # that leaves the plan untouched looks like it did nothing.
+                        with st.spinner("Restamping your targets…"):
+                            rebuilt = planner.plan_week(
+                                _s, today=today, use_ai=False,
+                                only_sports=data.get("scoped_to"))
+                    st.session_state["plan"] = rebuilt.model_dump(mode="json")
+                    st.session_state.pop("plan_editor", None)
                     refresh()
                     st.rerun()
             if ceiling and ceiling > (bounds[2][1] or 0):
@@ -1021,6 +1054,11 @@ def page_plan(data: dict, today: date) -> None:
         refresh()
 
     stored = st.session_state.get("plan") or (data["plan"] or {}).get("plan")
+    stored, repaired = conformed_plan(stored, today, data.get("scoped_to"))
+    if repaired:
+        st.info("This plan was built before your current settings, so it has been "
+                "re-checked against them — heart-rate targets, the spacing rule "
+                "and the session floor all reflect what is saved now.")
     if not stored:
         if st.button("Build one from the rules only", disabled=not unlocked) \
                 and writes_allowed():
@@ -1148,6 +1186,39 @@ def pr_value(row: dict) -> str:
     return f"{float(v):,.0f}"
 
 
+@st.cache_data(show_spinner=False, ttl=900)
+def _conformed_plan(stamp: float, iso_today: str, raw: str,
+                    sports: tuple[str, ...] = ()) -> tuple[dict, bool]:  # noqa: ARG001
+    """Push a stored plan back through the current rules. Cached on its content."""
+    import json as _json
+    plan = _json.loads(raw)
+    try:
+        fixed, changed = with_store(lambda s: planner.reapply_rules(
+            s, plan, today=date.fromisoformat(iso_today),
+            only_sports=list(sports) or None))
+        return fixed.model_dump(mode="json"), changed
+    except Exception as exc:  # noqa: BLE001 - showing the saved plan beats an error
+        log.warning("Could not re-apply rules to the stored plan: %s", exc)
+        return plan, False
+
+
+def conformed_plan(plan: dict | None, today: date,
+                   sports: list[str] | None = None) -> tuple[dict | None, bool]:
+    """This week's plan as the *current* rules would have it.
+
+    Plans are stored as data, so one built before a rule changed keeps the old
+    shape — which is indistinguishable from the new rule not working. Re-running
+    enforce() over it is cheap, deterministic, and uses the same code path that
+    checked it in the first place.
+    """
+    if not plan or not plan.get("week_plan"):
+        return plan, False
+    import json as _json
+    return _conformed_plan(db_stamp(), today.isoformat(),
+                           _json.dumps(plan, sort_keys=True, default=str),
+                           tuple(sorted(sports or ())))
+
+
 def page_lifetime(data: dict, today: date) -> None:
     """Everything that is not about this week.
 
@@ -1171,6 +1242,7 @@ def page_lifetime(data: dict, today: date) -> None:
         span = (f"{day_label(tot['first_day'].isoformat(), year=True)} — "
                 f"{day_label(tot['last_day'].isoformat(), year=True)}")
     ui.page_title("Lifetime", span)
+    insight_banner("Lifetime", data, today)
 
     ui.figures([
         {"label": "Sessions", "value": f"{tot['sessions']:,}"},
@@ -1232,11 +1304,112 @@ def page_lifetime(data: dict, today: date) -> None:
     ui.section("Heart rate at your usual pace",
                "The headline trend: the same pace costing fewer beats is fitness. "
                "Every session on record.")
-    training_hr_block(acts, today, data.get("notes"))
+    with ui.frame():
+        training_hr_block(acts, today, data.get("notes"))
+        chart_ai_note("lifetime_hr", data.get("notes"))
 
     ui.section("Resting heart rate, HRV and sleep",
                "All time, not a rolling window.")
-    trend_chart(data["wellness"], today)
+    with ui.frame():
+        trend_chart(data["wellness"], today)
+        chart_ai_note("lifetime_recovery", data.get("notes"))
+
+
+def page_about(data: dict, today: date) -> None:
+    """What the app does, what it deliberately refuses to do, and where the
+    numbers come from.
+
+    Worth a page because most of the interesting decisions here are invisible
+    from the charts: which constraints the AI cannot cross, why a number is
+    missing rather than estimated, and what the data is not good enough to say.
+    """
+    ui.page_title("About Aerobic Engine",
+                  "Iron Man training analytics with a rules-first planner.")
+
+    ui.section("What it is for")
+    st.markdown(
+        "One question, asked well: **is fitness rising while heart rate "
+        "falls?** Everything else exists to answer it honestly, or to turn the "
+        "answer into next week's training.\n\n"
+        "Garmin is treated as a sensor, not a coach. A Forerunner 265 has no "
+        "triathlon coaching, so the cross-sport decisions — how the week divides "
+        "between swim, bike, run and legs — are made here."
+    )
+
+    ui.section("How a week gets planned", "Three layers, in this order.")
+    ui.rows([
+        ("1. Facts", "deterministic",
+         "completed sessions, volume, efficiency trend, recovery signals"),
+        ("2. Rules envelope", "always wins",
+         "session counts, volume cap, deload triggers, spacing, rest days"),
+        ("3. AI", "adjusts inside the envelope",
+         "volume, intensity and placement, plus the reasons"),
+    ])
+    st.markdown(
+        "The order matters more than the AI does. A language model asked how "
+        "your week should go is agreeable: say *I feel great* and it hands you a "
+        "reckless week, say *I'm tired* and it cancels everything. So every "
+        "constraint is re-checked **in code** after the model answers — and if "
+        "the numbers no longer support what it wrote, the explanation is "
+        "rewritten too. The plan says `ai_repaired` when that happened."
+    )
+
+    ui.section("What the AI is not allowed to do")
+    ui.rows([
+        ("Invent an exercise", "blocked",
+         "it may only pick ids from a fixed library"),
+        ("Overrule a deload", "blocked", "recovery signals decide, not mood"),
+        ("Exceed the progression cap", "blocked", "+10% volume per week"),
+        ("Set a heart-rate target", "blocked",
+         "targets come from your own zones"),
+        ("Decide strength load", "blocked",
+         "progression is arithmetic: one rep, then one step"),
+    ])
+
+    ui.section("Where the numbers come from")
+    ui.rows([
+        ("Efficiency factor", "speed ÷ heart rate",
+         "power ÷ HR on the bike where power exists"),
+        ("Steady sessions only", "filtered",
+         "intervals and races would swamp the trend"),
+        ("Aerobic decoupling", "first half vs second",
+         "under 5% is good durability"),
+        ("Resting HR and HRV", "regression slope",
+         "not a 28-day block comparison, which took too long to answer"),
+        ("Zones", "from Garmin", "so they match what the watch shows"),
+        ("Weather", "per session",
+         "heat and humidity raise HR at the same pace"),
+    ])
+
+    ui.section("What it will not pretend to know")
+    st.markdown(
+        "- **Your true aerobic ceiling.** Garmin's Z2 top is one convention "
+        "among several; the page shows the alternatives and the real test is "
+        "whether you can still talk in full sentences.\n"
+        "- **Efficiency, before three steady sessions per sport.** It says how "
+        "many more are needed rather than drawing a line through two points.\n"
+        "- **Acute:chronic load, before about three weeks of history.** With one "
+        "week of data the ratio is arithmetic nonsense and would force a "
+        "permanent deload.\n"
+        "- **Anything medical.** Persistent tendon pain is a physio visit, not a "
+        "programming problem."
+    )
+
+    ui.section("Privacy and safety")
+    ui.rows([
+        ("Your data", "one database", "not shared with anyone"),
+        ("Garmin login", "never from the web host",
+         "a cached session is exported by hand"),
+        ("Request pacing", "rate-guarded",
+         "budgets, and an hour's cooldown after a single 429"),
+        ("Write actions", "PIN required",
+         "stored as a salted hash, never in plain text"),
+        ("Reading", "open if shared", "set DASHBOARD_PASSWORD to close it"),
+    ])
+    st.caption(
+        "Built with the unofficial Garmin Connect API for personal use. Not "
+        "affiliated with or endorsed by Garmin. Not medical advice."
+    )
 
 
 def page_log(data: dict, today: date) -> None:
@@ -1305,7 +1478,20 @@ def log_sessions(data: dict, today: date) -> None:
     if stream:
         sdf = pd.DataFrame(stream)
         sdf["minutes"] = sdf["t_s"] / 60.0
+        has_alt = "altitude_m" in sdf and sdf["altitude_m"].notna().any()
+
+        # Elevation as a filled area behind the traces, not another line. It is
+        # context for the other two rather than a measurement in its own right:
+        # heart rate climbing while speed drops is only a bad sign if the ground
+        # was flat.
         fig = go.Figure()
+        if has_alt:
+            base = float(sdf["altitude_m"].min())
+            fig.add_scatter(
+                x=sdf["minutes"], y=sdf["altitude_m"], name="Elevation (m)",
+                mode="lines", line=dict(width=0.8, color="rgba(140,158,176,.55)"),
+                fill="tozeroy", fillcolor="rgba(140,158,176,.13)", yaxis="y3",
+                hovertemplate="%{y:.0f} m<extra>elevation</extra>")
         for col, nm, colr in (("hr", "Heart rate", TONE["bad"]),
                               ("speed_mps", "Speed (m/s)", "#7FB6DC"),
                               ("power_w", "Power (W)", TONE["caution"])):
@@ -1313,10 +1499,33 @@ def log_sessions(data: dict, today: date) -> None:
                 fig.add_scatter(x=sdf["minutes"], y=sdf[col], mode="lines", name=nm,
                                 line=dict(width=1.6, color=colr),
                                 yaxis="y" if col == "hr" else "y2")
-        fig.update_layout(xaxis_title="minutes into the session",
-                          yaxis=dict(title="heart rate"),
-                          yaxis2=dict(overlaying="y", side="right", showgrid=False))
-        ui.chart(fig, 260)
+        layout = dict(xaxis_title="minutes into the session",
+                      yaxis=dict(title="heart rate"),
+                      yaxis2=dict(overlaying="y", side="right", showgrid=False),
+                      hovermode="x unified")
+        if has_alt:
+            # Squeezed into the bottom third and unlabelled, so the terrain reads
+            # as a backdrop instead of competing with heart rate.
+            lo, hi = float(sdf["altitude_m"].min()), float(sdf["altitude_m"].max())
+            pad = max(4.0, (hi - lo) * 0.25)
+            layout["yaxis3"] = dict(overlaying="y", side="right",
+                                    range=[lo - pad, lo + (hi - lo + pad) * 3.2],
+                                    showgrid=False, showticklabels=False,
+                                    visible=False)
+        fig.update_layout(**layout)
+        ui.chart(fig, 280)
+        if has_alt:
+            gain = float(sdf["altitude_m"].diff().clip(lower=0).sum())
+            st.caption(
+                f"Climbed about {gain:.0f} m across the session "
+                f"({float(sdf['altitude_m'].min()):.0f}–"
+                f"{float(sdf['altitude_m'].max()):.0f} m). Heart rate rising on a "
+                f"climb is terrain, not fatigue.")
+        elif act.get("elevation_gain_m"):
+            st.caption(
+                f"{float(act['elevation_gain_m']):.0f} m of climbing in total. "
+                f"The per-second elevation trace needs a re-fetch of this "
+                f"session's stream.")
     if act.get("decoupling_pct") is not None:
         st.caption(f"Aerobic drift across this session: {act['decoupling_pct']:.1f}% "
                    f"(under 5% is good durability).")
@@ -1487,7 +1696,7 @@ def sidebar(data: dict) -> None:
 FILTER_SPORTS = ("run", "bike", "swim", "strength")
 
 
-PAGES = ("Today", "Progress", "Plan", "Lifetime", "Log")
+PAGES = ("Today", "Progress", "Plan", "Lifetime", "Log", "About")
 
 
 def nav() -> str:
@@ -1754,7 +1963,8 @@ def main() -> None:
     data = scope_to_sports(data, sports)
 
     {"Today": page_today, "Progress": page_progress, "Plan": page_plan,
-     "Lifetime": page_lifetime, "Log": page_log}[page](data, today)
+     "Lifetime": page_lifetime, "Log": page_log,
+     "About": page_about}[page](data, today)
 
 
 main()

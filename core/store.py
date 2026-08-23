@@ -316,6 +316,9 @@ COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("daily_wellness", "spo2_avg", "REAL"),
     ("daily_wellness", "spo2_lowest", "REAL"),
     ("daily_wellness", "weight_kg", "REAL"),
+    # Speed, elevation and heart rate only mean anything together: a climb
+    # explains a heart-rate spike that would otherwise read as lost fitness.
+    ("hr_streams", "altitude_m", "REAL"),
 ]
 
 
@@ -343,7 +346,16 @@ class Store:
             from psycopg.rows import dict_row
 
             self.url = target.replace("postgresql+psycopg://", "postgresql://")
-            self.conn = psycopg.connect(self.url, row_factory=dict_row, autocommit=False)
+            self.conn = psycopg.connect(self.url, row_factory=dict_row,
+                                        autocommit=False)
+            # Nothing here should ever run for a minute, and nothing should wait
+            # on a lock for more than a few seconds. Without these a single
+            # blocked statement queues every later reader behind it and the page
+            # simply hangs, which is far harder to diagnose than an error.
+            with self.conn.cursor() as cur:
+                cur.execute("SET statement_timeout = '30s'")
+                cur.execute("SET lock_timeout = '5s'")
+            self.conn.commit()
             self.path = None
         else:
             self.path = Path(target)
@@ -624,10 +636,11 @@ class Store:
                 # repeated t_s in one downsampled stream would raise a unique
                 # violation on Postgres but pass silently on SQLite.
                 "INSERT INTO hr_streams"
-                "(activity_id, t_s, hr, speed_mps, power_w) VALUES (?,?,?,?,?) "
+                "(activity_id, t_s, hr, speed_mps, power_w, altitude_m)"
+                " VALUES (?,?,?,?,?,?) "
                 "ON CONFLICT(activity_id, t_s) DO UPDATE SET"
                 " hr=excluded.hr, speed_mps=excluded.speed_mps,"
-                " power_w=excluded.power_w",
+                " power_w=excluded.power_w, altitude_m=excluded.altitude_m",
                 [
                     (
                         activity_id,
@@ -635,6 +648,7 @@ class Store:
                         s.get("hr"),
                         s.get("speed_mps"),
                         s.get("power_w"),
+                        s.get("altitude_m"),
                     )
                     for s in samples
                     if s.get("t_s") is not None
@@ -644,7 +658,7 @@ class Store:
 
     def stream(self, activity_id: str) -> list[dict[str, Any]]:
         return self.query(
-            "SELECT t_s, hr, speed_mps, power_w FROM hr_streams "
+            "SELECT t_s, hr, speed_mps, power_w, altitude_m FROM hr_streams "
             "WHERE activity_id = ? ORDER BY t_s",
             (activity_id,),
         )
@@ -659,7 +673,14 @@ class Store:
         return self.query(
             f"SELECT activity_id, sport, start_date FROM activities "
             f"WHERE sport IN ({marks}) AND avg_hr IS NOT NULL AND duration_s > 0 "
-            f"AND activity_id NOT IN (SELECT DISTINCT activity_id FROM hr_streams) "
+            f"AND (activity_id NOT IN (SELECT DISTINCT activity_id FROM hr_streams)"
+            # Streams stored before elevation was parsed have no altitude. The
+            # condition is deliberately narrow — the activity must report climbing
+            # for us to expect a trace — so an indoor session with genuinely no
+            # elevation is not re-fetched on every sync forever.
+            f"  OR (COALESCE(elevation_gain_m, 0) > 5 AND activity_id NOT IN"
+            f"      (SELECT DISTINCT activity_id FROM hr_streams"
+            f"       WHERE altitude_m IS NOT NULL))) "
             f"ORDER BY start_date DESC",
             list(sports),
         )

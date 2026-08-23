@@ -364,8 +364,56 @@ def activities_insight(data: dict, today: date) -> PageInsight:
                        bullets, "info")
 
 
+def lifetime_insight(data: dict, today: date) -> PageInsight:
+    """The long view: how far they have come, not whether this week is on track.
+
+    Deliberately a different question from every other page here. Weekly framing
+    is what makes training feel like treading water; the totals are what show it
+    is not.
+    """
+    from core.analysis import totals
+
+    acts = data["activities"]
+    if not acts:
+        return PageInsight("Nothing recorded yet.", [], "info")
+
+    tot = totals(acts)
+    bullets = [
+        f"{tot['sessions']} sessions, {tot['km']:,.0f} km and "
+        f"{tot['minutes'] / 60:,.0f} hours on record across "
+        f"{tot['weeks']:.0f} week(s) — about "
+        f"{tot['sessions'] / max(tot['weeks'], 1):.1f} sessions a week."
+    ]
+    per = tot["by_sport"]
+    ranked = sorted(((sp, r) for sp, r in per.items() if r.get("minutes")),
+                    key=lambda kv: -kv[1]["minutes"])
+    if ranked:
+        bullets.append("Time is split " + ", ".join(
+            f"{sp} {r['minutes'] / 60:.0f}h" for sp, r in ranked[:4]) + ".")
+    biggest = ranked[0][0] if ranked else None
+    if biggest and len(ranked) > 1:
+        share = ranked[0][1]["minutes"] / max(tot["minutes"], 1) * 100
+        if share > 60:
+            bullets.append(
+                f"{share:.0f}% of all your training time is {biggest}. For a "
+                f"triathlon that is worth knowing: the other two disciplines "
+                f"race on the same day."
+            )
+
+    records = data.get("records") or []
+    if records:
+        bullets.append(f"{len(records)} personal records on file from Garmin.")
+
+    weeks = tot["weeks"] or 0
+    tone = "info" if weeks < 8 else "success"
+    headline = ("Early days — this is the baseline everything later is measured "
+                "against." if weeks < 8 else "The long view.")
+    return PageInsight(headline, bullets, tone)
+
+
 PAGES = {
     "Overview": overview_insight,
+    "Lifetime": lifetime_insight,
     "Activities": activities_insight,
     "Fitness": fitness_insight,
     "Intensity": intensity_insight,

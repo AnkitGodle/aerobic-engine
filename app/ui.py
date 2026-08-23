@@ -98,6 +98,16 @@ CSS = """
   .ic-fig-note { font-size: .74rem; opacity: .55; margin-top: .1rem;
                  font-variant-numeric: tabular-nums; }
 
+  /* A hairline frame for a chart. Deliberately not the rounded, filled card
+     used for stats: a chart needs a boundary so it reads as one object, but a
+     heavy container competes with the plot for attention. */
+  [data-testid="stVerticalBlockBorderWrapper"] {
+      border-color: var(--ic-line) !important; border-radius: 6px !important;
+      background: var(--ic-surface-2); }
+  .ic-frame-title { font-size: .72rem; letter-spacing: .06em;
+                    text-transform: uppercase; opacity: .55;
+                    margin: 0 0 .15rem .05rem; }
+
   /* Dense two-column rows for "label ..... value" reference data. */
   .ic-rows { border-top: 1px solid var(--ic-line); margin: .1rem 0 1.1rem; }
   .ic-row { display: flex; justify-content: space-between; align-items: baseline;
@@ -230,6 +240,24 @@ def stats_row(items: list[dict]) -> None:
     for col, item in zip(cols, items):
         with col:
             stat(**item)
+
+
+@contextmanager
+def frame(title: str = ""):
+    """Hairline boundary around a chart, so it reads as one object.
+
+    Uses Streamlit's bordered container rather than a pair of raw divs: every
+    Streamlit element is wrapped in its own block, so opening a div in one
+    markdown call and closing it in another never actually contains what is
+    drawn between them. The border is restyled to a rule instead of the default
+    filled card, which competes with the plot for attention.
+    """
+    box = st.container(border=True)
+    with box:
+        if title:
+            st.markdown(f'<div class="ic-frame-title">{esc(title)}</div>',
+                        unsafe_allow_html=True)
+        yield
 
 
 def figures(items: list[dict]) -> None:
