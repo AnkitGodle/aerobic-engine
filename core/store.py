@@ -7,6 +7,7 @@ means reimplementing this module only — nothing above it imports sqlite3.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -39,6 +40,12 @@ def _check_identifier(name: str) -> str:
 
 def is_postgres(target: str) -> bool:
     return str(target).startswith(PG_PREFIXES)
+
+
+_FINGERPRINT_KEY = "schema_fingerprint"
+# Which targets this process has already migrated, so repeated short-lived
+# connections in one Streamlit run do not each re-check.
+_MIGRATED: dict[str, str] = {}
 
 SCHEMA: list[str] = [
     # --- v1 -------------------------------------------------------------
@@ -232,6 +239,15 @@ COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
 ]
 
 
+# Derived from the DDL rather than maintained by hand, so it cannot drift: any
+# change to a table or a column migration changes this, which is what tells an
+# existing database it needs migrating again.
+SCHEMA_FINGERPRINT = hashlib.sha256(
+    "\x00".join([*SCHEMA, *(f"{t}.{c} {d}" for t, c, d in COLUMN_MIGRATIONS)])
+    .encode("utf-8")
+).hexdigest()[:32]
+
+
 class Store:
     """Thin SQLite wrapper. Use as a context manager or call close()."""
 
@@ -322,28 +338,75 @@ class Store:
             raise
 
     def migrate(self) -> None:
-        """Apply schema statements. Idempotent — every statement is IF NOT EXISTS."""
+        """Apply schema statements. Idempotent — every statement is IF NOT EXISTS.
+
+        Skipped entirely when the schema already matches. That is not a
+        micro-optimisation: the statements are cheap on a local file but each one
+        is a network round trip to a managed Postgres, and re-running all 25 on
+        every connection cost about 1.8s — paid again on every page interaction,
+        because the UI opens a short-lived connection per state read.
+
+        The guard is a fingerprint of the schema itself rather than a hand-kept
+        version number, so it cannot fall out of step with the DDL above: change
+        a table and the fingerprint changes with it.
+        """
+        target = self.url if self.postgres else str(self.path)
+        if _MIGRATED.get(target) == SCHEMA_FINGERPRINT:
+            return
+        if self._schema_is_current():
+            _MIGRATED[target] = SCHEMA_FINGERPRINT
+            return
         try:
             self.execute(
                 "CREATE TABLE IF NOT EXISTS schema_meta (version INTEGER NOT NULL)"
             )
             for stmt in SCHEMA:
                 self.execute(stmt)
+            # One introspection query per table rather than per column: on a
+            # remote database the round trips dominate, not the work.
+            by_table: dict[str, set[str]] = {}
             for table, column, decl in COLUMN_MIGRATIONS:
-                if column not in self._columns(table):
+                if table not in by_table:
+                    by_table[table] = self._columns(table)
+                if column not in by_table[table]:
                     self.execute(
                         f"ALTER TABLE {table} ADD COLUMN {column} {decl}"
                     )
+                    by_table[table].add(column)
             row = self.execute("SELECT version FROM schema_meta").fetchone()
             if row is None:
                 self.execute("INSERT INTO schema_meta(version) VALUES (?)",
                              (len(SCHEMA),))
             else:
                 self.execute("UPDATE schema_meta SET version = ?", (len(SCHEMA),))
+            self.execute(
+                "INSERT INTO sync_state(key, value) VALUES (?,?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (_FINGERPRINT_KEY, SCHEMA_FINGERPRINT),
+            )
             self.conn.commit()
+            _MIGRATED[target] = SCHEMA_FINGERPRINT
         except Exception:
             self.conn.rollback()
             raise
+
+    def _schema_is_current(self) -> bool:
+        """One query: has this database already been migrated to this schema?
+
+        A miss is cheap and a false positive is impossible, because the stored
+        value is only written after a successful migration of this exact schema.
+        """
+        try:
+            row = self.execute(
+                "SELECT value FROM sync_state WHERE key = ?", (_FINGERPRINT_KEY,)
+            ).fetchone()
+        except Exception:
+            # A missing table is the expected miss on a fresh database. Postgres
+            # aborts the transaction on any error, so it has to be cleared before
+            # the migration itself can run.
+            self.conn.rollback()
+            return False
+        return bool(row) and row["value"] == SCHEMA_FINGERPRINT
 
     # -- generic helpers ------------------------------------------------
     def query(self, sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]:
@@ -825,27 +888,38 @@ class Store:
         return {r["key"]: r for r in self.query("SELECT * FROM ai_notes")}
 
     # -- misc -----------------------------------------------------------
+    COUNTED_TABLES = (
+        "activities", "activity_metrics", "hr_streams", "activity_zones",
+        "exercise_sets", "daily_wellness", "strength_log", "checkins",
+        "plans", "weekly_targets", "ai_notes",
+    )
+
     def counts(self) -> dict[str, int]:
-        out = {}
-        for t in (
-            "activities",
-            "activity_metrics",
-            "hr_streams",
-            "activity_zones",
-            "exercise_sets",
-            "daily_wellness",
-            "strength_log",
-            "checkins",
-            "plans",
-            "weekly_targets",
-            "ai_notes",
-        ):
-            out[t] = int(
-                self.execute(
-                    f"SELECT COUNT(*) AS n FROM {_check_identifier(t)}"
-                ).fetchone()["n"]
-            )
-        return out
+        """Row counts for every table, in a single round trip.
+
+        Eleven separate COUNT(*) queries cost nothing against a local file and
+        about a second against a managed Postgres, and this runs on every page
+        load. One SELECT with eleven scalar subqueries is the same work for the
+        database and a tenth of the latency.
+        """
+        cols = ", ".join(
+            f"(SELECT COUNT(*) FROM {_check_identifier(t)}) AS {_check_identifier(t)}"
+            for t in self.COUNTED_TABLES
+        )
+        # dict(), because sqlite3.Row supports indexing but not .get().
+        row = dict(self.execute(f"SELECT {cols}").fetchone() or {})
+        return {t: int(row.get(t) or 0) for t in self.COUNTED_TABLES}
+
+    def get_states(self, keys: Sequence[str]) -> dict[str, str | None]:
+        """Several state values in one query, for the same reason as counts()."""
+        keys = list(keys)
+        if not keys:
+            return {}
+        marks = ",".join("?" * len(keys))
+        rows = self.query(
+            f"SELECT key, value FROM sync_state WHERE key IN ({marks})", keys)
+        found = {r["key"]: r["value"] for r in rows}
+        return {k: found.get(k) for k in keys}
 
 
 def week_start_of(d: date) -> date:

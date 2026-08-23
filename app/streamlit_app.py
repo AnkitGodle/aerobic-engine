@@ -14,6 +14,7 @@ import hmac
 import logging
 import os
 import sys
+import threading
 import time
 import zlib
 from datetime import date, datetime, timedelta
@@ -128,8 +129,7 @@ def db_stamp() -> float:
         # cheap query per rerun, and unlike a constant it also notices a sync
         # run from the command line rather than from this page.
         try:
-            with Store(target) as s:
-                marker = s.get_state("last_sync") or ""
+            marker = with_store(lambda s: s.get_state("last_sync")) or ""
             return float(zlib.crc32(marker.encode("utf-8")))
         except Exception:  # noqa: BLE001 - a dead cache key beats a dead page
             log.warning("could not read the sync marker for the cache key")
@@ -140,7 +140,9 @@ def db_stamp() -> float:
 
 @st.cache_data(show_spinner=False)
 def load(stamp: float) -> dict:  # noqa: ARG001 - stamp is the cache key
-    with Store(db_path()) as s:
+    def read(s: Store) -> dict:
+        state = s.get_states(("last_sync", "athlete_name", "threshold_hr",
+                              "running_ftp", "cycling_ftp", "aerobic_ceiling_bpm"))
         return {
             "activities": s.activities(),
             "all_activities": s.activities(include_parents=True),
@@ -148,29 +150,79 @@ def load(stamp: float) -> dict:  # noqa: ARG001 - stamp is the cache key
             "zones": s.zones(), "strength": s.strength_log(),
             "sets": s.exercise_sets(), "checkins": s.checkins(limit=60),
             "counts": s.counts(), "targets": s.targets(), "notes": s.notes(),
-            "last_sync": s.get_state("last_sync"),
-            "name": s.get_state("athlete_name") or "",
-            "thresholds": {k: s.get_state(k)
+            "last_sync": state["last_sync"],
+            "name": state["athlete_name"] or "",
+            "thresholds": {k: state[k]
                            for k in ("threshold_hr", "running_ftp", "cycling_ftp")},
+            "aerobic_ceiling": state["aerobic_ceiling_bpm"],
             "plan": s.latest_plan(week_start_of(date.today())),
         }
+
+    return with_store(read)
 
 
 def refresh() -> None:
     load.clear()
 
 
+class _SharedStore:
+    """One reused database connection for the whole app, behind a lock.
+
+    Opening a connection per call was fine against a local file and expensive
+    against a managed Postgres: about half a second each, and the PIN gate alone
+    makes several, which is why unlocking felt broken.
+
+    Two details make reuse safe. st.cache_resource is global rather than
+    per-session and a psycopg connection must not be used from two threads at
+    once, so every access is serialised — a fine trade for a personal dashboard.
+    And an idle Neon project scales to zero, so a handle held between page views
+    can come back dead; a failed call reopens once and retries rather than
+    poisoning every read after it.
+    """
+
+    def __init__(self, target: str) -> None:
+        self.target = target
+        self._lock = threading.Lock()
+        self._store: Store | None = None
+
+    def _open(self) -> Store:
+        if self._store is None:
+            self._store = Store(self.target)
+        return self._store
+
+    def run(self, fn):
+        with self._lock:
+            try:
+                return fn(self._open())
+            except Exception:
+                log.info("database handle went stale; reopening")
+                try:
+                    if self._store is not None:
+                        self._store.close()
+                except Exception:  # noqa: BLE001 - already discarding it
+                    pass
+                self._store = None
+                return fn(self._open())
+
+
+@st.cache_resource(show_spinner=False)
+def shared_store(target: str) -> _SharedStore:
+    return _SharedStore(target)
+
+
+def with_store(fn):
+    """Run `fn(store)` on the shared connection."""
+    return shared_store(db_path()).run(fn)
+
+
 class _StateStore:
-    """Opens a short-lived connection per call: Streamlit reruns constantly, and a
-    handle held across a rerun ends up used after it was closed."""
+    """The small key/value interface PinGate needs, on the shared connection."""
 
     def get_state(self, key: str, default: str | None = None) -> str | None:
-        with Store(db_path()) as s:
-            return s.get_state(key, default)
+        return with_store(lambda s: s.get_state(key, default))
 
     def set_state(self, key: str, value: str) -> None:
-        with Store(db_path()) as s:
-            s.set_state(key, value)
+        with_store(lambda s: s.set_state(key, value))
 
 
 def pin_gate() -> PinGate:
@@ -1212,6 +1264,28 @@ def sidebar(data: dict) -> None:
 FILTER_SPORTS = ("run", "bike", "swim", "strength")
 
 
+PAGES = ("Today", "Progress", "Plan", "Log")
+
+
+def nav() -> str:
+    """Top-level navigation, and the single biggest thing keeping the app quick.
+
+    This used to be st.tabs, which executes every tab body on every rerun
+    whether or not you are looking at it. Four pages of charts cost about five
+    seconds a click; one page costs a little over one. Anything that reruns the
+    script — unlocking, moving a slider — paid for all four.
+
+    Kept in session state so a rerun does not bounce you back to Today.
+    """
+    current = st.session_state.get("page")
+    picked = st.segmented_control(
+        "Page", PAGES, default=current if current in PAGES else "Today",
+        key="nav", label_visibility="collapsed")
+    page = picked or current or "Today"
+    st.session_state["page"] = page
+    return page
+
+
 def filter_bar(data: dict, today: date) -> tuple[date, list[str]]:
     """Week and sport filters, top-right, above the tabs.
 
@@ -1357,10 +1431,15 @@ def week_picker(today: date) -> date:
             span += "  (next week)"
         labels[span] = mon
 
-    current = week_start_of(today)
     keys = list(labels)
+    # Remembered, like the sport toggle: having the week snap back to "this week"
+    # on every rerun made planning a past or future week impossible.
+    remembered = st.session_state.get("week_choice")
+    current = remembered if remembered in labels.values() else week_start_of(today)
     index = next((i for i, k in enumerate(keys) if labels[k] == current), 1)
-    picked = labels[st.selectbox("Week (Mon–Sun)", keys, index=index)]
+    picked = labels[st.selectbox("Week (Mon–Sun)", keys, index=index,
+                                 key="week_select")]
+    st.session_state["week_choice"] = picked
 
     if picked == this_monday:
         return date.today()          # keep "today" real for the current week
@@ -1396,7 +1475,7 @@ def unlock_control() -> None:
 
 
 def sync_control() -> None:
-    ok, why = sync_mod.can_sync(db_path())
+    ok, why = with_store(lambda s: sync_mod.can_sync(store=s))
     unlocked = writes_allowed()
     st.caption(why if unlocked else "Locked — enter your PIN to sync.")
     if st.button("Refresh from Garmin", type="primary", width="stretch",
@@ -1447,19 +1526,12 @@ def main() -> None:
         + "Garmin Forerunner 265 · base phase · synced "
         + (data["last_sync"] or "never")[:16].replace("T", " "))
 
+    page = nav()
     today, sports = filter_bar(data, today)
     data = scope_to_sports(data, sports)
 
-    today_tab, progress_tab, plan_tab, log_tab = st.tabs(
-        ["Today", "Progress", "Plan", "Log"])
-    with today_tab:
-        page_today(data, today)
-    with progress_tab:
-        page_progress(data, today)
-    with plan_tab:
-        page_plan(data, today)
-    with log_tab:
-        page_log(data, today)
+    {"Today": page_today, "Progress": page_progress,
+     "Plan": page_plan, "Log": page_log}[page](data, today)
 
 
 main()

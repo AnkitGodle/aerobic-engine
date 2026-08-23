@@ -437,6 +437,14 @@ def guard_status(db: str = DEFAULT_DB) -> dict[str, Any]:
         return GarminGuard(store).status()
 
 
-def can_sync(db: str = DEFAULT_DB) -> tuple[bool, str]:
-    with Store(db) as store:
+def can_sync(db: str = DEFAULT_DB, store: Store | None = None) -> tuple[bool, str]:
+    """Whether the rate guard would allow a sync right now.
+
+    Accepts an open store because the dashboard asks this on every rerun, and
+    opening a connection just to read the guard's counters cost more than the
+    check itself once the database moved off local disk.
+    """
+    if store is not None:
         return GarminGuard(store).can_sync()
+    with Store(db) as own:
+        return GarminGuard(own).can_sync()
