@@ -115,6 +115,7 @@ class SportEnvelope(BaseModel):
     """Per-sport bounds the AI must plan inside."""
 
     sport: str
+    enabled: bool = True
     min_sessions: int
     max_sessions: int
     max_minutes: float
@@ -187,6 +188,10 @@ class PlanDay(BaseModel):
     sport: str
     duration_min: int = Field(0, ge=0, le=480)
     target_zone: str = "Z2"
+    # A real bpm range, e.g. "112-129 bpm". Filled in by planner.enforce() from
+    # the athlete's own Garmin zone boundaries — never written by the model, which
+    # has no business inventing heart-rate numbers.
+    target_hr: str = ""
     purpose: str = ""
     exercise_ids: list[str] = Field(default_factory=list)
     why: str = ""
@@ -216,9 +221,6 @@ class WeekPlan(BaseModel):
 
     def minutes(self) -> float:
         return float(sum(d.duration_min for d in self.week_plan))
-
-    def sessions_for(self, sport: str) -> list[PlanDay]:
-        return [d for d in self.week_plan if d.sport == sport and d.duration_min > 0]
 
 
 class PlanPayload(BaseModel):

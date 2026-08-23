@@ -413,14 +413,12 @@ def chart_note(title: str, data: Any, backend: Any = None) -> str | None:
         backend = backend or ai.get_backend()
     except ai.AIUnavailable:
         return None
-    try:
-        text = backend.complete(
-            CHART_NOTE_SYSTEM,
-            json.dumps({"chart": title, "data": data}, indent=1, default=str)[:2500],
-        )
-    except Exception as exc:  # noqa: BLE001 - a caption must never break a page
-        log.info("Chart note unavailable: %s", exc)
-        return None
+    # AIUnavailable propagates on purpose: the sync-time generator pauses and
+    # retries on a rate limit, which it cannot do if this swallows it.
+    text = backend.complete(
+        CHART_NOTE_SYSTEM,
+        json.dumps({"chart": title, "data": data}, indent=1, default=str)[:2500],
+    )
     return (text or "").strip().strip('"').strip()[:180] or None
 
 
@@ -433,10 +431,9 @@ def narrate(page: str, insight: PageInsight, backend: Any = None) -> str | None:
     except ai.AIUnavailable:
         return None
     payload = {"page": page, **insight.as_facts()}
-    try:
-        text = backend.complete(NARRATE_SYSTEM, json.dumps(payload, indent=2))
-    except Exception as exc:  # noqa: BLE001
-        log.info("AI narration unavailable: %s", exc)
-        return None
+    # AIUnavailable propagates on purpose: the sync-time generator pauses for
+    # the interval the provider asked for, which it cannot do if this swallows it.
+    text = backend.complete(NARRATE_SYSTEM,
+                            json.dumps(payload, indent=2, default=str))
     text = (text or "").strip()
     return text[:900] or None

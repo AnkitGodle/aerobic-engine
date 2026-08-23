@@ -78,7 +78,9 @@ def test_request_shape_is_openai_compatible(groq, monkeypatch):
     assert roles == ["system", "user"]
 
 
-def test_rate_limit_is_actionable_not_a_crash(groq, monkeypatch):
+def test_rate_limit_walks_the_model_chain_then_reports(groq, monkeypatch):
+    """Providers meter per model, so a 429 tries the next one — and the message
+    names whichever model was tried last rather than crashing."""
     def raise_429(req, timeout=None):
         raise urllib.error.HTTPError(
             req.full_url, 429, "Too Many Requests", {},
@@ -89,8 +91,43 @@ def test_rate_limit_is_actionable_not_a_crash(groq, monkeypatch):
         groq.complete("s", "u")
     msg = str(e.value)
     assert "rate limit" in msg.lower()
-    assert "8K tokens/min" in msg, "the message must name the limit that was hit"
+    # The chain is exhausted, so the last model tried is the one named.
+    assert groq.models[-1] in msg, "the message must name the model that was metered"
     assert "TPM exceeded" in msg, "the provider's own detail should survive"
+    assert e.value.advance_model, "a 429 must advance the model, never retry it"
+
+
+def test_a_429_on_one_model_succeeds_on_the_next(groq, monkeypatch):
+    """The whole point of the chain: separate quota buckets per model."""
+    import io
+    import urllib.error
+
+    seen: list[str] = []
+
+    def opener(req, timeout=None):
+        model = json.loads(req.data)["model"]
+        seen.append(model)
+        if model == groq.models[0]:
+            raise urllib.error.HTTPError(
+                req.full_url, 429, "Too Many", {},
+                io.BytesIO(json.dumps({"error": {"message": "quota"}}).encode()))
+
+        class Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return json.dumps(
+                    {"choices": [{"message": {"content": "second model"}}]}).encode()
+
+        return Resp()
+
+    monkeypatch.setattr("urllib.request.urlopen", opener)
+    assert groq.complete("s", "u") == "second model"
+    assert len(seen) == 2 and seen[0] != seen[1]
 
 
 def test_an_empty_response_does_not_silently_pass(groq, monkeypatch):

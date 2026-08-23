@@ -75,6 +75,20 @@ is not volume — it is that their easy sessions are not easy. In that case:
 same pace. Negative is progress. If it is positive while intensity is high, the \
 athlete is digging a hole: hold volume flat rather than adding.
 
+`history.recent_sessions` is the last dozen sessions with their durations, heart \
+rates and whether each counted as steady aerobic work. Use it. Referring to what \
+actually happened — "your last two runs both sat above threshold" — is worth more \
+than a generic instruction, and `why_not_steady` tells you exactly why a session \
+was excluded from the fitness trend.
+
+`envelope.heart_rate_zones_bpm` gives this athlete's real zone boundaries. You \
+may mention them in "why" (for example "keep it under 130"), but do NOT put a \
+heart-rate range in any other field: the exact target is attached in code after \
+you answer, so it is always correct.
+
+`envelope.sports_switched_off` lists sports the athlete has turned off. Never \
+schedule them, and do not comment on their absence.
+
 Judgement you DO own, within those limits:
 - Shifting sessions between the remaining days to fit the athlete's stated time \
 and how they feel.
@@ -119,6 +133,8 @@ class AIUnavailable(RuntimeError):
     """
 
     retryable = False
+    advance_model = False
+    retry_after: float | None = None
 
 
 class AnthropicBackend:
@@ -383,6 +399,8 @@ class OpenAICompatBackend:
                     return self._post(system, user, json_mode, model=model)
                 except AIUnavailable as exc:
                     last = exc
+                    if getattr(exc, "advance_model", False):
+                        break        # this model is metered out; try the next
                     if not getattr(exc, "retryable", False):
                         raise
                     if attempt < RETRY_ATTEMPTS - 1:
@@ -428,11 +446,15 @@ class OpenAICompatBackend:
             except Exception:  # noqa: BLE001
                 pass
             if exc.code == 429:
-                raise AIUnavailable(
-                    f"{self.name} rate limit reached "
-                    f"({self.spec.get('free', 'see the provider console')}). "
-                    f"{detail}".strip()
-                ) from exc
+                err = AIUnavailable(
+                    f"{self.name} rate limit reached on {body['model']}. "
+                    f"{detail}".strip())
+                # Providers meter per model, so the next model in the chain has
+                # its own bucket — worth trying. Retrying the SAME model is not:
+                # that just spends the next window too.
+                err.advance_model = True
+                err.retry_after = _retry_after_seconds(detail)
+                raise err from exc
             if exc.code == 404:
                 err = AIUnavailable(
                     f"{self.name}: model {body['model']!r} not available. "
@@ -481,6 +503,18 @@ class NullBackend:
 
     def complete(self, system: str, user: str, json_mode: bool = False) -> str:
         raise AIUnavailable("AI_BACKEND=none")
+
+
+def _retry_after_seconds(detail: str) -> float | None:
+    """Google puts "Please retry in 16.528294029s" in the 429 body. Use it —
+    guessing a backoff when the provider has told you the number is silly."""
+    m = re.search(r"retry in ([\d.]+)\s*s", detail or "", re.I)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            return None
+    return None
 
 
 def get_backend(name: str | None = None) -> LLMBackend:

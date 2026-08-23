@@ -342,10 +342,6 @@ def sets_to_log_rows(
     return rows
 
 
-def is_valid_exercise(exercise_id: str) -> bool:
-    return exercise_id in LIBRARY_IDS
-
-
 def validate_exercise_ids(ids: Sequence[str]) -> list[str]:
     """Drop anything the AI invented. Order preserved, duplicates removed."""
     seen: set[str] = set()

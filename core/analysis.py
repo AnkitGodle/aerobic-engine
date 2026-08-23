@@ -546,6 +546,44 @@ ZONE_LABELS = {
 }
 
 
+def zone_bounds(zone_rows: Sequence[dict[str, Any]]) -> dict[int, tuple[int, int | None]]:
+    """The athlete's own heart-rate zone boundaries, in bpm.
+
+    Taken from what Garmin reported per activity rather than derived from a
+    max-HR formula, so the numbers match what the watch will show mid-session.
+    Returns {zone: (low, high)}; the top zone has no upper bound.
+    """
+    lows: dict[int, float] = {}
+    for r in zone_rows:
+        z = int(r.get("zone_number") or 0)
+        low = r.get("zone_low_bpm")
+        if z and low:
+            # Garmin can revise the boundaries; the most recent wins.
+            lows[z] = float(low)
+    if not lows:
+        return {}
+    out: dict[int, tuple[int, int | None]] = {}
+    for z in sorted(lows):
+        nxt = lows.get(z + 1)
+        out[z] = (int(round(lows[z])), int(round(nxt)) - 1 if nxt else None)
+    return out
+
+
+def zone_target(bounds: dict[int, tuple[int, int | None]], zone: str) -> str | None:
+    """"Z2" -> "112-129 bpm". None when the zone is not a numbered one."""
+    if not bounds or not zone or not zone.upper().startswith("Z"):
+        return None
+    try:
+        z = int(zone.upper().lstrip("Z"))
+    except ValueError:
+        return None
+    span = bounds.get(z)
+    if not span:
+        return None
+    low, high = span
+    return f"{low}-{high} bpm" if high else f"{low}+ bpm"
+
+
 def zone_distribution(
     zone_rows: Sequence[dict[str, Any]],
     sport: str | None = None,

@@ -17,7 +17,13 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-DEFAULT_DB = os.getenv("DATABASE_URL") or os.getenv("IRON_COACH_DB", "data/iron_coach.db")
+# AEROBIC_ENGINE_DB is the current name; IRON_COACH_DB is still honoured because
+# it is what existing local setups (and this repo's own .env) already use.
+DEFAULT_DB = (
+    os.getenv("DATABASE_URL")
+    or os.getenv("AEROBIC_ENGINE_DB")
+    or os.getenv("IRON_COACH_DB", "data/iron_coach.db")
+)
 
 PG_PREFIXES = ("postgres://", "postgresql://", "postgresql+psycopg://")
 
@@ -197,6 +203,15 @@ SCHEMA: list[str] = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS ai_notes (
+        key          TEXT PRIMARY KEY,   -- page name, or chart identifier
+        kind         TEXT,               -- page | chart
+        text         TEXT NOT NULL,
+        model        TEXT,
+        generated_at TEXT NOT NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS sync_state (
         key   TEXT PRIMARY KEY,
         value TEXT
@@ -214,6 +229,7 @@ COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("daily_wellness", "nap_seconds", "REAL"),
     ("daily_wellness", "battery_charged", "REAL"),
     ("daily_wellness", "battery_drained", "REAL"),
+    ("weekly_targets", "enabled", "INTEGER DEFAULT 1"),
 ]
 
 
@@ -286,12 +302,6 @@ class Store:
             row = cur.fetchone()
             return int(row["id"]) if row else 0
         return int(self.execute(statement, params).lastrowid or 0)
-
-    def _lastrowid(self, cur: Any) -> int:
-        if self.postgres:
-            row = cur.fetchone() if cur.description else None
-            return int(row["id"]) if row and "id" in row else 0
-        return int(cur.lastrowid or 0)
 
     # -- lifecycle ------------------------------------------------------
     def __enter__(self) -> Store:
@@ -732,13 +742,6 @@ class Store:
         row["plan"] = json.loads(row["plan_json"])
         return row
 
-    def plan_history(self, limit: int = 10) -> list[dict[str, Any]]:
-        return self.query(
-            "SELECT id, week_start, created_at, source, flags_json FROM plans "
-            "ORDER BY created_at DESC LIMIT ?",
-            (limit,),
-        )
-
     # -- weekly targets (athlete's own intent) ---------------------------
     def set_targets(self, targets: Iterable[dict[str, Any]]) -> int:
         rows = [t for t in targets if t.get("sport")]
@@ -748,27 +751,56 @@ class Store:
         with self.tx():
             self.executemany(
                 "INSERT INTO weekly_targets(sport, sessions, minutes, distance_km,"
-                " updated_at) VALUES (?,?,?,?,?) ON CONFLICT(sport) DO UPDATE SET"
+                " enabled, updated_at) VALUES (?,?,?,?,?,?)"
+                " ON CONFLICT(sport) DO UPDATE SET"
                 " sessions=excluded.sessions, minutes=excluded.minutes,"
-                " distance_km=excluded.distance_km, updated_at=excluded.updated_at",
+                " distance_km=excluded.distance_km, enabled=excluded.enabled,"
+                " updated_at=excluded.updated_at",
                 [
                     (t["sport"], t.get("sessions"), t.get("minutes"),
-                     t.get("distance_km"), now)
+                     t.get("distance_km"), int(t.get("enabled", 1)), now)
                     for t in rows
                 ],
             )
         return len(rows)
 
     def targets(self) -> dict[str, dict[str, Any]]:
+        """Rows the athlete has actually set. A disabled sport is kept, so the
+        planner knows to exclude it rather than treating it as unset."""
         return {
             r["sport"]: r
             for r in self.query("SELECT * FROM weekly_targets")
             if (r.get("sessions") or 0) > 0 or (r.get("minutes") or 0) > 0
+            or not r.get("enabled", 1)
         }
 
     def clear_targets(self) -> None:
         with self.tx():
             self.execute("DELETE FROM weekly_targets")
+
+    # -- AI notes, written at sync time and read on render ---------------
+    def set_notes(self, notes: Iterable[dict[str, Any]]) -> int:
+        rows = [n for n in notes if n.get("key") and n.get("text")]
+        if not rows:
+            return 0
+        now = datetime.now().isoformat(timespec="seconds")
+        with self.tx():
+            self.executemany(
+                "INSERT INTO ai_notes(key, kind, text, model, generated_at)"
+                " VALUES (?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET"
+                " kind=excluded.kind, text=excluded.text, model=excluded.model,"
+                " generated_at=excluded.generated_at",
+                [(n["key"], n.get("kind", "page"), n["text"], n.get("model"), now)
+                 for n in rows],
+            )
+        return len(rows)
+
+    def notes(self) -> dict[str, dict[str, Any]]:
+        return {r["key"]: r for r in self.query("SELECT * FROM ai_notes")}
+
+    def clear_notes(self) -> None:
+        with self.tx():
+            self.execute("DELETE FROM ai_notes")
 
     # -- misc -----------------------------------------------------------
     def counts(self) -> dict[str, int]:
@@ -784,6 +816,7 @@ class Store:
             "checkins",
             "plans",
             "weekly_targets",
+            "ai_notes",
         ):
             out[t] = int(
                 self.execute(

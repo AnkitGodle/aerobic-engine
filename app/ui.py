@@ -256,8 +256,9 @@ def week_strip(days: list[dict]) -> None:
             f'<div class="ic-item{" done" if it.get("done") else ""}">'
             f'{SPORT_EMOJI.get(it["sport"], "•")} <b>{esc(it["sport"])}</b>'
             + (f' {esc(it["minutes"])}′' if it.get("minutes") else "")
-            + (f'<div class="ic-item-zone">{esc(it["zone"])}</div>'
-               if it.get("zone") else "")
+            + (f'<div class="ic-item-zone">{esc(it["zone"])}'
+               + (f' · {esc(it["hr"])}' if it.get("hr") else "")
+               + "</div>" if it.get("zone") or it.get("hr") else "")
             + "</div>"
             for it in items
         ) or '<div class="ic-item" style="opacity:.4">rest</div>'

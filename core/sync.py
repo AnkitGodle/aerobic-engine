@@ -9,6 +9,8 @@ lock, so two callers cannot run at once.
 from __future__ import annotations
 
 import logging
+import os
+import time
 from datetime import date, datetime, timedelta
 from typing import Any, Callable
 
@@ -79,6 +81,137 @@ def import_exercise_sets(store: Store, client: GarminClient) -> tuple[int, int]:
             logged += store.log_strength(rows)
             already.add(act["start_date"])
     return sets_stored, logged
+
+
+def generate_ai_notes(db: str = DEFAULT_DB, today: date | None = None) -> int:
+    """Write every page summary and chart reading into the database.
+
+    Done here, once per sync, rather than on page render. Streamlit executes the
+    body of every tab on every run, so inline AI calls fired ten times per page
+    load and took it from 1.5 seconds to 92. Generating at sync time costs about
+    ten calls after each Garmin refresh — comfortably inside a free tier — and
+    the dashboard then reads plain text out of SQLite.
+    """
+    from core import ai, insights
+
+    if not ai.available():
+        log.info("No AI backend configured; skipping summaries")
+        return 0
+
+    today = today or date.today()
+    # Free tiers cap requests per minute, and a dozen summaries fired back to back
+    # trip that every time. This runs after a Garmin sync, not in front of a
+    # waiting user, so it can simply go slowly. A rate limit pauses and retries
+    # once rather than losing the summary.
+    gap = float(os.getenv("AI_NOTE_GAP_SECONDS", "6"))
+    store = Store(db)
+    try:
+        data = {
+            "activities": store.activities(),
+            "all_activities": store.activities(include_parents=True),
+            "wellness": store.wellness(), "zones": store.zones(),
+            "strength": store.strength_log(), "sets": store.exercise_sets(),
+            "race": store.race_predictions(),
+        }
+        model = getattr(ai.get_backend(), "model", "")
+        rows: list[dict[str, Any]] = []
+
+        jobs: list[tuple[str, str, Any]] = [
+            ("page", page, insights.for_page(page, data, today))
+            for page in insights.PAGES
+        ]
+        jobs += [("chart", key, (title, payload))
+                 for key, title, payload in _chart_inputs(data, today)]
+
+        failed = 0
+        for i, (kind, key, arg) in enumerate(jobs):
+            if arg is None:
+                continue
+            if i:
+                time.sleep(gap)
+            text = _one_note(kind, key, arg, gap)
+            if text:
+                rows.append({"key": key, "kind": kind, "text": text, "model": model})
+            else:
+                failed += 1
+        if failed:
+            log.info("%d of %d summaries could not be generated this run",
+                     failed, len(jobs))
+
+        written = store.set_notes(rows)
+        store.set_state("ai_notes_at", datetime.now().isoformat(timespec="seconds"))
+        log.info("Wrote %d AI summaries", written)
+        return written
+    finally:
+        store.close()
+
+
+def _one_note(kind: str, key: str, arg: Any, gap: float) -> str | None:
+    """Generate one summary, pausing once if the provider rate-limits us."""
+    from core import ai, insights
+
+    for attempt in (1, 2):
+        try:
+            if kind == "page":
+                return insights.narrate(key, arg)
+            title, payload = arg
+            return insights.chart_note(title, payload)
+        except ai.AIUnavailable as exc:
+            wait = getattr(exc, "retry_after", None)
+            if attempt == 1 and (wait or "rate limit" in str(exc).lower()):
+                wait = (wait or gap * 4) + 1.0   # a second of headroom
+                log.info("Rate limited on %s; waiting %.0fs as asked", key, wait)
+                time.sleep(wait)
+                continue
+            return None
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
+def _chart_inputs(data: dict[str, Any], today: date) -> list[tuple[str, str, Any]]:
+    """The charts worth a sentence, and the numbers behind each."""
+    from core.analysis import (
+        ef_points, hr_points, polarisation, week_summaries, zone_distribution,
+    )
+    from core.schemas import ENDURANCE_SPORTS
+
+    acts, zones = data["activities"], data["zones"]
+    since = today - timedelta(days=28)
+    out: list[tuple[str, str, Any]] = []
+
+    hr = {sp: [{"date": str(p["date"]), "bpm": p["hr_at_reference"],
+                "min": round(p["minutes"])}
+               for p in hr_points(acts, sp) if p.get("hr_at_reference")]
+          for sp in ENDURANCE_SPORTS}
+    if any(hr.values()):
+        out.append(("chart:training_hr",
+                    "Heart rate at the athlete's usual pace, by sport "
+                    "(bpm; falling is better)", hr))
+
+    if zones:
+        out.append(("chart:intensity",
+                    "Share of training time by intensity, last 28 days "
+                    "(base target: 70%+ easy, under 15% hard)",
+                    {"percent": polarisation(zones, since=since),
+                     "by_sport_minutes": {sp: zone_distribution(zones, sport=sp,
+                                                                since=since)
+                                          for sp in ENDURANCE_SPORTS}}))
+
+    ef = {sp: [{"date": str(p.date), "ef": round(p.ef, 3), "steady": p.is_steady}
+               for p in ef_points(acts, sp)] for sp in ENDURANCE_SPORTS}
+    if any(ef.values()):
+        out.append(("chart:efficiency",
+                    "Efficiency (speed or watts per heartbeat) as % change from "
+                    "each sport's first session", ef))
+
+    weeks = week_summaries(acts, weeks=12, as_of=today,
+                           strength_rows=data["strength"])
+    done = [{"week": str(w.week_start), "min": round(w.total_minutes)}
+            for w in weeks if w.total_minutes > 0]
+    if done:
+        out.append(("chart:volume", "Weekly training minutes completed", done))
+    return out
 
 
 def recompute_metrics(
@@ -239,6 +372,14 @@ def _sync_locked(
     store.set_state("last_sync", datetime.now().isoformat(timespec="seconds"))
     log.info("Sync complete: %s", stats)
     store.close()
+
+    if progress:
+        progress("Writing summaries…")
+    try:
+        stats["ai_notes"] = generate_ai_notes(db)
+    except Exception as exc:  # noqa: BLE001 - summaries are never worth a failed sync
+        log.warning("Could not write AI summaries: %s", exc)
+        stats["ai_notes"] = 0
     return stats
 
 

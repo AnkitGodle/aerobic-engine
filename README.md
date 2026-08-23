@@ -104,6 +104,13 @@ AI_BACKEND=groq
 GROQ_API_KEY=gsk_...
 ```
 
+Summaries and chart readings are generated **once per Garmin sync** and stored in
+the database, not on page render. That matters more than it sounds: Streamlit runs
+the body of every tab on every render, so inline AI calls fired ten times per page
+load and took it from 1.5 seconds to 92. Generation is paced to the interval the
+provider asks for, and a 429 moves to the next model in the chain because quotas
+are metered per model.
+
 The free plan's binding limit is **8,000 tokens per minute** (plus 30 requests a
 minute, 1,000 a day). A planner call is around 2,500 tokens, so that is
 comfortable — summaries and chart captions are cached for 30–60 minutes so a page

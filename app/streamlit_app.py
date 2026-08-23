@@ -18,7 +18,6 @@ import time
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
-from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -32,12 +31,12 @@ import app.ui as ui  # noqa: E402
 from core import ai, insights, planner, strength, sync as sync_mod  # noqa: E402
 from core.analysis import (  # noqa: E402
     ZONE_LABELS,
+    zone_bounds,
     baseline_trend,
     hr_points,
     hr_trend,
     ef_data_status,
     ef_points,
-    ols_slope,
     polarisation,
     recovery_signals,
     totals,
@@ -110,7 +109,9 @@ def _secret(name: str, default: str = "") -> str:
 
 
 def db_path() -> str:
-    return os.getenv("IRON_COACH_DB", DEFAULT_DB)
+    return (os.getenv("AEROBIC_ENGINE_DB")
+            or os.getenv("IRON_COACH_DB")
+            or DEFAULT_DB)
 
 
 def db_stamp() -> float:
@@ -119,7 +120,7 @@ def db_stamp() -> float:
 
 
 @st.cache_data(show_spinner=False)
-def load(stamp: float) -> dict:
+def load(stamp: float) -> dict:  # noqa: ARG001 - stamp is the cache key
     with Store(db_path()) as s:
         return {
             "activities": s.activities(),
@@ -127,7 +128,7 @@ def load(stamp: float) -> dict:
             "wellness": s.wellness(), "race": s.race_predictions(),
             "zones": s.zones(), "strength": s.strength_log(),
             "sets": s.exercise_sets(), "checkins": s.checkins(limit=60),
-            "counts": s.counts(), "targets": s.targets(),
+            "counts": s.counts(), "targets": s.targets(), "notes": s.notes(),
             "last_sync": s.get_state("last_sync"),
             "name": s.get_state("athlete_name") or "",
             "thresholds": {k: s.get_state(f"threshold_{k}")
@@ -238,61 +239,28 @@ def pace_str(sport: str, dist_m: float | None, dur_s: float | None) -> str:
 
 
 def insight_banner(page: str, data: dict, today: date) -> None:
-    """The one thing worth reading on this page, in words."""
+    """Deterministic headline and bullets, plus the AI paragraph if one was
+    written at sync time. No live model call: see `core.sync.generate_ai_notes`
+    for why (Streamlit runs every tab body on every render)."""
     ins = insights.for_page(page, data, today)
     if ins is None:
         return
     tone = {"success": "good", "warning": "caution", "error": "bad",
             "info": "neutral"}[ins.tone]
-    body = ""
-    if ai.available():
-        try:
-            import json as _json
-            body = _narrate(page, _json.dumps(ins.as_facts(), sort_keys=True)) or ""
-        except Exception:
-            body = ""
-    if not body:
-        body = " ".join(b.replace("**", "") for b in ins.bullets[:2])
+    prose = (data.get("notes") or {}).get(page, {}).get("text")
+    body = prose or " ".join(b.replace("**", "") for b in ins.bullets[:2])
     ui.banner(ins.headline, body, tone)
-    remaining = ins.bullets[2:]
-    if remaining:
-        # Narrow column so it reads as a footnote to the banner rather than a
-        # full-width bar of its own.
-        with st.columns([2, 1])[0], st.expander("More detail"):
+    if len(ins.bullets) > (0 if prose else 2):
+        with st.expander("The numbers behind that"):
             for b in ins.bullets:
                 st.markdown(f"- {b}")
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def _chart_note(title: str, data_json: str) -> str | None:
-    """Cached for an hour. Groq's free tier is capped on tokens per minute, and
-    six chart captions plus a planner call would otherwise spend it on a reload."""
-    import json as _json
-
-    from core.insights import chart_note
-    return chart_note(title, _json.loads(data_json))
-
-
-def chart_ai_note(title: str, data: Any) -> None:
-    """One AI sentence reading the chart above it. Silent with no AI configured."""
-    if not ai.available() or not data:
-        return
-    import json as _json
-    try:
-        note = _chart_note(title, _json.dumps(data, sort_keys=True, default=str))
-    except Exception:  # noqa: BLE001 - a caption must never break a page
-        return
-    if note:
-        st.caption(f"✦ {note}")
-
-
-@st.cache_data(show_spinner=False, ttl=1800)
-def _narrate(page: str, facts_json: str) -> str | None:
-    import json as _json
-
-    from core.insights import PageInsight, narrate
-    f = _json.loads(facts_json)
-    return narrate(page, PageInsight(f["headline"], f["points"]))
+def chart_ai_note(key: str, notes: dict) -> None:
+    """The stored one-line reading for a chart, if the last sync wrote one."""
+    text = (notes or {}).get(f"chart:{key}", {}).get("text")
+    if text:
+        st.caption(f"✦ {text}")
 
 
 # --------------------------------------------------------------------------
@@ -334,7 +302,10 @@ def page_today(data: dict, today: date) -> None:
         elif todo:
             d = todo[0]
             bits = [f"{d['duration_min']} min"] if d["duration_min"] else []
-            if d.get("target_zone") not in (None, "n/a", ""):
+            if d.get("target_hr"):
+                # The number the athlete actually watches mid-session.
+                bits.append(f"{d['target_hr']} ({d.get('target_zone', '')})".strip())
+            elif d.get("target_zone") not in (None, "n/a", ""):
                 bits.append(d["target_zone"])
             names = [strength.EXERCISES[e].name for e in d.get("exercise_ids", [])
                      if e in strength.EXERCISES]
@@ -390,7 +361,7 @@ def page_today(data: dict, today: date) -> None:
 
 
 @st.cache_data(show_spinner=False, ttl=900)
-def _next_week_plan(stamp: float, iso_today: str) -> dict | None:
+def _next_week_plan(stamp: float, iso_today: str) -> dict | None:  # noqa: ARG001
     """Computed on demand and cached: it is a preview, not a saved plan."""
     try:
         with Store(db_path()) as s:
@@ -418,6 +389,7 @@ def week_cells(plan: dict | None, today: date,
         items = [
             {"sport": e["sport"], "minutes": e["duration_min"],
              "zone": "" if e.get("target_zone") in (None, "n/a", "") else e["target_zone"],
+             "hr": e.get("target_hr") or "",
              "done": e.get("purpose") == "completed"}
             for e in entries if e["day"] == name and e["sport"] != "rest"
         ]
@@ -480,20 +452,20 @@ def page_progress(data: dict, today: date) -> None:
     with a, ui.card("Heart rate during training",
                     "Each point is the heart rate this session's efficiency implies "
                     "at your usual pace. Down is progress."):
-        training_hr_block(acts, today)
+        training_hr_block(acts, today, data.get("notes"))
     with b, ui.card("Where your effort goes",
                     "Base phase wants most time easy. Hard work costs recovery "
                     "without adding much base."):
-        intensity_block(zones, today)
+        intensity_block(zones, today, data.get("notes"))
 
     c, d = st.columns(2, gap="medium")
     with c, ui.card("Efficiency against your own baseline",
                     "Percent change in speed or watts per heartbeat, so all three "
                     "sports share one axis."):
-        efficiency_block(acts, today)
+        efficiency_block(acts, today, data.get("notes"))
     with d, ui.card("Volume, and the ceiling ahead",
                     "At most 10% growth a week, every fourth week a deload."):
-        volume_chart(data, today)
+        volume_chart(data, today, data.get("notes"))
 
     e, f = st.columns(2, gap="medium")
     with e, ui.card("Daily signals", "Overnight measurements, against baseline."):
@@ -504,7 +476,8 @@ def page_progress(data: dict, today: date) -> None:
         drift_block(acts)
 
 
-def intensity_block(zones: list[dict], today: date) -> None:
+def intensity_block(zones: list[dict], today: date,
+                    notes: dict | None = None) -> None:
     if not zones:
         st.caption("No zone data yet — sync from Garmin.")
         return
@@ -517,12 +490,7 @@ def intensity_block(zones: list[dict], today: date) -> None:
                else "Inverted: base phase wants roughly the reverse of this."
                if pol["hard"] >= 35 else "Drifting harder than base phase wants.")
     st.caption(f"Last 28 days. {verdict}")
-    chart_ai_note("Share of training time by intensity, last 28 days "
-                  "(base phase target: 70%+ easy, under 15% hard)",
-                  {"percent": pol,
-                   "by_sport_minutes": {sp: zone_distribution(zones, sport=sp,
-                                                              since=since)
-                                        for sp in ENDURANCE_SPORTS}})
+    chart_ai_note("intensity", notes)
     with st.expander("Zone breakdown by sport"):
         for sport in ENDURANCE_SPORTS:
             sp = zone_distribution(zones, sport=sport, since=since)
@@ -535,7 +503,8 @@ def intensity_block(zones: list[dict], today: date) -> None:
                                for z in range(1, 6)])
 
 
-def efficiency_block(acts: list[dict], today: date) -> None:
+def efficiency_block(acts: list[dict], today: date,
+                     notes: dict | None = None) -> None:
     """One chart for all three sports.
 
     Efficiency is in different units per sport — watts per beat on the bike,
@@ -566,11 +535,7 @@ def efficiency_block(acts: list[dict], today: date) -> None:
     fig.add_hline(y=0, line_dash="dot", line_color="rgba(140,158,176,.5)")
     fig.update_layout(yaxis_title="% vs first session")
     ui.chart(fig, 200)
-    chart_ai_note("Efficiency (speed or watts per heartbeat) as % change from each "
-                  "sport's first session",
-                  {sp: [{"date": str(p.date), "ef": round(p.ef, 3),
-                         "steady": p.is_steady} for p in ef_points(acts, sp)]
-                   for sp in ENDURANCE_SPORTS if ef_points(acts, sp)})
+    chart_ai_note("efficiency", notes)
     statuses = [ef_data_status(acts, s) for s in ENDURANCE_SPORTS]
     short = [s for s in statuses if s["total"] and s["needed_for_verdict"]]
     if short:
@@ -592,7 +557,8 @@ def drift_block(acts: list[dict]) -> None:
     ui.chart(fig, 200)
 
 
-def training_hr_block(acts: list[dict], today: date) -> None:
+def training_hr_block(acts: list[dict], today: date,
+                      notes: dict | None = None) -> None:
     """All sports on one axis, so this is one chart rather than three."""
     view = st.radio("View", ["At your usual pace", "Raw average"], horizontal=True,
                     index=0, label_visibility="collapsed", key="hr_view")
@@ -633,11 +599,7 @@ def training_hr_block(acts: list[dict], today: date) -> None:
         return
     fig.update_layout(yaxis_title="bpm")
     ui.chart(fig, 200)
-    chart_ai_note(
-        "Heart rate at the athlete's usual pace, by sport (bpm; falling is better)",
-        {sp: [{"date": str(p["date"]), "bpm": p[field], "min": round(p["minutes"])}
-              for p in hr_points(acts, sp) if p.get(field)]
-         for sp in ENDURANCE_SPORTS if any(p.get(field) for p in hr_points(acts, sp))})
+    chart_ai_note("training_hr", notes)
     if notes:
         st.caption("Change at the same pace: " + " · ".join(notes)
                    + " (negative is progress).")
@@ -678,48 +640,8 @@ def trend_chart(wl: list[dict], today: date) -> None:
     ui.chart(fig, 200)
 
 
-def ef_chart(acts: list[dict], steady_only: bool) -> None:
-    any_drawn = False
-    for sport in ENDURANCE_SPORTS:
-        pts = ef_points(acts, sport)
-        if len(pts) < 2:
-            continue
-        any_drawn = True
-        df = pd.DataFrame([{"date": p.date, "EF": p.ef, "hr": p.avg_hr,
-                            "min": round(p.duration_min),
-                            "kind": "steady aerobic" if p.is_steady else "harder effort"}
-                           for p in pts])
-        fig = go.Figure()
-        for kind, colr in (("steady aerobic", SPORT_COLOR[sport]),
-                           ("harder effort", ui.TONE_COLOR["neutral"])):
-            sub = df[df["kind"] == kind]
-            if sub.empty:
-                continue
-            fig.add_scatter(x=sub["date"], y=sub["EF"], mode="markers", name=kind,
-                            marker=dict(size=11, color=colr,
-                                        line=dict(width=0)),
-                            customdata=sub[["hr", "min"]],
-                            hovertemplate="%{x|%a %d %b}<br>EF %{y:.3f}<br>"
-                                          "HR %{customdata[0]:.0f} · "
-                                          "%{customdata[1]} min<extra></extra>")
-        tdf = df if not steady_only else df[df["kind"] == "steady aerobic"]
-        if len(tdf) >= 3:
-            x = (pd.to_datetime(tdf["date"]) - pd.to_datetime(tdf["date"]).min()).dt.days
-            slope = ols_slope(x.tolist(), tdf["EF"].tolist())
-            if slope is not None:
-                fig.add_scatter(x=tdf["date"],
-                                y=tdf["EF"].mean() + slope * (x - x.mean()),
-                                mode="lines", name="trend",
-                                line=dict(color=SPORT_COLOR[sport], width=2,
-                                          dash="dash"))
-        st.markdown(f"**{EMOJI[sport]} {sport.title()}**")
-        ui.chart(fig, 230)
-    if not any_drawn:
-        st.caption("Not enough sessions with heart rate yet. Three steady aerobic "
-                   "sessions in a sport gives a direction; six makes it reliable.")
-
-
-def volume_chart(data: dict, today: date) -> None:
+def volume_chart(data: dict, today: date,
+                 notes: dict | None = None) -> None:
     weeks = week_summaries(data["activities"], weeks=12, as_of=today,
                            strength_rows=data["strength"])
     with Store(db_path()) as s:
@@ -756,11 +678,7 @@ def volume_chart(data: dict, today: date) -> None:
                                       "<extra>deload</extra>")
     fig.update_layout(yaxis_title="minutes per week", hovermode="x unified")
     ui.chart(fig, 200)
-    chart_ai_note("Weekly training minutes: completed weeks, then the ceiling the "
-                  "rules allow for the next four",
-                  {"completed": [{"week": str(d), "min": round(m)} for d, m in done],
-                   "planned": [{"week": str(d), "min": m, "deload": dl}
-                               for d, m, dl in pts]})
+    chart_ai_note("volume", notes)
 
     rows = [{"week": day_label(w.week_start.isoformat()), "total minutes": w.total_minutes,
              "load": w.total_load, "rest days": w.rest_days,
@@ -797,24 +715,44 @@ def page_plan(data: dict, today: date) -> None:
          "note": "allowed this week"},
     ])
 
+    with Store(db_path()) as _s:
+        bounds = zone_bounds(_s.zones())
+    if bounds:
+        ui.section("Your heart-rate zones",
+                   "Straight from Garmin, so these match what the watch shows.")
+        ui.stats_row([
+            {"label": f"Z{z}", "value": (f"{lo}–{hi}" if hi else f"{lo}+"),
+             "note": {1: "recovery", 2: "aerobic base", 3: "tempo",
+                      4: "threshold", 5: "VO2max"}.get(z, ""),
+             "tone": "good" if z == 2 else ("bad" if z >= 4 else "neutral")}
+            for z, (lo, hi) in sorted(bounds.items())
+        ])
+
     ui.section("Your weekly targets",
                "How much of each sport you want. The scheduler builds around this; "
                "the safety rules still cap the total.")
     existing = data["targets"]
     with st.form("targets"):
+        st.caption("Switch a sport off and it is excluded from every suggestion — "
+                   "no sessions, no long-session requirement, and its share of the "
+                   "week goes to the sports still on.")
         rows = []
         for sport in ENDURANCE_SPORTS:
             cur = existing.get(sport) or {}
-            c = st.columns([1, 1, 1], vertical_alignment="center")
+            c = st.columns([1.1, 0.8, 1, 1], vertical_alignment="center")
             c[0].markdown(f"{EMOJI[sport]} **{sport.title()}**")
+            on = c[1].toggle("on", value=bool(cur.get("enabled", 1)),
+                             key=f"te_{sport}",
+                             label_visibility="collapsed" if sport != "swim" else "visible")
             rows.append({
                 "sport": sport,
-                "sessions": c[1].number_input("sessions", 0, 7,
+                "enabled": int(on),
+                "sessions": c[2].number_input("sessions", 0, 7,
                                               int(cur.get("sessions") or 0),
-                                              key=f"ts_{sport}"),
-                "minutes": c[2].number_input("minutes", 0, 900,
+                                              key=f"ts_{sport}", disabled=not on),
+                "minutes": c[3].number_input("minutes", 0, 900,
                                              int(cur.get("minutes") or 0), step=15,
-                                             key=f"tm_{sport}"),
+                                             key=f"tm_{sport}", disabled=not on),
             })
         b = st.columns(2)
         save = b[0].form_submit_button("Save targets", type="primary",
@@ -890,9 +828,10 @@ def page_plan(data: dict, today: date) -> None:
     seed = pd.DataFrame([{"Day": d["day"], "Sport": d["sport"],
                           "Minutes": d["duration_min"],
                           "Zone": d.get("target_zone") or "Z2",
+                          "Target HR": d.get("target_hr") or "",
                           "Note": (d.get("why") or "")[:80]} for d in editable]
                         or [{"Day": "Mon", "Sport": "bike", "Minutes": 60,
-                             "Zone": "Z2", "Note": ""}])
+                             "Zone": "Z2", "Target HR": "", "Note": ""}])
     edited = st.data_editor(
         seed, num_rows="dynamic", hide_index=True, width="stretch",
         key="plan_editor", disabled=not unlocked,
@@ -904,6 +843,9 @@ def page_plan(data: dict, today: date) -> None:
                                                      step=5),
             "Zone": st.column_config.SelectboxColumn(
                 options=["Z1", "Z2", "Z3", "Z4", "Z5", "technique", "n/a"]),
+            "Target HR": st.column_config.TextColumn(
+                width="small", disabled=True,
+                help="Derived from your Garmin zones — set the zone and this follows."),
             "Note": st.column_config.TextColumn(width="large"),
         })
     b = st.columns([1, 1, 2])

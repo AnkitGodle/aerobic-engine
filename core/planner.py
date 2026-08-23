@@ -22,6 +22,8 @@ from typing import Any
 from core import ai, strength
 from core.analysis import (
     all_ef_trends,
+    zone_bounds,
+    zone_target,
     hr_trend,
     polarisation,
     recovery_signals,
@@ -360,6 +362,16 @@ def build_envelope(
     if total_target > 0:
         budget = round(min(budget, total_target * (DELOAD_FACTOR if deload else 1.0)))
 
+    # A sport the athlete has switched off is not planned at all — no sessions,
+    # no minutes, no long-session requirement. Its share of the week goes to the
+    # sports that are still on.
+    disabled = {sp for sp, t in targets.items() if not t.get("enabled", 1)}
+    if disabled:
+        live = {sp: v for sp, v in shares.items() if sp not in disabled}
+        total_live = sum(live.values()) or 1.0
+        shares = {sp: (v / total_live if sp not in disabled else 0.0)
+                  for sp, v in shares.items()}
+
     scale = 0.7 if deload else 1.0
     by_sport: dict[str, SportEnvelope] = {}
     for sport, share in shares.items():
@@ -369,6 +381,13 @@ def build_envelope(
         default_min = 2 if not deload else 1
         min_sessions = min(want, default_min) if want else default_min
         max_sessions = max(want, 1) if want else 3
+        if sport in disabled:
+            by_sport[sport] = SportEnvelope(
+                sport=sport, enabled=False, min_sessions=0, max_sessions=0,
+                max_minutes=0.0, long_session_min=0.0,
+                notes="switched off by the athlete",
+            )
+            continue
         by_sport[sport] = SportEnvelope(
             sport=sport,
             min_sessions=min_sessions,
@@ -459,6 +478,9 @@ def rules_plan(
             continue
         if sport == "strength":
             slots.append((day, sport, role))
+            continue
+        se = envelope.by_sport.get(sport)
+        if se is not None and not se.enabled:
             continue
         done_n = done[sport].sessions if sport in done else 0
         planned_n = sum(1 for s in slots if s[1] == sport)
@@ -628,6 +650,7 @@ def enforce(
     facts: PlannerFacts,
     envelope: Envelope,
     strength_log: Sequence[dict[str, Any]] = (),
+    zone_bounds_map: dict[int, tuple[int, int | None]] | None = None,
 ) -> WeekPlan:
     """Re-check every constraint in code. Returns a plan that cannot break them."""
     notes: list[str] = []
@@ -726,7 +749,17 @@ def enforce(
     # 8. Minimum rest days across the whole week.
     days = _ensure_rest_days(days, facts, envelope, notes)
 
-    # 9. Descriptions must match the numbers that survived steps 1-8.
+    # 9. A sport switched off must not appear, whoever proposed it.
+    for d in list(days):
+        se = envelope.by_sport.get(d.sport)
+        if se is not None and not se.enabled and d.duration_min > 0:
+            notes.append(f"dropped {d.sport} on {d.day}: switched off")
+            days.remove(d)
+
+    # 10. Concrete heart-rate targets, from the athlete's own Garmin zones.
+    _stamp_hr_targets(days, zone_bounds_map)
+
+    # 11. Descriptions must match the numbers that survived steps 1-8.
     _relabel(days, envelope)
 
     flags = list(plan.flags)
@@ -839,6 +872,25 @@ def _ensure_long_sessions(
         target.duration_min = int(se.long_session_min)
         target.purpose = PURPOSE_FOR_ROLE["long"]
     return days
+
+
+def _stamp_hr_targets(
+    days: list[PlanDay], bounds: dict[int, tuple[int, int | None]] | None
+) -> None:
+    """Turn "Z2" into "112-129 bpm" using the athlete's real zone boundaries.
+
+    Done here rather than in the prompt because a heart-rate target is a fact
+    about this athlete's physiology, not a judgement — and a model that invents
+    one is worse than useless.
+    """
+    if not bounds:
+        return
+    for d in days:
+        if d.sport in ("rest", "strength") or d.duration_min <= 0:
+            continue
+        target = zone_target(bounds, d.target_zone)
+        if target:
+            d.target_hr = target
 
 
 def _annotate(why: str, note: str) -> str:
@@ -1067,6 +1119,17 @@ def build_payload(
     env_dict = envelope.model_dump(mode="json")
     env_dict["days_remaining"] = facts.days_remaining
     env_dict["remaining_minutes_budget"] = round(remaining_budget(facts, envelope))
+    bounds = zone_bounds(zones)
+    if bounds:
+        # For the model's prose only. The bpm target on each session is stamped in
+        # code afterwards, so the model cannot get the numbers wrong.
+        env_dict["heart_rate_zones_bpm"] = {
+            f"Z{z}": (f"{lo}-{hi}" if hi else f"{lo}+")
+            for z, (lo, hi) in bounds.items()
+        }
+    env_dict["sports_switched_off"] = [
+        sp for sp, se in envelope.by_sport.items() if not se.enabled
+    ]
 
     intensity: dict[str, Any] = {}
     if zones:
@@ -1082,6 +1145,18 @@ def build_payload(
                 for sport in ENDURANCE_SPORTS
             },
         }
+
+    recent_sessions: list[dict[str, Any]] = []
+    for a in sorted(activities, key=lambda r: r["start_date"])[-12:]:
+        recent_sessions.append({
+            "date": a["start_date"],
+            "sport": a["sport"],
+            "minutes": round((a.get("duration_s") or 0) / 60),
+            "km": round((a.get("distance_m") or 0) / 1000, 1) or None,
+            "avg_hr": a.get("avg_hr"),
+            "counted_as_steady": bool(a.get("is_steady")),
+            "why_not_steady": None if a.get("is_steady") else a.get("steady_reason"),
+        })
 
     training_hr: dict[str, Any] = {}
     if activities:
@@ -1110,6 +1185,7 @@ def build_payload(
             ],
             "intensity_distribution": intensity,
             "training_heart_rate": training_hr,
+            "recent_sessions": recent_sessions,
         },
     )
 
@@ -1131,8 +1207,10 @@ def plan_week(
     targets = store.targets()
     strength_log = store.strength_log(since=facts.week_start - timedelta(days=120))
 
+    bounds = zone_bounds(store.zones())
     fallback = enforce(
-        rules_plan(facts, envelope, strength_log, checkin), facts, envelope, strength_log
+        rules_plan(facts, envelope, strength_log, checkin), facts, envelope,
+        strength_log, zone_bounds_map=bounds,
     )
     payload = build_payload(
         facts, envelope, strength_log, checkin,
@@ -1163,7 +1241,8 @@ def plan_week(
             )
             if not candidate.week_plan:
                 raise ai.AIUnavailable("AI returned an empty week")
-            plan = enforce(candidate, facts, envelope, strength_log)
+            plan = enforce(candidate, facts, envelope, strength_log,
+                           zone_bounds_map=bounds)
         except ai.AIUnavailable as exc:
             log.info("AI layer unavailable (%s) — using the rules plan", exc)
             plan.flags.append(f"AI layer unavailable ({exc}); this is the rules-only plan")
