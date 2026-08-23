@@ -19,7 +19,7 @@ from core import ai
 @pytest.fixture
 def groq(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
-    return ai.GroqBackend()
+    return ai.OpenAICompatBackend("groq")
 
 
 def _fake_urlopen(captured: dict, payload: dict):
@@ -49,7 +49,7 @@ def test_defaults_to_groqs_best_free_production_model(groq):
 def test_missing_key_is_a_clean_unavailable(monkeypatch):
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     with pytest.raises(ai.AIUnavailable) as e:
-        ai.GroqBackend()
+        ai.OpenAICompatBackend("groq")
     assert "console.groq.com" in str(e.value)
 
 

@@ -6,8 +6,8 @@ because a prompt is not a guardrail. If the model returns garbage, malformed
 JSON, or a week that breaks the envelope, the planner discards it and falls back
 to the rules plan.
 
-Backends are selected by the AI_BACKEND env var (anthropic | azure | none) so the
-commercial version can move hosts without touching the planner.
+Backends are selected by the AI_BACKEND env var so the provider can change —
+or be switched off entirely — without touching the planner.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ import subprocess
 import time
 from typing import Any, Protocol
 
-log = logging.getLogger("iron_coach.ai")
+log = logging.getLogger("aerobic_engine.ai")
 
 DEFAULT_MODEL = os.getenv("AI_MODEL", "claude-sonnet-5")
 USER_AGENT = os.getenv("AI_USER_AGENT", "aerobic-engine/1.0")
@@ -226,8 +226,8 @@ class ClaudeCLIBackend:
       * It only works where the CLI is installed and logged in, which puts the
         planning step in the same box as the Garmin fetch: local only, never the
         hosted dashboard. The dashboard stays read-only over SQLite.
-      * Subscription usage limits apply, and this is a personal-use arrangement.
-        The commercial phase in the spec needs the API.
+      * Subscription usage limits apply, and this is a personal-use
+        arrangement.
 
     Flags are kept to the two most stable ones (`-p`, `--output-format json`);
     anything else goes in CLAUDE_CLI_EXTRA_ARGS so a CLI update cannot break
@@ -487,13 +487,6 @@ class OpenAICompatBackend:
                 f"reasoning and returned nothing. Raise AI_MAX_TOKENS."
             )
         return (choices[0].get("message") or {}).get("content") or ""
-
-
-class GroqBackend(OpenAICompatBackend):
-    """Kept as a name because the config value `AI_BACKEND=groq` is documented."""
-
-    def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
-        super().__init__("groq", api_key=api_key, model=model)
 
 
 class NullBackend:

@@ -8,9 +8,9 @@ weekly plan (swim / bike / run / leg strength) that responds to how the user fee
 
 ## 1. Scope
 
-- **v1 = personal, single user, free.** Garmin only. No Strava.
-- **Commercial multi-user is a later phase — do not build it now.** Just don't make
-  choices that block it.
+- **Personal, single user, free.** Garmin only. No Strava. There is no
+  multi-user or commercial phase — this is one athlete's dashboard and nothing
+  in it should be built for anyone else.
 - Watch is a **Garmin Forerunner 265**. It captures run, bike, pool/open-water swim
   and strength, plus Training Readiness / Training Status / HRV / VO2max / race
   predictor. It does **not** have Triathlon Coach, so the app is the cross-sport
@@ -21,21 +21,23 @@ weekly plan (swim / bike / run / leg strength) that responds to how the user fee
 - **Language:** Python.
 - **Data source:** `garminconnect` (python-garminconnect) — unofficial,
   credentials-based. Personal use only.
-- **Storage:** SQLite (single file).
+- **Storage:** Postgres (Neon) is the live database; SQLite is the local
+  fallback when `DATABASE_URL` is unset. One SQL dialect in the source,
+  translated on the way out — see `Store.sql()`.
 - **UI:** Streamlit.
-- **AI layer:** Claude (Sonnet-tier) via the Anthropic API. Structured JSON in/out.
-  Azure AI Foundry is an acceptable alternative host — the call sits behind an
-  interface so the backend is a config swap.
+- **AI layer:** Gemini (`gemini-3.6-flash`, free tier) via the OpenAI-compatible
+  endpoint. Structured JSON in/out, behind an interface, so the provider is a
+  config swap — Groq, Cerebras, OpenRouter, Anthropic and Azure all work.
 - **Deploy:** local first; then the dashboard on Streamlit Community Cloud
   (private app). See Section 11.
 
 ## 3. Architecture principle (important)
 
 The **data-fetch, analysis and planner are pure-Python modules with no Streamlit
-imports.** The UI is a thin layer over them. The commercial version will replace
-Streamlit with FastAPI + a real frontend, and the analysis and planner logic must
-carry over unchanged. Same rule for the AI call: it sits behind
-`plan_week(payload) -> plan` so Anthropic API vs Azure AI Foundry is config.
+imports.** The UI is a thin layer over them. Not for portability — because
+training logic that is tangled into a UI cannot be tested, and the guardrails are
+the product. Same rule for the AI call: it sits behind
+`plan_week(payload) -> plan`, so switching provider is a config change.
 
 Enforced in practice: nothing under `core/` imports `streamlit`, and only
 `core/ai.py` knows an LLM exists.
@@ -54,8 +56,11 @@ aerobic-engine/
     strength.py              # fixed exercise library + deterministic progression
     schemas.py               # pydantic models for payloads
   scripts/fetch.py           # the incremental sync (local / scheduled)
+  scripts/migrate_to_postgres.py  # copy a local SQLite file into Postgres
+  scripts/set_pin.py         # generate the write-PIN salt + hash
+  scripts/export_tokens.py   # export the Garmin session for a hosted deploy
   tests/                     # guardrail + analysis regression suite
-  data/iron_coach.db         # gitignored
+  data/aerobic_engine.db         # gitignored
   .env                       # gitignored — Garmin + Anthropic creds
 ```
 
@@ -159,12 +164,12 @@ heavy/low-rep; tendons want slow, heavy or isometric loading and adapt slowly.
 
 ## 10. AI contract (`ai.py`)
 
-- `plan_week(payload) -> plan`, behind an interface: `groq` (free tier,
-  `openai/gpt-oss-120b`, JSON mode — the recommended default),
-  `anthropic` (API key),
-  `claude_cli` (a Pro/Max subscription, via the Claude Code CLI's headless mode —
-  local only, since a hosted dashboard has no CLI to call), `azure` (AI Foundry),
-  or `none` to disable.
+- `plan_week(payload) -> plan`, behind an interface. `gemini` is the default
+  (~1500 requests/day free, and a planner call is a chunky ~2.5K tokens, so a
+  request-per-day cap suits it better than a tokens-per-minute one). Also
+  supported: `groq`, `cerebras`, `openrouter`, `anthropic`, `azure`,
+  `claude_cli` (a Pro/Max subscription via the CLI's headless mode — local only,
+  since a hosted dashboard has no CLI to call), or `none` to disable.
 - **Input JSON:** `{ completed_this_week, recovery_signals, envelope,
   strength_state, checkin, history }`.
 - **Output JSON (strict — no prose outside JSON):**
@@ -187,16 +192,18 @@ heavy/low-rep; tendons want slow, heavy or isometric loading and adapt slowly.
 
 ## 11. Deployment
 
-- **Now:** everything local — `streamlit run app/streamlit_app.py`.
-- **Access from anywhere:** deploy the **dashboard** to Streamlit Community Cloud as
-  a **private app** (health data must not sit on a public URL), or set
+- **Database:** a Neon Postgres project (ap-southeast-1) is the live store. The
+  local sync writes there and the dashboard reads it, so the two cannot drift.
+  Verified against the live server, not just the translation layer.
+- **Access from anywhere:** deploy the **dashboard** to Streamlit Community Cloud
+  as a **private app** (health data must not sit on a public URL), or set
   `DASHBOARD_PASSWORD` for the built-in gate.
 - **Keep fetch local/scheduled** — don't run Garmin login from a cloud host.
-- **DB persistence caveat:** free hosts have non-persistent disk, so a SQLite file
-  can vanish on restart. If hosting the data too, use free managed Postgres (Neon
-  or Supabase) instead of SQLite.
-- **Commercial later** = FastAPI + real frontend + Postgres + auth, likely Azure.
-  Analysis + planner carry over unchanged.
+- **Why not SQLite when hosted:** a free host's disk is ephemeral. If the file
+  vanished, the next sync would re-pull months of history — hundreds of requests
+  from a datacenter IP, which is exactly what gets an account flagged.
+- `scripts/migrate_to_postgres.py` copies a local SQLite file up, costing zero
+  Garmin calls. Re-runnable: every table upserts on its real key.
 
 ## 12. Constraints & guardrails (summary)
 

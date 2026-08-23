@@ -8,7 +8,8 @@ Rules first, AI second. A language model adjusts volume, intensity and placement
 it cannot talk its way past a deload, invent an exercise, or exceed the weekly
 progression cap, because those are enforced in code after the model answers.
 
-> Personal project, single user. Not affiliated with or endorsed by Garmin.
+> Personal project, single user, built for my own training. Not affiliated
+> with or endorsed by Garmin.
 > Not medical advice.
 
 ---
@@ -66,8 +67,8 @@ three leg days, no rest day, 1485 minutes against a 229-minute budget) and asser
 that none of it survives.
 
 Nothing under `core/` imports Streamlit, and only `core/ai.py` knows a language
-model exists — so the analysis and planner carry over unchanged if the UI is ever
-replaced.
+model exists. That is what makes the training logic testable at all — the
+guardrail suite drives the planner directly, with no UI in the way.
 
 ## Running it
 

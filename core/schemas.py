@@ -1,7 +1,7 @@
 """Typed payloads shared across the data, analysis, planner and AI layers.
 
 No Streamlit, no Garmin, no Anthropic imports here — these are the contracts
-the UI and the commercial FastAPI version both build on.
+every other layer builds on, which is what keeps them testable in isolation.
 """
 
 from __future__ import annotations

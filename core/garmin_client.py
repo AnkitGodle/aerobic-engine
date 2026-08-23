@@ -31,7 +31,7 @@ from garminconnect import (
 
 from core.garmin_guard import GarminBlocked, GarminGuard
 
-log = logging.getLogger("iron_coach.garmin")
+log = logging.getLogger("aerobic_engine.garmin")
 
 # Garmin activityType.typeKey -> our sport buckets.
 SPORT_MAP: dict[str, str] = {

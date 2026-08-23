@@ -610,18 +610,6 @@ def aerobic_ceiling_options(
     return out
 
 
-def resolved_aerobic_ceiling(
-    bounds: dict[int, tuple[int, int | None]],
-    threshold_hr: float | None = None,
-    override: float | None = None,
-) -> int | None:
-    """The ceiling actually used for Z2 targets: the athlete's own if they set
-    one, otherwise Garmin's."""
-    if override:
-        return int(override)
-    return bounds.get(2, (None, None))[1]
-
-
 def zone_target(
     bounds: dict[int, tuple[int, int | None]],
     zone: str,

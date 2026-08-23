@@ -24,7 +24,7 @@ def test_url_detection():
     assert is_postgres("postgresql://user@host/db")
     assert is_postgres("postgres://user@host/db")
     assert is_postgres("postgresql+psycopg://user@host/db")
-    assert not is_postgres("data/iron_coach.db")
+    assert not is_postgres("data/aerobic_engine.db")
     assert not is_postgres("/tmp/x.db")
 
 

@@ -20,7 +20,7 @@ from core.garmin_client import GarminClient, date_range
 from core.garmin_guard import GarminGuard
 from core.store import DEFAULT_DB, Store
 
-log = logging.getLogger("iron_coach.sync")
+log = logging.getLogger("aerobic_engine.sync")
 
 STREAM_SPORTS = {"run", "bike", "swim", "brick"}
 ZONE_SPORTS = {"run", "bike", "swim", "strength", "brick"}

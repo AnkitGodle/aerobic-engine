@@ -30,7 +30,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
-log = logging.getLogger("iron_coach.guard")
+log = logging.getLogger("aerobic_engine.guard")
 
 # Deliberately conservative. A full first sync of 180 days of wellness is about
 # 900 calls, which at these limits spreads over a few hours across several runs —

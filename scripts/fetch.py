@@ -27,7 +27,7 @@ from core.garmin_guard import GarminBlocked  # noqa: E402
 from core.store import DEFAULT_DB  # noqa: E402
 from core.sync import guard_status, sync  # noqa: E402
 
-log = logging.getLogger("iron_coach.fetch")
+log = logging.getLogger("aerobic_engine.fetch")
 
 
 def prompt_mfa() -> str:
