@@ -19,13 +19,21 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 from typing import Any, Protocol
 
 log = logging.getLogger("iron_coach.ai")
 
 DEFAULT_MODEL = os.getenv("AI_MODEL", "claude-sonnet-5")
 USER_AGENT = os.getenv("AI_USER_AGENT", "aerobic-engine/1.0")
-MAX_TOKENS = int(os.getenv("AI_MAX_TOKENS", "2000"))
+# Generous on purpose. Gemini 3.x and the gpt-oss models spend tokens on internal
+# reasoning before they emit anything, and that spend counts against max_tokens:
+# a 1-token answer measured 113 total tokens in testing. Too small a ceiling
+# truncates the plan JSON mid-object, which fails to parse and silently costs the
+# athlete the AI layer.
+MAX_TOKENS = int(os.getenv("AI_MAX_TOKENS", "6000"))
+RETRY_ATTEMPTS = int(os.getenv("AI_RETRY_ATTEMPTS", "3"))
+RETRY_BACKOFF_S = float(os.getenv("AI_RETRY_BACKOFF", "1.5"))
 
 SYSTEM_PROMPT = """\
 You are the adaptive-planning layer of a personal Iron Man training app. The \
@@ -104,7 +112,13 @@ class LLMBackend(Protocol):
 
 
 class AIUnavailable(RuntimeError):
-    """No backend configured, or the backend refused. Caller falls back to rules."""
+    """No backend configured, or the backend refused. Caller falls back to rules.
+
+    `retryable` marks the transient cases — a busy model, a dropped connection —
+    that are worth one more attempt. Rate limits and auth failures are not.
+    """
+
+    retryable = False
 
 
 class AnthropicBackend:
@@ -266,6 +280,7 @@ OPENAI_COMPAT: dict[str, dict[str, Any]] = {
     "groq": {
         "base": "https://api.groq.com/openai/v1",
         "model": "openai/gpt-oss-120b",
+        "fallbacks": ("openai/gpt-oss-20b",),
         "keys": ("GROQ_API_KEY",),
         "console": "https://console.groq.com/keys",
         "free": "30 req/min, 1000/day, 8K tokens/min — the token cap pinches",
@@ -273,7 +288,12 @@ OPENAI_COMPAT: dict[str, dict[str, Any]] = {
     },
     "gemini": {
         "base": "https://generativelanguage.googleapis.com/v1beta/openai",
-        "model": "gemini-3.7-flash",
+        # Not the newest on purpose. Probed live: gemini-3.7-flash and
+        # gemini-flash-latest both returned 503 (oversubscribed), and
+        # gemini-2.5-flash is retired (404). 3.6-flash answered in 3s with JSON
+        # mode working, so it leads, with faster siblings behind it.
+        "model": "gemini-3.6-flash",
+        "fallbacks": ("gemini-3.5-flash", "gemini-3.5-flash-lite"),
         "keys": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
         "console": "https://aistudio.google.com/apikey",
         "free": "~1500 requests/day, 1M context, no card — most generous for "
@@ -326,6 +346,12 @@ class OpenAICompatBackend:
             f"{provider.upper()}_MODEL", spec.get("model", "")
         )
         self.timeout = int(os.getenv("AI_TIMEOUT", "90"))
+        # An explicit model choice is honoured alone; the default carries a chain,
+        # because the newest model is reliably the busiest one.
+        explicit = model or os.getenv("AI_MODEL_OVERRIDE") or os.getenv(
+            f"{provider.upper()}_MODEL")
+        self.models = ([explicit] if explicit
+                       else [self.model, *spec.get("fallbacks", ())])
         self.api_key = api_key or os.getenv("AI_API_KEY") or next(
             (os.getenv(k) for k in spec.get("keys", ()) if os.getenv(k)), None
         )
@@ -343,11 +369,35 @@ class OpenAICompatBackend:
             )
 
     def complete(self, system: str, user: str, json_mode: bool = False) -> str:
+        """Send the request, retrying only what is worth retrying.
+
+        A 503 from Gemini means the model is momentarily oversubscribed, not that
+        anything is wrong — losing the AI layer over a blip is a poor trade. Rate
+        limits and auth failures are never retried: a 429 retry just spends the
+        next minute's budget, and a bad key will not improve.
+        """
+        last: Exception | None = None
+        for model in self.models:
+            for attempt in range(RETRY_ATTEMPTS):
+                try:
+                    return self._post(system, user, json_mode, model=model)
+                except AIUnavailable as exc:
+                    last = exc
+                    if not getattr(exc, "retryable", False):
+                        raise
+                    if attempt < RETRY_ATTEMPTS - 1:
+                        time.sleep(RETRY_BACKOFF_S * (attempt + 1))
+            if model != self.models[-1]:
+                log.info("%s: %s unavailable, trying the next model", self.name, model)
+        raise last if last else AIUnavailable(f"{self.name} failed")
+
+    def _post(self, system: str, user: str, json_mode: bool = False,
+              model: str | None = None) -> str:
         import urllib.error
         import urllib.request
 
         body: dict[str, Any] = {
-            "model": self.model,
+            "model": model or self.model,
             "messages": [{"role": "system", "content": system},
                          {"role": "user", "content": user}],
             "max_tokens": MAX_TOKENS,
@@ -383,6 +433,17 @@ class OpenAICompatBackend:
                     f"({self.spec.get('free', 'see the provider console')}). "
                     f"{detail}".strip()
                 ) from exc
+            if exc.code == 404:
+                err = AIUnavailable(
+                    f"{self.name}: model {body['model']!r} not available. "
+                    f"{detail}".strip())
+                err.retryable = True   # so the chain moves on to the next model
+                raise err from exc
+            if exc.code in (500, 502, 503, 504):
+                err = AIUnavailable(
+                    f"{self.name} is busy ({exc.code}). {detail}".strip())
+                err.retryable = True
+                raise err from exc
             if exc.code in (401, 403):
                 raise AIUnavailable(
                     f"{self.name} rejected the key ({exc.code}). {detail}".strip()
@@ -390,11 +451,19 @@ class OpenAICompatBackend:
             raise AIUnavailable(
                 f"{self.name} returned {exc.code}: {detail or exc.reason}") from exc
         except urllib.error.URLError as exc:
-            raise AIUnavailable(f"{self.name} unreachable: {exc.reason}") from exc
+            err = AIUnavailable(f"{self.name} unreachable: {exc.reason}")
+            err.retryable = True
+            raise err from exc
 
         choices = data.get("choices") or []
         if not choices:
             raise AIUnavailable(f"{self.name} returned no choices")
+        finish = choices[0].get("finish_reason")
+        if finish == "length" and not (choices[0].get("message") or {}).get("content"):
+            raise AIUnavailable(
+                f"{self.name} spent its whole {MAX_TOKENS}-token budget on internal "
+                f"reasoning and returned nothing. Raise AI_MAX_TOKENS."
+            )
         return (choices[0].get("message") or {}).get("content") or ""
 
 

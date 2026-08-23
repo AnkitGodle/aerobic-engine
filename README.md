@@ -115,13 +115,26 @@ dialect, so switching between them is config rather than code:
 
 | `AI_BACKEND` | Default model | Free tier, and its shape |
 | --- | --- | --- |
-| `gemini` | `gemini-3.7-flash` | ~1500 requests/day, 1M context. Caps *requests*, not tokens — the best fit here, because each planner call is chunky. |
+| `gemini` | `gemini-3.6-flash` | ~1500 requests/day, 1M context. Caps *requests*, not tokens — the best fit here, because each planner call is chunky. |
 | `cerebras` | `gpt-oss-120b` | ~1M tokens/day. The largest token budget; also enforces JSON schemas. |
 | `groq` | `openai/gpt-oss-120b` | 30 req/min, 1000/day, **8K tokens/min**. Fastest, but the per-minute token cap is the one you feel. |
 | `openrouter` | `…:free` variants | Many free models behind one key; limits vary per model. |
 
 For an unlisted provider that speaks the same dialect, set `AI_BASE_URL`,
 `AI_API_KEY` and `AI_MODEL_OVERRIDE` and leave the code alone.
+
+Each provider carries a **model fallback chain**, because the newest model is
+reliably the busiest: probed live, `gemini-3.7-flash` and `gemini-flash-latest`
+returned 503 while `gemini-3.6-flash` answered in three seconds, and
+`gemini-2.5-flash` is retired (404). A 503 or a 404 moves to the next model in
+the chain; a 429 or an auth failure does not, because retrying a rate limit only
+spends the next minute's budget. Setting a model explicitly disables the chain.
+
+Two things that cost real debugging time, recorded so they do not have to again:
+these APIs sit behind Cloudflare and reject `urllib`'s default user agent with a
+**403 that looks exactly like a bad API key**; and Gemini 3.x spends tokens on
+internal reasoning before emitting anything, so a `max_tokens` that looks
+generous can return an empty response with `finish_reason: length`.
 
 Also behind the same interface: `anthropic` (API key), `claude_cli` (a Claude
 Pro/Max subscription via the Claude Code CLI — local only, since a hosted app has
