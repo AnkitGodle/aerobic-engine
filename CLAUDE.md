@@ -1,6 +1,6 @@
 # Aerobic Engine — Build Brief
 
-A personal Iron Man training analytics + adaptive planning web app. Reads Garmin
+A personal endurance training analytics + adaptive planning web app. Reads Garmin
 data, shows whether fitness is rising while HR drops, and generates an adaptive
 weekly plan (swim / bike / run / leg strength) that responds to how the user feels.
 
@@ -104,7 +104,7 @@ All deterministic. No AI here.
 
 1. **Facts (deterministic):** this week's completed sessions by sport, volume/load,
    EF trend, recovery signals. Ground truth from `analysis.py`.
-2. **Envelope (rules — the safety backstop):** Iron Man **base phase** default week
+2. **Envelope (rules — the safety backstop):** endurance **base phase** default week
    — swim 2–3, bike 2–3 (incl. 1 long), run 2–3 (incl. 1 long, conservative),
    legs 2, ≥1 full rest day.
    - **Bike-heavy for aerobic base** (best low-impact aerobic volume tool *and* a

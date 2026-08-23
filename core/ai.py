@@ -36,7 +36,7 @@ RETRY_ATTEMPTS = int(os.getenv("AI_RETRY_ATTEMPTS", "3"))
 RETRY_BACKOFF_S = float(os.getenv("AI_RETRY_BACKOFF", "1.5"))
 
 SYSTEM_PROMPT = """\
-You are the adaptive-planning layer of a personal Iron Man training app. The \
+You are the adaptive-planning layer of a personal endurance training app. The \
 athlete trains swim, bike, run and leg strength, and wears a Garmin Forerunner \
 265. You are ONE layer of three: deterministic analysis produced the facts, \
 deterministic rules produced the envelope, and you adjust inside that envelope.

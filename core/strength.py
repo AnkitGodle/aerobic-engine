@@ -695,41 +695,121 @@ GARMIN_EXERCISE_MAP: dict[str, str] = {
     "TIBIALIS_RAISE": "tib_raise",
     "TOE_RAISE": "tib_raise",
     "ANKLE_DORSIFLEXION": "tib_raise",
+    # glutes and hips. Garmin files most of these under the HIP_RAISE and
+    # HIP_STABILITY categories, so the category alone resolves a set even when
+    # the watch records no specific exercise name.
+    "HIP_RAISE": "glute_bridge",
+    "GLUTE_BRIDGE": "glute_bridge",
+    "BRIDGE": "glute_bridge",
+    "WEIGHTED_GLUTE_BRIDGE": "glute_bridge",
+    "SINGLE_LEG_GLUTE_BRIDGE": "glute_bridge",
+    "HIP_THRUST": "hip_thrust",
+    "BARBELL_HIP_THRUST": "hip_thrust",
+    "WEIGHTED_HIP_THRUST": "hip_thrust",
+    "HIP_STABILITY": "side_lying_abduction",
+    "SIDE_LYING_LEG_RAISE": "side_lying_abduction",
+    "HIP_ABDUCTION": "side_lying_abduction",
+    "SIDE_LYING_HIP_ABDUCTION": "side_lying_abduction",
+    "CLAMSHELL": "side_lying_abduction",
+    "LATERAL_WALK": "band_monster_walk",
+    "MONSTER_WALK": "band_monster_walk",
+    "BAND_WALK": "band_monster_walk",
+    "SIDE_PLANK": "side_plank_hip_lift",
+    "SIDE_PLANK_HIP_ADDUCTION": "copenhagen_plank",
+    "COPENHAGEN_PLANK": "copenhagen_plank",
+    "HIP_ADDUCTION": "copenhagen_plank",
+    # knee and quad
+    "GOBLET_SQUAT": "goblet_squat",
+    "SQUAT": "goblet_squat",
+    "DUMBBELL_SQUAT": "goblet_squat",
+    "KETTLEBELL_GOBLET_SQUAT": "goblet_squat",
+    "STEP_DOWN": "step_down",
+    "SINGLE_LEG_STEP_DOWN": "step_down",
+    "LATERAL_STEP_DOWN": "step_down",
+    "TERMINAL_KNEE_EXTENSION": "terminal_knee_extension",
+    "KNEE_EXTENSION": "terminal_knee_extension",
+    "LEG_EXTENSION": "terminal_knee_extension",
+    # hamstring
+    "NORDIC_HAMSTRING_CURL": "nordic_curl_assisted",
+    "NORDIC_CURL": "nordic_curl_assisted",
+    "LEG_CURL": "nordic_curl_assisted",
+    "HAMSTRING_CURL": "nordic_curl_assisted",
 }
 
 
-def map_garmin_exercise(category: str | None, name: str | None) -> str | None:
-    """Best-effort match from Garmin's taxonomy into the library.
+def _substring_match(text: str) -> str | None:
+    """Ordered longest-and-most-specific first, because these overlap.
 
-    Tries the specific exercise name first, then the broader category, then a
-    substring match. Returns None rather than guessing — an unmapped set is
-    surfaced in the UI for manual assignment instead of being silently binned.
+    COPENHAGEN and the adduction planks contain SIDE_PLANK; SPLIT_SQUAT and
+    SPANISH_SQUAT contain SQUAT. Whichever is tested first wins, so the order
+    here is the rule, not a preference.
     """
-    for raw in (name, category):
-        if not raw:
-            continue
-        key = str(raw).strip().upper().replace(" ", "_").replace("-", "_")
-        if key in GARMIN_EXERCISE_MAP:
-            return GARMIN_EXERCISE_MAP[key]
-    haystack = (
-        f"{name or ''} {category or ''}".upper().replace(" ", "_").replace("-", "_")
-    )
     for needle, exercise_id in (
         ("SINGLE_LEG_CALF", "calf_raise_single_leg"),
         ("SEATED_CALF", "calf_raise_bent"),
         ("CALF", "calf_raise_straight"),
         ("SINGLE_LEG_DEAD", "single_leg_rdl"),
+        ("SINGLE_LEG_ROMANIAN", "single_leg_rdl"),
         ("DEADLIFT", "rdl"),
         ("SPLIT_SQUAT", "split_squat"),
-        ("LUNGE", "reverse_lunge"),
-        ("STEP_UP", "step_up"),
-        ("WALL_SIT", "wall_sit"),
         ("SPANISH", "spanish_squat"),
+        ("WALL_SIT", "wall_sit"),
+        ("LUNGE", "reverse_lunge"),
+        ("STEP_DOWN", "step_down"),
+        ("STEP_UP", "step_up"),
         ("TIBIALIS", "tib_raise"),
+        ("COPENHAGEN", "copenhagen_plank"),
+        ("ADDUCTION", "copenhagen_plank"),
+        ("SIDE_PLANK", "side_plank_hip_lift"),
+        ("HIP_THRUST", "hip_thrust"),
+        ("GLUTE", "glute_bridge"),
+        ("BRIDGE", "glute_bridge"),
+        ("MONSTER", "band_monster_walk"),
+        ("BAND_WALK", "band_monster_walk"),
+        ("LATERAL_WALK", "band_monster_walk"),
+        ("ABDUCTION", "side_lying_abduction"),
+        ("CLAMSHELL", "side_lying_abduction"),
+        ("NORDIC", "nordic_curl_assisted"),
+        ("HAMSTRING", "nordic_curl_assisted"),
+        ("KNEE_EXTENSION", "terminal_knee_extension"),
+        ("GOBLET", "goblet_squat"),
+        ("SQUAT", "goblet_squat"),
     ):
-        if needle in haystack:
+        if needle in text:
             return exercise_id
     return None
+
+
+def _norm(raw: object) -> str:
+    return str(raw or "").strip().upper().replace(" ", "_").replace("-", "_")
+
+
+def map_garmin_exercise(category: str | None, name: str | None) -> str | None:
+    """Best-effort match from Garmin's taxonomy into the library.
+
+    Precedence is specific-before-generic, in four passes: the exact exercise
+    name, then a substring match on that name, then the exact category, then a
+    substring match on both together.
+
+    The middle pass matters. Garmin often records a broad category alongside a
+    specific name — HIP_STABILITY / LATERAL_BAND_WALK — and the category is an
+    exact key in the table, so without it the generic category would win and a
+    banded walk would be logged as a side-lying leg raise.
+
+    Returns None rather than guessing: an unmapped set is surfaced in the UI for
+    manual assignment instead of being silently binned or mis-attributed, which
+    would corrupt the progression for whatever it was mistaken for.
+    """
+    nkey, ckey = _norm(name), _norm(category)
+    if nkey and nkey in GARMIN_EXERCISE_MAP:
+        return GARMIN_EXERCISE_MAP[nkey]
+    if nkey:
+        hit = _substring_match(nkey)
+        if hit:
+            return hit
+    if ckey and ckey in GARMIN_EXERCISE_MAP:
+        return GARMIN_EXERCISE_MAP[ckey]
+    return _substring_match(f"{nkey}_{ckey}")
 
 
 def sets_to_log_rows(

@@ -475,11 +475,60 @@ def chart_note(title: str, data: Any, backend: Any = None) -> str | None:
         return None
     # AIUnavailable propagates on purpose: the sync-time generator pauses and
     # retries on a rate limit, which it cannot do if this swallows it.
-    text = backend.complete(
-        CHART_NOTE_SYSTEM,
-        json.dumps({"chart": title, "data": data}, indent=1, default=str)[:2500],
-    )
+    text = backend.complete(CHART_NOTE_SYSTEM, _chart_prompt(title, data))
     return (text or "").strip().strip('"').strip()[:180] or None
+
+
+# Chart payloads are trimmed rather than sent whole. The cap is generous for a
+# one-line caption and it bounds a series that would otherwise grow for years.
+CHART_PROMPT_CHARS = 2500
+
+
+def _chart_prompt(title: str, data: Any) -> str:
+    """Serialise a chart's numbers compactly, and trim honestly if still too big.
+
+    Two things this gets right that the obvious version did not. Indented JSON
+    spends tokens on whitespace that carries no meaning to a model, so the
+    separators are compact. And slicing the string at a character limit used to
+    cut mid-structure, handing the model malformed JSON with no indication that
+    anything was missing — a caption confidently describing a truncated series is
+    worse than no caption. A list is now shortened by dropping whole entries,
+    oldest first, and says how many it dropped.
+    """
+    def dump(payload: Any) -> str:
+        return json.dumps(payload, separators=(",", ":"), default=str)
+
+    body = dump({"chart": title, "data": data})
+    if len(body) <= CHART_PROMPT_CHARS:
+        return body
+
+    if isinstance(data, list) and data:
+        kept = list(data)
+        while kept and len(dump({"chart": title, "data": kept})) > CHART_PROMPT_CHARS:
+            kept = kept[1:]
+        if kept:
+            return dump({"chart": title, "data": kept,
+                         "note": f"showing the most recent {len(kept)} of "
+                                 f"{len(data)} points"})
+    if isinstance(data, dict) and data:
+        # Per-sport series: drop the longest until it fits, naming what went.
+        kept = dict(data)
+        dropped: list[str] = []
+        while (len(kept) > 1
+               and len(dump({"chart": title, "data": kept})) > CHART_PROMPT_CHARS):
+            widest = max(kept, key=lambda k: len(dump(kept[k])))
+            dropped.append(str(widest))
+            kept.pop(widest)
+        if len(dump({"chart": title, "data": kept})) <= CHART_PROMPT_CHARS:
+            payload = {"chart": title, "data": kept}
+            if dropped:
+                payload["note"] = f"omitted for size: {', '.join(dropped)}"
+            return dump(payload)
+
+    # Nothing structural to drop. Say the numbers were cut rather than implying
+    # they are complete.
+    return (body[:CHART_PROMPT_CHARS]
+            + '..."TRUNCATED":"the series was cut for length"}')
 
 
 def narrate(page: str, insight: PageInsight, backend: Any = None) -> str | None:

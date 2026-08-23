@@ -203,14 +203,34 @@ def _chart_inputs(data: dict[str, Any], today: date) -> list[tuple[str, str, Any
 
     wl = data.get("wellness") or []
     if wl:
+        # Weekly means, not every day. Sending the raw record would grow this
+        # prompt for the rest of the athlete's life — a year of daily rows is
+        # about 8,000 tokens for a one-line caption — and the question being
+        # asked is the long-run direction, which weekly means answer better than
+        # daily noise does.
+        buckets: dict[str, list[dict[str, Any]]] = {}
+        for r in wl:
+            try:
+                monday = date.fromisoformat(str(r["day"])[:10])
+            except (ValueError, TypeError, KeyError):
+                continue
+            monday -= timedelta(days=monday.weekday())
+            buckets.setdefault(monday.isoformat(), []).append(r)
+
+        def mean(rows: list[dict[str, Any]], key: str, scale: float = 1.0):
+            vals = [r[key] for r in rows if r.get(key) is not None]
+            return round(sum(vals) / len(vals) * scale, 1) if vals else None
+
+        weekly = [{"week_of": wk,
+                   "resting_hr": mean(rows, "resting_hr"),
+                   "hrv": mean(rows, "hrv_last_night"),
+                   "sleep_h": mean(rows, "sleep_seconds", 1 / 3600)}
+                  for wk, rows in sorted(buckets.items())]
         out.append(("chart:lifetime_recovery",
-                    "Resting heart rate, overnight HRV and sleep across the "
-                    "whole record (resting HR falling and HRV rising are both "
-                    "good). Say what the long-run direction is",
-                    [{"day": r["day"], "resting_hr": r.get("resting_hr"),
-                      "hrv": r.get("hrv_last_night"),
-                      "sleep_h": round((r.get("sleep_seconds") or 0) / 3600, 1)}
-                     for r in wl]))
+                    "Weekly averages of resting heart rate, overnight HRV and "
+                    "sleep across the whole record (resting HR falling and HRV "
+                    "rising are both good). Say what the long-run direction is",
+                    weekly[-52:]))
 
     if zones:
         out.append(("chart:intensity",

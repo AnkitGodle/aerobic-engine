@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from conftest import TODAY
 
 from core import ai, planner, strength
@@ -484,3 +486,68 @@ def test_the_floor_declares_any_overshoot(healthy):
     if planned > envelope.max_week_minutes:
         assert any("floor" in a or "long" in a for a in plan.adjustments_made), \
             plan.adjustments_made
+
+
+# --------------------------------------------------------------------------
+# Watch-recorded strength sets. If a session logged on the 265 does not map
+# back into the library, it never reaches the progression, and the athlete's
+# next session is built on a session that looks like it never happened.
+# --------------------------------------------------------------------------
+
+GARMIN_CASES = [
+    # (category, name, expected library id)
+    ("CALF_RAISE", "STANDING_CALF_RAISE", "calf_raise_straight"),
+    ("CALF_RAISE", "SEATED_CALF_RAISE", "calf_raise_bent"),
+    ("CALF_RAISE", "SINGLE_LEG_CALF_RAISE", "calf_raise_single_leg"),
+    ("SQUAT", "SPLIT_SQUAT", "split_squat"),
+    ("SQUAT", "BULGARIAN_SPLIT_SQUAT", "split_squat"),
+    ("SQUAT", "SPANISH_SQUAT", "spanish_squat"),
+    ("SQUAT", "WALL_SIT", "wall_sit"),
+    ("SQUAT", "GOBLET_SQUAT", "goblet_squat"),
+    ("SQUAT", "SINGLE_LEG_STEP_DOWN", "step_down"),
+    ("DEADLIFT", "ROMANIAN_DEADLIFT", "rdl"),
+    ("DEADLIFT", "SINGLE_LEG_ROMANIAN_DEADLIFT", "single_leg_rdl"),
+    ("LUNGE", "REVERSE_LUNGE", "reverse_lunge"),
+    ("STEP_UP", "BOX_STEP_UP", "step_up"),
+    ("HIP_RAISE", "GLUTE_BRIDGE", "glute_bridge"),
+    ("HIP_RAISE", "BARBELL_HIP_THRUST", "hip_thrust"),
+    ("HIP_STABILITY", "SIDE_LYING_LEG_RAISE", "side_lying_abduction"),
+    ("HIP_STABILITY", "LATERAL_BAND_WALK", "band_monster_walk"),
+    ("PLANK", "SIDE_PLANK", "side_plank_hip_lift"),
+    ("PLANK", "SIDE_PLANK_HIP_ADDUCTION", "copenhagen_plank"),
+    ("LEG_CURL", "NORDIC_HAMSTRING_CURL", "nordic_curl_assisted"),
+    ("TIBIALIS_RAISE", "TOE_RAISE", "tib_raise"),
+]
+
+
+@pytest.mark.parametrize("category,name,expected", GARMIN_CASES)
+def test_garmin_exercises_map_into_the_library(category, name, expected):
+    assert strength.map_garmin_exercise(category, name) == expected
+
+
+def test_a_specific_name_beats_a_generic_category():
+    """Garmin sends both, and the category is also a key in the table.
+
+    Without name-before-category precedence, HIP_STABILITY / LATERAL_BAND_WALK
+    logged a banded walk as a side-lying leg raise — a real mis-attribution that
+    would then drive the wrong exercise's progression.
+    """
+    assert strength.map_garmin_exercise(
+        "HIP_STABILITY", "LATERAL_BAND_WALK") == "band_monster_walk"
+    assert strength.map_garmin_exercise("SQUAT", "SPANISH_SQUAT") == "spanish_squat"
+
+
+def test_every_library_exercise_is_reachable_from_garmin():
+    """Otherwise a prescribed exercise could never be auto-logged from the watch."""
+    reachable = set(strength.GARMIN_EXERCISE_MAP.values())
+    # The isometric calf hold is the one exception: the watch records it as a
+    # calf raise, because it cannot tell a hold from a rep.
+    missing = set(strength.EXERCISES) - reachable - {"single_leg_calf_hold"}
+    assert not missing, sorted(missing)
+
+
+def test_an_unknown_exercise_is_left_unmapped_not_guessed():
+    """A wrong guess corrupts whatever it is mistaken for; None asks the athlete."""
+    assert strength.map_garmin_exercise("BENCH_PRESS", "BARBELL_BENCH_PRESS") is None
+    assert strength.map_garmin_exercise("SHOULDER_PRESS", "OVERHEAD_PRESS") is None
+    assert strength.map_garmin_exercise(None, None) is None

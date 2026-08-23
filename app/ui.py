@@ -47,7 +47,9 @@ CSS = """
     --ic-surface: rgba(140,158,176,.09);
     --ic-surface-2: rgba(140,158,176,.045);
   }
-  .block-container { padding-top: 1.8rem; padding-bottom: 3rem; max-width: 1080px; }
+  /* Enough headroom for the wordmark. Streamlit's default is larger still; this
+     trims it without cutting into the first element. */
+  .block-container { padding-top: 2.4rem; padding-bottom: 3rem; max-width: 1080px; }
 
   /* Every injected block owns its own vertical space. Streamlit's container gap
      is deliberately NOT overridden here: doing so removed the spacing between
@@ -104,6 +106,19 @@ CSS = """
   [data-testid="stVerticalBlockBorderWrapper"] {
       border-color: var(--ic-line) !important; border-radius: 6px !important;
       background: var(--ic-surface-2); }
+  /* No negative top margin here. The wordmark is the tallest text on the page,
+     and pulling it up past the container's padding clipped its ascenders — the
+     top of "Aerobic Engine" was sliced off. */
+  .ic-brand { display: flex; align-items: center; gap: .7rem;
+              margin: 0 0 .9rem; padding-top: .1rem; }
+  .ic-brand svg { flex: 0 0 auto; opacity: .95; }
+  .ic-brand-name { font-size: 1.5rem; font-weight: 680; line-height: 1.3;
+                   letter-spacing: -.01em; padding-top: .05rem; }
+  .ic-brand-sub { font-size: .8rem; opacity: .58; margin-top: .12rem; }
+  .ic-sidebrand { display: flex; align-items: center; gap: .55rem;
+                  margin: 0 0 .5rem; }
+  .ic-sidebrand-name { font-size: .95rem; font-weight: 650; letter-spacing: .01em; }
+
   .ic-frame-title { font-size: .72rem; letter-spacing: .06em;
                     text-transform: uppercase; opacity: .55;
                     margin: 0 0 .15rem .05rem; }
@@ -191,6 +206,43 @@ def esc(value: object) -> str:
 
 def load_css() -> None:
     st.markdown(CSS, unsafe_allow_html=True)
+
+
+# The mark is the app's actual thesis drawn once: a rising performance line and
+# a falling heart-rate line crossing. Inline SVG rather than an image file, for
+# three reasons that all matter here — a deployed page makes no external request
+# for it (the strict CSP on a hosted artifact would block a CDN anyway), it stays
+# crisp at any size, and it inherits currentColor so it works in both themes
+# without shipping two files.
+LOGO_SVG = """
+<svg viewBox="0 0 40 40" width="{size}" height="{size}" role="img"
+     aria-label="Aerobic Engine" fill="none"
+     xmlns="http://www.w3.org/2000/svg">
+  <circle cx="20" cy="20" r="18.5" stroke="currentColor" stroke-opacity=".22"
+          stroke-width="1.4"/>
+  <path d="M7 27.5 C13 27.5 15.5 12.5 21 12.5 C26 12.5 30 16 33 12.5"
+        stroke="#3FB68B" stroke-width="2.4" stroke-linecap="round"/>
+  <path d="M7 15.5 C12 15.5 13.5 22 17 22 L19 18 L21.5 26 L24 22 L33 22"
+        stroke="#DB5F5A" stroke-width="1.7" stroke-linecap="round"
+        stroke-opacity=".9"/>
+</svg>
+"""
+
+
+def logo(size: int = 34) -> str:
+    """The mark as inline SVG, ready to drop into a markdown block."""
+    return LOGO_SVG.format(size=size)
+
+
+def brand(title: str, subtitle: str = "") -> None:
+    """Mark and wordmark together, for the top of the page."""
+    st.markdown(
+        f'<div class="ic-brand">{logo(38)}'
+        f'<div><div class="ic-brand-name">{esc(title)}</div>'
+        + (f'<div class="ic-brand-sub">{esc(subtitle)}</div>' if subtitle else "")
+        + "</div></div>",
+        unsafe_allow_html=True,
+    )
 
 
 def page_title(title: str, subtitle: str = "") -> None:

@@ -61,7 +61,7 @@ except ImportError:  # pragma: no cover - SQLite-only environments
 
 load_dotenv()
 log = logging.getLogger("aerobic_engine.ui")
-st.set_page_config(page_title="Aerobic Engine", page_icon="🏊", layout="wide",
+st.set_page_config(page_title="Aerobic Engine", page_icon="📈", layout="wide",
                    initial_sidebar_state="collapsed")
 
 EMOJI = ui.SPORT_EMOJI
@@ -804,13 +804,23 @@ def trend_chart(wl: list[dict], today: date) -> None:
         return
     df = pd.DataFrame(wl)
     df["day"] = pd.to_datetime(df["day"])
-    metric = st.radio("Metric", ["Resting HR", "HRV", "Readiness", "Sleep"],
-                      horizontal=True, index=0, label_visibility="collapsed")
+    metric = st.radio(
+        "Metric",
+        ["Resting HR", "HRV", "Readiness", "Sleep", "Stress", "Respiration",
+         "Blood oxygen", "Steps"],
+        horizontal=True, index=0, label_visibility="collapsed")
     col, color = {
         "Resting HR": ("resting_hr", TONE["bad"]),
         "HRV": ("hrv_last_night", TONE["good"]),
         "Readiness": ("training_readiness", "#7FB6DC"),
         "Sleep": ("sleep_seconds", "#A98BD9"),
+        # Stress and respiration are recovery signals in their own right, and
+        # steps are the load that happens outside a session but still has to be
+        # recovered from.
+        "Stress": ("stress_avg", TONE["caution"]),
+        "Respiration": ("respiration_avg", "#8FBF9F"),
+        "Blood oxygen": ("spo2_avg", "#7FB6DC"),
+        "Steps": ("steps", "#B79A6B"),
     }[metric]
     if col not in df or not df[col].notna().any():
         st.caption(f"No {metric.lower()} recorded yet.")
@@ -1347,8 +1357,8 @@ def page_about(data: dict, today: date) -> None:
     from the charts: which constraints the AI cannot cross, why a number is
     missing rather than estimated, and what the data is not good enough to say.
     """
-    ui.page_title("About Aerobic Engine",
-                  "Iron Man training analytics with a rules-first planner.")
+    ui.brand("About Aerobic Engine",
+             "Endurance training analytics with a rules-first planner.")
 
     ui.section("What it is for")
     st.markdown(
@@ -1358,6 +1368,29 @@ def page_about(data: dict, today: date) -> None:
         "Garmin is treated as a sensor, not a coach. A Forerunner 265 has no "
         "triathlon coaching, so the cross-sport decisions — how the week divides "
         "between swim, bike, run and legs — are made here."
+    )
+
+    ui.section("How to use it", "A weekly rhythm, and one daily glance.")
+    ui.rows([
+        ("Every morning", "Today",
+         "what to train, with the exact heart-rate range"),
+        ("After a session", "nothing to do",
+         "the watch uploads; Refresh pulls it in"),
+        ("Feeling off", "Plan → check-in",
+         "sleep, soreness, motivation, time — the week re-plans"),
+        ("Once a week", "Progress",
+         "is heart rate falling at the same pace?"),
+        ("When it stalls", "Lifetime", "the long view, which weeks hide"),
+        ("Changing focus", "the header toggle",
+         "switch a sport off and the plan drops it"),
+    ])
+    st.markdown(
+        "**The one habit that makes it work:** log your leg sessions on the "
+        "watch in strength mode. They come back automatically, count towards "
+        "training load, and keep readiness honest — and the progression only "
+        "advances from a session it can see.\n\n"
+        "**The one number to watch:** heart rate at your usual pace, on "
+        "Progress. Everything else is context for it."
     )
 
     ui.section("How a week gets planned", "Three layers, in this order.")
@@ -1430,6 +1463,14 @@ def page_about(data: dict, today: date) -> None:
          "stored as a salted hash, never in plain text"),
         ("Reading", "open if shared", "set DASHBOARD_PASSWORD to close it"),
     ])
+    ui.section("Source")
+    st.markdown(
+        "The code is public at "
+        "[github.com/AnkitGodle/aerobic-engine]"
+        "(https://github.com/AnkitGodle/aerobic-engine) — including the rules "
+        "the planner enforces and the tests that prove it does. The data is not: "
+        "no health data is in the repository."
+    )
     st.caption(
         "Built with the unofficial Garmin Connect API for personal use. Not "
         "affiliated with or endorsed by Garmin. Not medical advice."
@@ -1490,6 +1531,36 @@ def log_sessions(data: dict, today: date) -> None:
         ui.banner("Not counted as steady", f"{act.get('steady_reason')}. It still "
                   f"appears on the efficiency chart, marked as a harder effort.",
                   "caution")
+    wx = (data.get("weather") or {}).get(aid)
+    if wx and wx.get("temp_c") is not None:
+        dew = wx.get("dew_point_c")
+        bits = [f"{wx['temp_c']:.0f}°C"]
+        if wx.get("humidity_pct"):
+            bits.append(f"{wx['humidity_pct']:.0f}% humidity")
+        if dew is not None:
+            bits.append(f"dew point {dew:.0f}°C")
+        if wx.get("wind_kph"):
+            bits.append(f"wind {wx['wind_kph']:.0f} kph")
+        if wx.get("condition"):
+            bits.append(str(wx["condition"]).lower())
+        ui.section("Conditions", " · ".join(bits))
+        # Dew point, not temperature, is what limits evaporative cooling — which
+        # is why a humid 24C session costs more beats than a dry 30C one.
+        if dew is not None:
+            if dew >= 21:
+                st.warning(
+                    f"A dew point of {dew:.0f}°C badly limits cooling: expect "
+                    f"5-10 bpm more at the same pace, and read this session's "
+                    f"efficiency as weather rather than fitness.")
+            elif dew >= 16:
+                st.info(
+                    f"A dew point of {dew:.0f}°C costs a few beats a minute at "
+                    f"the same pace. Worth remembering before reading anything "
+                    f"into this session.")
+            else:
+                st.caption("Cool and dry enough that the numbers here are "
+                           "comparable with other sessions.")
+
     zrows = [z for z in data["zones"] if z["activity_id"] == aid]
     if zrows:
         st.markdown("**Time in each heart-rate zone**")
@@ -1700,6 +1771,10 @@ def log_data(data: dict) -> None:
 
 def sidebar(data: dict) -> None:
     with st.sidebar:
+        st.markdown(
+            f'<div class="ic-sidebrand">{ui.logo(24)}'
+            f'<div class="ic-sidebrand-name">Aerobic Engine</div></div>',
+            unsafe_allow_html=True)
         st.subheader(data["name"] or "Athlete", anchor=False)
         st.caption(f"{data['counts']['activities']} activities · "
                    f"{data['counts']['daily_wellness']} days of wellness")
@@ -1750,17 +1825,20 @@ def filter_bar(data: dict, today: date) -> tuple[date, list[str]]:
     disagree with each other about what the page is showing. One row above the
     strip stays visible on all four pages and cannot drift.
     """
-    spacer, week_col, sport_col = st.columns([2, 2, 3], vertical_alignment="bottom")
+    # Weighted so the controls sit hard right rather than floating mid-page, with
+    # the note filling the space on the left instead of leaving it blank.
+    # Sport column wide enough for four pills on one line; they wrapped at 3.2.
+    note_col, week_col, sport_col = st.columns([3, 2.3, 4.2],
+                                               vertical_alignment="center")
     with week_col:
         today = week_picker(today)
     with sport_col:
         sports = sport_filter(data)
-    with spacer:
+    with note_col:
         if set(sports) != set(FILTER_SPORTS):
             st.caption("Recovery, HRV and sleep still cover everything — they "
-                       "are not attributable to one sport. The written summary "
-                       "is generated at sync time, so it describes all of your "
-                       "training.")
+                       "are not attributable to one sport, and the written "
+                       "summary describes all of your training.")
     return today, sports
 
 
@@ -1894,8 +1972,10 @@ def week_picker(today: date) -> date:
     remembered = st.session_state.get("week_choice")
     current = remembered if remembered in labels.values() else week_start_of(today)
     index = next((i for i, k in enumerate(keys) if labels[k] == current), 1)
-    picked = labels[st.selectbox("Week (Mon–Sun)", keys, index=index,
-                                 key="week_select")]
+    picked = labels[st.selectbox(
+        "Week (Mon–Sun)", keys, index=index, key="week_select",
+        label_visibility="collapsed",
+        help="Monday to Sunday. Everything on the page follows this week.")]
     st.session_state["week_choice"] = picked
 
     if picked == this_monday:
@@ -1977,7 +2057,7 @@ def main() -> None:
         return
 
     sidebar(data)
-    ui.page_title(
+    ui.brand(
         "Aerobic Engine",
         (f"{data['name']} · " if data["name"] else "")
         + "Garmin Forerunner 265 · base phase · synced "

@@ -657,7 +657,7 @@ def zone_distribution(
 def polarisation(zone_rows: Sequence[dict[str, Any]], **kw: Any) -> dict[str, float]:
     """Easy / moderate / hard split, as percentages of recorded time.
 
-    Iron Man base wants the large majority easy. A "moderate" bulge — the
+    Endurance base wants the large majority easy. A "moderate" bulge — the
     junk-mile zone — is the classic way to accumulate fatigue without adaptation.
     """
     dist = zone_distribution(zone_rows, **kw)
