@@ -31,6 +31,7 @@ import app.ui as ui  # noqa: E402
 from core import ai, insights, planner, strength, sync as sync_mod  # noqa: E402
 from core.analysis import (  # noqa: E402
     ZONE_LABELS,
+    aerobic_ceiling_options,
     zone_bounds,
     baseline_trend,
     hr_points,
@@ -131,7 +132,7 @@ def load(stamp: float) -> dict:  # noqa: ARG001 - stamp is the cache key
             "counts": s.counts(), "targets": s.targets(), "notes": s.notes(),
             "last_sync": s.get_state("last_sync"),
             "name": s.get_state("athlete_name") or "",
-            "thresholds": {k: s.get_state(f"threshold_{k}")
+            "thresholds": {k: s.get_state(k)
                            for k in ("threshold_hr", "running_ftp", "cycling_ftp")},
             "plan": s.latest_plan(week_start_of(date.today())),
         }
@@ -718,8 +719,17 @@ def page_plan(data: dict, today: date) -> None:
     with Store(db_path()) as _s:
         bounds = zone_bounds(_s.zones())
     if bounds:
+        with Store(db_path()) as _s:
+            lthr = _s.get_state("threshold_hr")
+            saved_ceiling = _s.get_state("aerobic_ceiling_bpm")
+        lthr_f = float(lthr) if lthr else None
+        opts = aerobic_ceiling_options(bounds, lthr_f)
+        ceiling = int(float(saved_ceiling)) if saved_ceiling else opts["garmin_z2_top"]
+
         ui.section("Your heart-rate zones",
-                   "Straight from Garmin, so these match what the watch shows.")
+                   "From Garmin, so they match the watch. Note Z5 starts exactly "
+                   "at your threshold heart rate — these zones are anchored to "
+                   "threshold, not to an estimated maximum.")
         ui.stats_row([
             {"label": f"Z{z}", "value": (f"{lo}–{hi}" if hi else f"{lo}+"),
              "note": {1: "recovery", 2: "aerobic base", 3: "tempo",
@@ -727,6 +737,41 @@ def page_plan(data: dict, today: date) -> None:
              "tone": "good" if z == 2 else ("bad" if z >= 4 else "neutral")}
             for z, (lo, hi) in sorted(bounds.items())
         ])
+
+        if opts["candidates"]:
+            ui.section("What counts as easy for you",
+                       f"Garmin's Z2 ceiling is {opts['garmin_z2_top']} bpm — "
+                       f"{opts['garmin_z2_top'] / lthr_f * 100:.0f}% of your "
+                       f"{int(lthr_f)} bpm threshold, which is conservative next to "
+                       f"the common threshold-anchored schemes below. If Z2 feels "
+                       f"absurdly slow, you are probably right; set your own "
+                       f"ceiling and every Z2 target follows it.")
+            ui.stats_row([
+                {"label": c["label"], "value": f"{c['bpm']} bpm", "note": c["note"],
+                 "tone": "good" if c["bpm"] == ceiling else "neutral"}
+                for c in opts["candidates"]
+            ])
+            with st.form("ceiling"):
+                cc = st.columns([2, 1], vertical_alignment="bottom")
+                new_ceiling = cc[0].slider(
+                    "Your aerobic-base ceiling (bpm)",
+                    int(bounds[2][0]) + 5, int(lthr_f) - 5, int(ceiling),
+                    help="The real test is speech: the highest heart rate at which "
+                         "you can still talk in full sentences. Nothing in the "
+                         "data can tell you that, so this is your call.")
+                if cc[1].form_submit_button("Save ceiling", type="primary",
+                                           width="stretch",
+                                           disabled=not unlocked) and writes_allowed():
+                    with Store(db_path()) as _s:
+                        _s.set_state("aerobic_ceiling_bpm", str(int(new_ceiling)))
+                    refresh()
+                    st.rerun()
+            if ceiling and ceiling > (bounds[2][1] or 0):
+                st.caption(
+                    f"⚠ At {ceiling} bpm you are in Garmin's Z3, so the Intensity "
+                    f"page will still count that time as 'moderate' — it reports "
+                    f"Garmin's own zone buckets, which do not move with this setting."
+                )
 
     ui.section("Your weekly targets",
                "How much of each sport you want. The scheduler builds around this; "
@@ -759,14 +804,26 @@ def page_plan(data: dict, today: date) -> None:
                                        width="stretch", disabled=not unlocked)
         clear = b[1].form_submit_button("Clear", width="stretch",
                                         disabled=not unlocked)
-    if save and writes_allowed():
+    if (save or clear) and writes_allowed():
+        # Changing which sports are on IS a planning decision, so rebuild
+        # immediately rather than making the athlete find a second button.
         with Store(db_path()) as s:
-            s.set_targets(rows)
-        refresh()
-        st.rerun()
-    if clear and writes_allowed():
-        with Store(db_path()) as s:
-            s.clear_targets()
+            if clear:
+                s.clear_targets()
+            else:
+                s.set_targets(rows)
+            last = s.latest_checkin()
+            ci = Checkin(
+                date=today, sleep=(last or {}).get("sleep") or 3,
+                soreness=(last or {}).get("soreness") or 3,
+                motivation=(last or {}).get("motivation") or 3,
+                time_available_min=(last or {}).get("time_available_min") or 90,
+                notes=(last or {}).get("notes") or "") if last else None
+            with st.spinner("Rebuilding your week around that…"):
+                plan = planner.plan_week(s, checkin=ci, today=today,
+                                         use_ai=ai.available())
+        st.session_state["plan"] = plan.model_dump(mode="json")
+        st.session_state.pop("plan_editor", None)
         refresh()
         st.rerun()
 

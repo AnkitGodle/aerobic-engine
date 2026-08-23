@@ -313,8 +313,11 @@ def _sync_locked(
 
     thresholds = client.fetch_thresholds()
     for k, v in thresholds.items():
+        # The keys already read as names ("threshold_hr", "cycling_ftp"), so they
+        # are stored as-is. They used to be prefixed again, producing
+        # "threshold_threshold_hr" and a lookup nobody would guess.
         if v is not None:
-            store.set_state(f"threshold_{k}", str(v))
+            store.set_state(k, str(v))
     if client.display_name:
         store.set_state("athlete_name", client.display_name)
 

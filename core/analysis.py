@@ -569,8 +569,70 @@ def zone_bounds(zone_rows: Sequence[dict[str, Any]]) -> dict[int, tuple[int, int
     return out
 
 
-def zone_target(bounds: dict[int, tuple[int, int | None]], zone: str) -> str | None:
-    """"Z2" -> "112-129 bpm". None when the zone is not a numbered one."""
+def aerobic_ceiling_options(
+    bounds: dict[int, tuple[int, int | None]], threshold_hr: float | None
+) -> dict[str, Any]:
+    """What "easy" should mean in bpm for this athlete, and the case for each answer.
+
+    Garmin's zones here are anchored to lactate threshold, not to an estimated
+    max HR — Z5 begins exactly at the reported threshold. That makes its Z2
+    ceiling 77% of threshold, which is conservative next to the common
+    threshold-anchored schemes: Friel puts aerobic endurance at 81-89%, and
+    "below the first lactate threshold" is usually taken as roughly 85%.
+
+    So an athlete who feels that Garmin's ceiling is too low is often right. This
+    returns the candidates rather than picking one, because the honest answer is
+    a talk test — the highest heart rate at which you can still speak in full
+    sentences — and that is not in the data.
+    """
+    garmin = bounds.get(2, (None, None))[1]
+    out: dict[str, Any] = {
+        "garmin_z2_top": garmin,
+        "threshold_hr": int(threshold_hr) if threshold_hr else None,
+        "candidates": [],
+    }
+    if not threshold_hr:
+        return out
+    t = float(threshold_hr)
+    if garmin:
+        out["candidates"].append({
+            "bpm": int(garmin), "label": "Garmin Z2 ceiling",
+            "note": f"{garmin / t * 100:.0f}% of threshold — conservative",
+        })
+    out["candidates"].extend([
+        {"bpm": round(t * 0.83), "label": "Coggan endurance top",
+         "note": "83% of threshold"},
+        {"bpm": round(t * 0.85), "label": "below LT1 (polarised)",
+         "note": "85% of threshold — the common aerobic-base ceiling"},
+        {"bpm": round(t * 0.89), "label": "Friel aerobic top",
+         "note": "89% of threshold — the upper end of defensible"},
+    ])
+    return out
+
+
+def resolved_aerobic_ceiling(
+    bounds: dict[int, tuple[int, int | None]],
+    threshold_hr: float | None = None,
+    override: float | None = None,
+) -> int | None:
+    """The ceiling actually used for Z2 targets: the athlete's own if they set
+    one, otherwise Garmin's."""
+    if override:
+        return int(override)
+    return bounds.get(2, (None, None))[1]
+
+
+def zone_target(
+    bounds: dict[int, tuple[int, int | None]],
+    zone: str,
+    aerobic_ceiling: int | None = None,
+) -> str | None:
+    """"Z2" -> "112-129 bpm". None when the zone is not a numbered one.
+
+    `aerobic_ceiling` replaces the top of Z2 only. Garmin's Z2 ceiling is
+    conservative for many athletes, and the target on the plan should be the
+    number the athlete actually intends to train to.
+    """
     if not bounds or not zone or not zone.upper().startswith("Z"):
         return None
     try:
@@ -581,6 +643,8 @@ def zone_target(bounds: dict[int, tuple[int, int | None]], zone: str) -> str | N
     if not span:
         return None
     low, high = span
+    if z == 2 and aerobic_ceiling and aerobic_ceiling > low:
+        high = int(aerobic_ceiling)
     return f"{low}-{high} bpm" if high else f"{low}+ bpm"
 
 

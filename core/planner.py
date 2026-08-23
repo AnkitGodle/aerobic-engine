@@ -651,6 +651,7 @@ def enforce(
     envelope: Envelope,
     strength_log: Sequence[dict[str, Any]] = (),
     zone_bounds_map: dict[int, tuple[int, int | None]] | None = None,
+    aerobic_ceiling: int | None = None,
 ) -> WeekPlan:
     """Re-check every constraint in code. Returns a plan that cannot break them."""
     notes: list[str] = []
@@ -757,7 +758,7 @@ def enforce(
             days.remove(d)
 
     # 10. Concrete heart-rate targets, from the athlete's own Garmin zones.
-    _stamp_hr_targets(days, zone_bounds_map)
+    _stamp_hr_targets(days, zone_bounds_map, aerobic_ceiling)
 
     # 11. Descriptions must match the numbers that survived steps 1-8.
     _relabel(days, envelope)
@@ -875,7 +876,9 @@ def _ensure_long_sessions(
 
 
 def _stamp_hr_targets(
-    days: list[PlanDay], bounds: dict[int, tuple[int, int | None]] | None
+    days: list[PlanDay],
+    bounds: dict[int, tuple[int, int | None]] | None,
+    aerobic_ceiling: int | None = None,
 ) -> None:
     """Turn "Z2" into "112-129 bpm" using the athlete's real zone boundaries.
 
@@ -888,7 +891,7 @@ def _stamp_hr_targets(
     for d in days:
         if d.sport in ("rest", "strength") or d.duration_min <= 0:
             continue
-        target = zone_target(bounds, d.target_zone)
+        target = zone_target(bounds, d.target_zone, aerobic_ceiling)
         if target:
             d.target_hr = target
 
@@ -1208,9 +1211,11 @@ def plan_week(
     strength_log = store.strength_log(since=facts.week_start - timedelta(days=120))
 
     bounds = zone_bounds(store.zones())
+    ceiling_raw = store.get_state("aerobic_ceiling_bpm")
+    ceiling = int(float(ceiling_raw)) if ceiling_raw else None
     fallback = enforce(
         rules_plan(facts, envelope, strength_log, checkin), facts, envelope,
-        strength_log, zone_bounds_map=bounds,
+        strength_log, zone_bounds_map=bounds, aerobic_ceiling=ceiling,
     )
     payload = build_payload(
         facts, envelope, strength_log, checkin,
@@ -1242,7 +1247,7 @@ def plan_week(
             if not candidate.week_plan:
                 raise ai.AIUnavailable("AI returned an empty week")
             plan = enforce(candidate, facts, envelope, strength_log,
-                           zone_bounds_map=bounds)
+                           zone_bounds_map=bounds, aerobic_ceiling=ceiling)
         except ai.AIUnavailable as exc:
             log.info("AI layer unavailable (%s) — using the rules plan", exc)
             plan.flags.append(f"AI layer unavailable ({exc}); this is the rules-only plan")
