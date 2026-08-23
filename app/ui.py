@@ -49,7 +49,11 @@ CSS = """
   }
   /* Enough headroom for the wordmark. Streamlit's default is larger still; this
      trims it without cutting into the first element. */
-  .block-container { padding-top: 2.4rem; padding-bottom: 3rem; max-width: 1080px; }
+  /* No max-width. layout="wide" already spans the window; capping it here was
+     throwing away most of a wide screen and forcing the header controls to wrap
+     into a column that had plenty of room beside it. */
+  .block-container { padding-top: 2.4rem; padding-bottom: 3rem;
+                     max-width: none; padding-left: 2.2rem; padding-right: 2.2rem; }
 
   /* Every injected block owns its own vertical space. Streamlit's container gap
      is deliberately NOT overridden here: doing so removed the spacing between
@@ -110,7 +114,7 @@ CSS = """
      and pulling it up past the container's padding clipped its ascenders — the
      top of "Aerobic Engine" was sliced off. */
   .ic-brand { display: flex; align-items: center; gap: .7rem;
-              margin: 0 0 .9rem; padding-top: .1rem; }
+              margin: 0 0 .35rem; padding-top: .1rem; }
   .ic-brand svg { flex: 0 0 auto; opacity: .95; }
   .ic-brand-name { font-size: 1.5rem; font-weight: 680; line-height: 1.3;
                    letter-spacing: -.01em; padding-top: .05rem; }

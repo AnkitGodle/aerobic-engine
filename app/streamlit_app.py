@@ -1817,29 +1817,65 @@ def nav() -> str:
     return page
 
 
-def filter_bar(data: dict, today: date) -> tuple[date, list[str]]:
-    """Week and sport filters, top-right, above the tabs.
+def filter_summary(today: date, sports: list[str]) -> str:
+    """The popover's label. It has to say what is filtered, or the filter hides."""
+    monday = week_start_of(today)
+    span = f"{monday.strftime('%d %b')} – {(monday + timedelta(days=6)).strftime('%d %b')}"
+    if monday == week_start_of(date.today()):
+        span = "This week"
+    picked = "All sports" if set(sports) >= set(FILTER_SPORTS) else ", ".join(
+        sp.title() for sp in sports)
+    return f"{span} · {picked}"
 
-    Deliberately not one copy per tab: Streamlit executes every tab body on
-    every rerun, so four copies would need four widget keys and would then
-    disagree with each other about what the page is showing. One row above the
-    strip stays visible on all four pages and cannot drift.
+
+def filter_popover(data: dict, today: date) -> tuple[date, list[str]]:
+    """Week and sport filters behind one trigger.
+
+    One copy for the whole app, not one per page: Streamlit executes every tab
+    body on every rerun, so per-page copies would need distinct widget keys and
+    would then disagree about what the page is showing.
     """
-    # Weighted so the controls sit hard right rather than floating mid-page, with
-    # the note filling the space on the left instead of leaving it blank.
-    # Sport column wide enough for four pills on one line; they wrapped at 3.2.
-    note_col, week_col, sport_col = st.columns([3, 2.3, 4.2],
-                                               vertical_alignment="center")
-    with week_col:
+    remembered = st.session_state.get("week_choice")
+    label = filter_summary(
+        remembered if isinstance(remembered, date) else today,
+        active_sports(data))
+    with st.popover(f"⚙ {label}", width="stretch"):
         today = week_picker(today)
-    with sport_col:
         sports = sport_filter(data)
-    with note_col:
         if set(sports) != set(FILTER_SPORTS):
             st.caption("Recovery, HRV and sleep still cover everything — they "
                        "are not attributable to one sport, and the written "
                        "summary describes all of your training.")
     return today, sports
+
+
+def header_controls(data: dict, today: date) -> tuple[str, date, list[str]]:
+    """Title, navigation and filters. One place, so no page can disagree."""
+    # Three full-width rows, in reading order: what this is, where you are, what
+    # you are looking at. Sharing a row was the mistake — six tabs plus a week
+    # selector plus four pills do not fit across one column, so the nav wrapped
+    # and the filters ended up beside the wrap.
+    #
+    # The filters are left-aligned under the nav rather than pushed right: a
+    # right-aligned control with an empty half-page to its left reads as
+    # floating, and this is a toolbar, which belongs under the thing it filters.
+    ui.brand("Aerobic Engine", data["subtitle"])
+
+    # The filters live in a popover rather than laid out beside the tabs. Column
+    # ratios only ever "fit" a window you happened to test: a week selector plus
+    # four pills next to six tabs wraps as soon as the viewport, the font size or
+    # the number of sports changes. A single trigger button always fits, at any
+    # width, and its label carries the current state so nothing is hidden.
+    nav_col, filter_col = st.columns([5, 2], vertical_alignment="center")
+    with nav_col:
+        page = nav()
+    with filter_col:
+        today, sports = filter_popover(data, today)
+    if set(sports) != set(FILTER_SPORTS):
+        st.caption("Recovery, HRV and sleep still cover everything — they are "
+                   "not attributable to one sport, and the written summary "
+                   "describes all of your training.")
+    return page, today, sports
 
 
 def shown_sports() -> tuple[str, ...]:
@@ -1874,9 +1910,9 @@ def sport_filter(data: dict) -> list[str]:
     """
     saved = active_sports(data)
     picked = st.pills(
-        "Sports", FILTER_SPORTS, selection_mode="multi", default=saved,
+        "Sports shown", FILTER_SPORTS, selection_mode="multi", default=saved,
         format_func=lambda sp: f"{EMOJI.get(sp, '•')} {sp.title()}",
-        label_visibility="collapsed", key="sport_pills",
+        key="sport_pills",
         help="Filters every tab and the plan. Saved until you change it.")
 
     # Deselecting everything means "show me everything" rather than an empty
@@ -1974,7 +2010,6 @@ def week_picker(today: date) -> date:
     index = next((i for i, k in enumerate(keys) if labels[k] == current), 1)
     picked = labels[st.selectbox(
         "Week (Mon–Sun)", keys, index=index, key="week_select",
-        label_visibility="collapsed",
         help="Monday to Sunday. Everything on the page follows this week.")]
     st.session_state["week_choice"] = picked
 
@@ -2057,14 +2092,11 @@ def main() -> None:
         return
 
     sidebar(data)
-    ui.brand(
-        "Aerobic Engine",
+    data["subtitle"] = (
         (f"{data['name']} · " if data["name"] else "")
         + "Garmin Forerunner 265 · base phase · synced "
         + (data["last_sync"] or "never")[:16].replace("T", " "))
-
-    page = nav()
-    today, sports = filter_bar(data, today)
+    page, today, sports = header_controls(data, today)
 
     # Re-check the stored plan against the current rules here rather than in each
     # page. Doing it per page meant every page had to remember to, and the Today
