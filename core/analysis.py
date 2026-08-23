@@ -674,6 +674,80 @@ def polarisation(zone_rows: Sequence[dict[str, Any]], **kw: Any) -> dict[str, fl
     }
 
 
+def polarisation_from_streams(
+    streams: dict[str, Sequence[dict[str, Any]]],
+    activities: Sequence[dict[str, Any]],
+    ceiling: float,
+    hard_floor: float | None = None,
+    sport: str | None = None,
+    since: date | None = None,
+) -> dict[str, Any]:
+    """Easy / moderate / hard from the heart-rate samples, against `ceiling`.
+
+    Exists because the zone version cannot answer the question the athlete is
+    actually asking. `polarisation()` buckets Garmin's own time-in-zone rows, and
+    Garmin's Z2 top is fixed — so an athlete who has deliberately set a higher
+    aerobic ceiling sees every minute spent between the two counted as
+    "moderate", and their easy share never improves no matter how they train.
+
+    Here "easy" means at or below the ceiling they chose. `hard_floor` should be
+    the athlete's Z4 lower bound, which is what Garmin itself treats as hard —
+    passing anything else makes this number incomparable with the zone version
+    and changes two variables at once when only one was configured.
+
+    Computed from the stored samples, so changing the ceiling changes the answer
+    without refetching anything from Garmin.
+
+    Sample-counted rather than duration-weighted: streams are downsampled at a
+    constant interval per activity, so each sample stands for the same slice of
+    time within that activity.
+    """
+    # Default only as a fallback. The caller should pass the real Z4 boundary.
+    floor = float(hard_floor) if hard_floor else float(ceiling) * 1.18
+    if floor <= ceiling:
+        floor = float(ceiling) + 1.0
+    by_sport = {str(a.get("activity_id")): (a.get("sport") or "") for a in activities}
+    days = {str(a.get("activity_id")): a.get("start_date") for a in activities}
+
+    easy = moderate = hard = 0
+    counted = 0
+    for activity_id, samples in (streams or {}).items():
+        if sport and by_sport.get(activity_id) != sport:
+            continue
+        if since is not None:
+            day = _as_date(days.get(activity_id)) if days.get(activity_id) else None
+            if day is None or day < since:
+                continue
+        used = False
+        for row in samples or ():
+            hr = row.get("hr")
+            if hr is None:
+                continue
+            used = True
+            if hr <= ceiling:
+                easy += 1
+            elif hr >= floor:
+                hard += 1
+            else:
+                moderate += 1
+        counted += int(used)
+
+    total = easy + moderate + hard
+    if total <= 0:
+        return {"easy": 0.0, "moderate": 0.0, "hard": 0.0, "samples": 0,
+                "activities": 0, "ceiling": int(ceiling),
+                "hard_floor": int(floor)}
+    return {
+        "easy": round(easy / total * 100, 1),
+        "moderate": round(moderate / total * 100, 1),
+        "hard": round(hard / total * 100, 1),
+        "samples": total,
+        "activities": counted,
+        "ceiling": int(ceiling),
+        "hard_floor": int(floor),
+    }
+
+
 # How much data the EF trend actually needs, so the UI can say so plainly
 # instead of showing an empty chart.
 EF_MIN_FOR_CHART = 2

@@ -42,6 +42,7 @@ from core.analysis import (  # noqa: E402
     ef_data_status,
     ef_points,
     polarisation,
+    polarisation_from_streams,
     recovery_signals,
     totals,
     volume_forecast,
@@ -646,7 +647,7 @@ def page_progress(data: dict, today: date) -> None:
     with b, ui.card("Where your effort goes",
                     "Base phase wants most time easy. Hard work costs recovery "
                     "without adding much base."):
-        intensity_block(zones, today, data.get("notes"))
+        intensity_block(zones, today, data.get("notes"), data)
 
     c, d = st.columns(2, gap="medium")
     with c, ui.card("Efficiency against your own baseline",
@@ -667,19 +668,44 @@ def page_progress(data: dict, today: date) -> None:
 
 
 def intensity_block(zones: list[dict], today: date,
-                    notes: dict | None = None) -> None:
+                    notes: dict | None = None, data: dict | None = None) -> None:
     if not zones:
         st.caption("No zone data yet — sync from Garmin.")
         return
     since = today - timedelta(days=28)
+
+    # Measured against the athlete's own aerobic ceiling where one is set, not
+    # Garmin's fixed Z2 top. Otherwise every minute deliberately spent between
+    # the two counts as "moderate", the easy share can never improve, and this
+    # page contradicts the setting on the Plan page.
     pol = polarisation(zones, since=since)
-    ui.proportion_bar([("easy", pol["easy"], TONE["good"]),
-                       ("moderate", pol["moderate"], TONE["caution"]),
-                       ("hard", pol["hard"], TONE["bad"])])
-    verdict = ("On target — base phase wants 70%+ easy." if pol["easy"] >= 70
+    bounds = zone_bounds(zones)
+    custom = None
+    ceiling = (data or {}).get("aerobic_ceiling")
+    if ceiling:
+        custom = stream_polarisation(
+            db_stamp(), today.isoformat(), int(float(ceiling)),
+            int(bounds.get(4, (0, 0))[0] or 0), tuple(sorted(shown_sports())))
+
+    live = bool(custom and custom.get("samples"))
+    shown = custom if live else pol
+    ui.proportion_bar([("easy", shown["easy"], TONE["good"]),
+                       ("moderate", shown["moderate"], TONE["caution"]),
+                       ("hard", shown["hard"], TONE["bad"])])
+    verdict = ("On target — base phase wants 70%+ easy." if shown["easy"] >= 70
                else "Inverted: base phase wants roughly the reverse of this."
-               if pol["hard"] >= 35 else "Drifting harder than base phase wants.")
-    st.caption(f"Last 28 days. {verdict}")
+               if shown["hard"] >= 35 else "Drifting harder than base phase wants.")
+    if live:
+        st.caption(f"Last 28 days, counting anything at or below your "
+                   f"{custom['ceiling']} bpm ceiling as easy. {verdict}")
+        st.caption(
+            f"Garmin's own zones stop easy at {bounds.get(2, (0, 0))[1]} bpm and "
+            f"read {pol['easy']:.0f}% easy / {pol['moderate']:.0f}% moderate / "
+            f"{pol['hard']:.0f}% hard for the same period. Hard starts at the same "
+            f"{custom['hard_floor']} bpm either way, so the difference is entirely "
+            f"your raised ceiling.")
+    else:
+        st.caption(f"Last 28 days, on Garmin's zones. {verdict}")
     chart_ai_note("intensity", notes)
     with st.expander("Zone breakdown by sport"):
         for sport in shown_sports():
@@ -975,9 +1001,10 @@ def page_plan(data: dict, today: date) -> None:
                     st.rerun()
             if ceiling and ceiling > (bounds[2][1] or 0):
                 st.caption(
-                    f"⚠ At {ceiling} bpm you are in Garmin's Z3, so the Intensity "
-                    f"page will still count that time as 'moderate' — it reports "
-                    f"Garmin's own zone buckets, which do not move with this setting."
+                    f"At {ceiling} bpm you are above Garmin's Z2, so Garmin itself "
+                    f"will call that time 'moderate'. The Intensity page measures "
+                    f"against this ceiling instead, from your stored heart-rate "
+                    f"samples, and shows both numbers side by side."
                 )
 
     ui.section("Your weekly targets",
@@ -1234,6 +1261,27 @@ def conformed_plan(plan: dict | None, today: date,
     return _conformed_plan(db_stamp(), today.isoformat(),
                            _json.dumps(plan, sort_keys=True, default=str),
                            tuple(sorted(sports or ())))
+
+
+@st.cache_data(show_spinner=False, ttl=900)
+def stream_polarisation(stamp: float, iso_today: str, ceiling: int,
+                        hard_floor: int,
+                        sports: tuple[str, ...] = ()) -> dict:  # noqa: ARG001
+    """Easy/moderate/hard from the stored HR samples rather than Garmin's zone
+    rows. Cached, because it reads every stream — the one genuinely heavy query
+    on the page."""
+    try:
+        def read(s: Store) -> dict:
+            acts = [a for a in s.activities()
+                    if not sports or a.get("sport") in set(sports)]
+            streams = {a["activity_id"]: s.stream(a["activity_id"]) for a in acts}
+            return polarisation_from_streams(
+                streams, acts, ceiling=ceiling, hard_floor=hard_floor or None,
+                since=date.fromisoformat(iso_today) - timedelta(days=28))
+        return with_store(read)
+    except Exception as exc:  # noqa: BLE001 - fall back to Garmin's own buckets
+        log.warning("Stream polarisation failed: %s", exc)
+        return {}
 
 
 @st.cache_data(show_spinner=False, ttl=900)
