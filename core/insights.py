@@ -77,20 +77,20 @@ def overview_insight(data: dict, today: date) -> PageInsight:
     rhr = baseline_trend(wl, "resting_hr", as_of=today, lower_is_better=True)
     if rhr["verdict"] == "improving":
         bullets.append(
-            f"Resting heart rate is down {abs(rhr['change']):.1f} bpm on the previous "
-            f"28 days — the aerobic engine is growing."
+            f"Resting heart rate is trending down {abs(rhr['per_week']):.2f} bpm a "
+            f"week — the aerobic engine is growing."
         )
         tone = "success"
     elif rhr["verdict"] == "worsening":
         bullets.append(
-            f"Resting heart rate is up {rhr['change']:.1f} bpm on the previous 28 "
-            f"days. That usually means accumulated fatigue, illness or poor sleep."
+            f"Resting heart rate is trending up {rhr['per_week']:.2f} bpm a week. "
+            f"That usually means accumulated fatigue, illness or poor sleep."
         )
         tone = "warning"
     elif rhr["verdict"] == "insufficient_data":
         bullets.append(
-            "Not enough history yet to say whether your resting-heart-rate baseline "
-            "is moving. It needs about eight weeks of nights."
+            f"Resting heart rate needs {rhr.get('needed', 'more data')} before a "
+            f"trend can be called."
         )
 
     if data["zones"]:

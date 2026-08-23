@@ -14,6 +14,7 @@ the athlete's own notes.
 from __future__ import annotations
 
 import html
+from contextlib import contextmanager
 from typing import Iterable, Literal
 
 import streamlit as st
@@ -46,7 +47,7 @@ CSS = """
     --ic-surface: rgba(140,158,176,.09);
     --ic-surface-2: rgba(140,158,176,.045);
   }
-  .block-container { padding-top: 1.8rem; padding-bottom: 3rem; max-width: 1280px; }
+  .block-container { padding-top: 1.8rem; padding-bottom: 3rem; max-width: 1080px; }
 
   /* Every injected block owns its own vertical space. Streamlit's container gap
      is deliberately NOT overridden here: doing so removed the spacing between
@@ -65,8 +66,8 @@ CSS = """
   /* Stat cards: min-height, never height:100% — a percentage height inside an
      auto-height flex column collapses and the text spills over the border. */
   .ic-stat { border: 1px solid var(--ic-line); border-radius: 14px;
-             background: var(--ic-surface); padding: 14px 16px;
-             min-height: 104px; margin: 0 0 10px;
+             background: var(--ic-surface); padding: 12px 15px;
+             min-height: 92px; margin: 0 0 9px;
              display: flex; flex-direction: column; justify-content: flex-start;
              overflow: hidden; }
   .ic-stat-label { font-size: .71rem; letter-spacing: .07em; text-transform: uppercase;
@@ -113,7 +114,7 @@ CSS = """
   @media (max-width: 1100px) { .ic-week { grid-template-columns: repeat(4, minmax(0,1fr)); } }
   @media (max-width: 700px)  { .ic-week { grid-template-columns: repeat(2, minmax(0,1fr)); } }
   .ic-day { border: 1px solid var(--ic-line); border-radius: 11px; padding: 10px;
-            background: var(--ic-surface-2); min-height: 104px; min-width: 0;
+            background: var(--ic-surface-2); min-height: 82px; min-width: 0;
             overflow: hidden; }
   .ic-day.today { border-color: var(--ic-good); background: var(--ic-surface); }
   .ic-day.rest { opacity: .5; }
@@ -126,6 +127,17 @@ CSS = """
   .ic-item b { font-weight: 620; }
   .ic-item.done { opacity: .48; }
   .ic-item-zone { font-size: .69rem; opacity: .5; }
+
+  /* Chart panels */
+  .ic-card-title { font-size: .93rem; font-weight: 620; letter-spacing: -.01em;
+                   margin: 0 0 .15rem; }
+  .ic-card-note { font-size: .78rem; opacity: .55; line-height: 1.45;
+                  margin: 0 0 .5rem; }
+  [data-testid="stVerticalBlockBorderWrapper"] { border-radius: 14px; height: 100%; }
+  /* Equal-height panels across a row */
+  [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] { display: flex; }
+  [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]
+    > [data-testid="stVerticalBlock"] { width: 100%; }
 
   [data-testid="stTabs"] button p { font-size: .95rem; font-weight: 570; }
   section[data-testid="stSidebar"] { width: 320px !important; }
@@ -253,6 +265,20 @@ def week_strip(days: list[dict]) -> None:
         )
     st.markdown(f'<div class="ic-week">{"".join(cells)}</div>',
                 unsafe_allow_html=True)
+
+
+@contextmanager
+def card(title: str = "", note: str = ""):
+    """A bordered panel. Charts sitting directly on the page background read as
+    unfinished; giving each one a surface also makes a two-column grid legible."""
+    with st.container(border=True):
+        if title:
+            st.markdown(f'<div class="ic-card-title">{esc(title)}</div>',
+                        unsafe_allow_html=True)
+        if note:
+            st.markdown(f'<div class="ic-card-note">{esc(note)}</div>',
+                        unsafe_allow_html=True)
+        yield
 
 
 def chart(fig, height: int = 260) -> None:

@@ -286,6 +286,7 @@ def build_envelope(
     facts: PlannerFacts,
     store: Store | None = None,
     targets: dict[str, dict[str, Any]] | None = None,
+    include_recovery_triggers: bool = True,
 ) -> Envelope:
     """The bounds the AI plans inside. Deterministic, and it always wins.
 
@@ -299,7 +300,12 @@ def build_envelope(
         targets = store.targets()
     targets = targets or {}
     idx = week_index(facts, store)
-    triggers = deload_triggers(facts)
+    # Today's recovery signals govern today's week. They must NOT govern a week
+    # that has not started: Training Readiness recovers overnight, so a plan for
+    # next Monday built on tonight's trough would be permanently deloaded. The
+    # scheduled 4-week deload still applies, and the real signals are re-checked
+    # when the week arrives.
+    triggers = deload_triggers(facts) if include_recovery_triggers else []
     scheduled_deload = idx == BLOCK_WEEKS - 1
     if scheduled_deload:
         triggers.insert(0, f"scheduled deload (week {idx + 1} of {BLOCK_WEEKS})")
@@ -309,7 +315,8 @@ def build_envelope(
     prev = facts.previous_weeks[-1].total_minutes if facts.previous_weeks else 0.0
     typical = max((w.total_minutes for w in recent), default=0.0)
 
-    verdict = readiness_verdict(facts)["verdict"]
+    verdict = (readiness_verdict(facts)["verdict"] if include_recovery_triggers
+               else ("deload" if scheduled_deload else "hold"))
     if deload:
         budget = (prev or typical or STARTING_WEEK_MIN) * DELOAD_FACTOR
     elif prev < 120:
@@ -861,6 +868,16 @@ def _fit_budget(
         )
         if long_floor and d.duration_min >= long_floor:
             base += 2  # a required long session outranks its everyday siblings
+        # Breadth beats depth in a three-sport base phase. Without this, a tight
+        # budget strips every swim and then every run — leaving a week of bike and
+        # strength that is cheaper to fit and useless as triathlon training.
+        # The last remaining session of a sport is near-untouchable.
+        same_sport = [
+            x for x in days
+            if x.sport == d.sport and x.duration_min > 0 and x.sport != "rest"
+        ]
+        if len(same_sport) <= 1:
+            base += 6
         return (base, d.duration_min)
 
     while True:
@@ -1015,10 +1032,12 @@ def plan_week(
     pushback: str | None = None,
     previous_plan: dict[str, Any] | None = None,
     save: bool = True,
+    include_recovery_triggers: bool = True,
 ) -> WeekPlan:
     """Facts -> envelope -> AI (optional) -> enforcement -> saved plan."""
     facts = build_facts(store, today=today)
-    envelope = build_envelope(facts, store)
+    envelope = build_envelope(facts, store,
+                              include_recovery_triggers=include_recovery_triggers)
     targets = store.targets()
     strength_log = store.strength_log(since=facts.week_start - timedelta(days=120))
 
@@ -1068,6 +1087,32 @@ def plan_week(
             plan.source,
             payload.model_dump(mode="json"),
         )
+    return plan
+
+
+def plan_next_week(
+    store: Store,
+    checkin: Checkin | None = None,
+    today: date | None = None,
+    use_ai: bool = False,
+    save: bool = True,
+) -> WeekPlan:
+    """A full seven-day plan for the week that has not started yet.
+
+    `plan_week` deliberately plans only the days remaining in the current week —
+    it will not rewrite a Tuesday you have already trained. Planning ahead is the
+    same machinery pointed at next Monday, where nothing is completed yet, so
+    every day is open and the envelope is built from this week's finished volume.
+
+    The recovery signals used are today's, so this is a plan rather than a
+    promise: it is re-derived when the week actually arrives.
+    """
+    today = today or date.today()
+    next_monday = week_start_of(today) + timedelta(weeks=1)
+    plan = plan_week(store, checkin=checkin, today=next_monday, use_ai=use_ai,
+                     save=save, include_recovery_triggers=False)
+    plan.flags.insert(0, "Provisional: recovery is re-checked on the day, and can "
+                         "still force a lighter week.")
     return plan
 
 

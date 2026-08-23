@@ -726,33 +726,70 @@ def totals(activities: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+MIN_TREND_POINTS = 6
+MIN_TREND_SPAN_DAYS = 10
+
+
 def baseline_trend(
     wellness: Sequence[dict[str, Any]],
     field: str = "resting_hr",
     as_of: date | None = None,
     lower_is_better: bool = True,
+    window_days: int = 42,
 ) -> dict[str, Any]:
-    """Is a daily metric's baseline moving the right way?
+    """Direction of travel for a daily metric, as a slope per week.
 
-    Compares the most recent 28 days against the 28 before them, which is long
-    enough to see through night-to-night noise.
+    Comparing the last 28 days against the previous 28 needs eight weeks of data
+    before it says anything at all, which is useless to someone who started three
+    weeks ago. Fitting a line to whatever exists answers the same question sooner
+    and uses every night rather than two block averages — it needs six readings
+    spanning ten days.
     """
     wellness = sorted(wellness, key=lambda r: r["day"])
     as_of = as_of or (_as_date(wellness[-1]["day"]) if wellness else date.today())
-    recent = rolling(wellness, field, 28, as_of)
-    prior = rolling(wellness, field, 28, as_of - timedelta(days=28))
+    cut = as_of - timedelta(days=window_days)
+    pts = [
+        (_as_date(r["day"]), float(r[field]))
+        for r in wellness
+        if r.get(field) is not None and cut <= _as_date(r["day"]) <= as_of
+    ]
     out: dict[str, Any] = {
-        "field": field, "recent": _r(recent), "prior": _r(prior),
-        "change": None, "verdict": "insufficient_data",
+        "field": field, "recent": None, "n": len(pts), "span_days": 0,
+        "per_week": None, "change": None, "verdict": "insufficient_data",
     }
-    if recent is None or prior is None:
+    if not pts:
         return out
-    change = recent - prior
-    out["change"] = round(change, 2)
-    improving = change < 0 if lower_is_better else change > 0
-    if abs(change) < (0.5 if lower_is_better else max(0.5, abs(prior) * 0.02)):
+
+    values = [v for _, v in pts]
+    # The headline number is the last week's average, which is what you feel.
+    recent_vals = [v for d, v in pts if d > as_of - timedelta(days=7)] or values[-3:]
+    out["recent"] = round(fmean(recent_vals), 1)
+    span = (pts[-1][0] - pts[0][0]).days
+    out["span_days"] = span
+    if len(pts) < MIN_TREND_POINTS or span < MIN_TREND_SPAN_DAYS:
+        out["needed"] = (
+            f"{max(0, MIN_TREND_POINTS - len(pts))} more readings"
+            if len(pts) < MIN_TREND_POINTS
+            else f"{MIN_TREND_SPAN_DAYS - span} more days"
+        )
+        return out
+
+    t0 = pts[0][0]
+    slope_per_day = ols_slope([(d - t0).days for d, _ in pts], values)
+    if slope_per_day is None:
+        return out
+    per_week = slope_per_day * 7.0
+    out["per_week"] = round(per_week, 2)
+    # Total movement across the observed span, which reads more concretely than a
+    # rate for someone with three weeks of history.
+    out["change"] = round(slope_per_day * span, 1)
+
+    mean = fmean(values) or 1.0
+    threshold = max(0.15, abs(mean) * 0.004)   # ~0.4% of the metric per week
+    if abs(per_week) < threshold:
         out["verdict"] = "steady"
     else:
+        improving = per_week < 0 if lower_is_better else per_week > 0
         out["verdict"] = "improving" if improving else "worsening"
     return out
 

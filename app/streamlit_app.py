@@ -15,12 +15,14 @@ import logging
 import os
 import sys
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pandas as pd  # noqa: E402
+import plotly.express as px  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
 import streamlit as st  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
@@ -29,7 +31,6 @@ import app.ui as ui  # noqa: E402
 from core import ai, insights, planner, strength, sync as sync_mod  # noqa: E402
 from core.analysis import (  # noqa: E402
     ZONE_LABELS,
-    all_ef_trends,
     baseline_trend,
     hr_points,
     hr_trend,
@@ -187,6 +188,29 @@ def read_gate() -> bool:
 # --------------------------------------------------------------------------
 
 
+# The athlete trains in India, and a cloud host runs on UTC — so the cutoff is
+# anchored to a real timezone rather than to wherever the server happens to be.
+LOCAL_TZ = ZoneInfo(os.getenv("LOCAL_TZ", "Asia/Kolkata"))
+EVENING_CUTOFF_HOUR = int(os.getenv("EVENING_CUTOFF_HOUR", "19"))
+
+
+def local_now() -> datetime:
+    return datetime.now(LOCAL_TZ)
+
+
+def training_focus(today: date) -> tuple[date, bool]:
+    """Which day the athlete can still act on.
+
+    Suggesting a 90-minute ride at half past nine at night is useless advice, so
+    after the cutoff the focus rolls to tomorrow. Only the "what to do next" card
+    moves; the week strips and every analysis still key off the real date.
+    """
+    now = local_now()
+    if today == now.date() and now.hour >= EVENING_CUTOFF_HOUR:
+        return today + timedelta(days=1), True
+    return today, False
+
+
 def hm(minutes: float) -> str:
     h, m = divmod(int(round(minutes or 0)), 60)
     return f"{h}h {m:02d}m" if h else f"{m}m"
@@ -229,8 +253,11 @@ def insight_banner(page: str, data: dict, today: date) -> None:
     if not body:
         body = " ".join(b.replace("**", "") for b in ins.bullets[:2])
     ui.banner(ins.headline, body, tone)
-    if len(ins.bullets) > 2:
-        with st.expander("More detail"):
+    remaining = ins.bullets[2:]
+    if remaining:
+        # Narrow column so it reads as a footnote to the banner rather than a
+        # full-width bar of its own.
+        with st.columns([2, 1])[0], st.expander("More detail"):
             for b in ins.bullets:
                 st.markdown(f"- {b}")
 
@@ -257,20 +284,26 @@ def page_today(data: dict, today: date) -> None:
         env = planner.build_envelope(facts, s)
         verdict = planner.readiness_verdict(facts)
 
-    tone = {"deload": "bad", "hold": "neutral", "build": "good"}[verdict["verdict"]]
-    ui.banner(verdict["headline"], " · ".join(verdict["reasons"]) or
-              "No signal is arguing for more or less than planned.", tone)
-
     plan = st.session_state.get("plan") or (data["plan"] or {}).get("plan")
-    day_name = DAYS[today.weekday()]
-    todo = [d for d in (plan or {}).get("week_plan", [])
+    focus_day, rolled = training_focus(today)
+    day_name = DAYS[focus_day.weekday()]
+    source = plan
+    if rolled and focus_day > today:
+        # Tomorrow may belong to next week's provisional plan.
+        source = plan if focus_day.isocalendar()[1] == today.isocalendar()[1] \
+            else next_week_plan(today)
+    todo = [d for d in (source or {}).get("week_plan", [])
             if d["day"] == day_name and d.get("purpose") != "completed"]
     done_today = [d for d in (plan or {}).get("week_plan", [])
-                  if d["day"] == day_name and d.get("purpose") == "completed"]
+                  if d["day"] == DAYS[today.weekday()]
+                  and d.get("purpose") == "completed"]
 
     left, right = st.columns([2, 1], gap="medium")
     with left:
-        ui.section("Today")
+        heading = "Tomorrow" if rolled else "Today"
+        ui.section(heading, f"It is past {EVENING_CUTOFF_HOUR}:00 — showing "
+                            f"{focus_day.strftime('%A')} instead."
+                   if rolled else "")
         if not plan:
             ui.banner("No plan for this week yet",
                       "Open the Plan page and build one.", "neutral")
@@ -293,8 +326,15 @@ def page_today(data: dict, today: date) -> None:
         else:
             ui.today_card("rest", "Nothing scheduled",
                           "Rest is where the adaptation happens.")
+        # Sits here rather than at the foot of the page: it fills the column
+        # beside the stat cards, and it is the most useful thing on the screen.
+        insight_banner("Overview", data, today)
     with right:
+        tone = {"deload": "bad", "hold": "neutral", "build": "good"}[verdict["verdict"]]
         ui.section("Right now")
+        ui.stat("Verdict", verdict["headline"].rstrip("."),
+                " · ".join(verdict["reasons"])[:90] or "nothing arguing either way",
+                tone, small=True)
         ui.stat("Readiness",
                 f"{sig.training_readiness:.0f}" if sig and sig.training_readiness else "—",
                 (sig.training_status or "morning reading") if sig else "no data",
@@ -313,13 +353,41 @@ def page_today(data: dict, today: date) -> None:
                f"{hm(wk.total_minutes)} done of a {hm(env.max_week_minutes)} ceiling")
     ui.week_strip(week_cells(plan, today))
 
-    ui.section("What stands out")
-    insight_banner("Overview", data, today)
+    nxt = next_week_plan(today)
+    if nxt:
+        total = sum(d["duration_min"] for d in nxt.get("week_plan", []))
+        ui.section(f"Next week · {day_label((week_start_of(today) + timedelta(weeks=1)).isoformat())} onwards",
+                   f"{hm(total)} planned — provisional, and re-derived when the week "
+                   f"arrives.")
+        ui.week_strip(week_cells(nxt, week_start_of(today) + timedelta(weeks=1),
+                                 mark_today=False))
 
 
-def week_cells(plan: dict | None, today: date) -> list[dict]:
+
+
+@st.cache_data(show_spinner=False, ttl=900)
+def _next_week_plan(stamp: float, iso_today: str) -> dict | None:
+    """Computed on demand and cached: it is a preview, not a saved plan."""
+    try:
+        with Store(db_path()) as s:
+            p = planner.plan_next_week(s, today=date.fromisoformat(iso_today),
+                                       use_ai=False, save=False)
+        return p.model_dump(mode="json")
+    except Exception as exc:  # noqa: BLE001 - a preview must never break the page
+        log.warning("Next-week preview failed: %s", exc)
+        return None
+
+
+def next_week_plan(today: date) -> dict | None:
+    return _next_week_plan(db_stamp(), today.isoformat())
+
+
+def week_cells(plan: dict | None, today: date,
+               mark_today: bool = True) -> list[dict]:
+    """`mark_today=False` for a future week, which has no today to highlight."""
     start = week_start_of(today)
     entries = (plan or {}).get("week_plan", [])
+    real_today = date.today()
     cells = []
     for i, name in enumerate(DAYS):
         d = start + timedelta(days=i)
@@ -330,7 +398,7 @@ def week_cells(plan: dict | None, today: date) -> list[dict]:
             for e in entries if e["day"] == name and e["sport"] != "rest"
         ]
         cells.append({"name": name, "date": d.strftime("%d %b"),
-                      "today": name == DAYS[today.weekday()], "items": items})
+                      "today": mark_today and d == real_today, "items": items})
     return cells
 
 
@@ -342,12 +410,13 @@ def week_cells(plan: dict | None, today: date) -> list[dict]:
 def page_progress(data: dict, today: date) -> None:
     acts, wl, zones = data["activities"], data["wellness"], data["zones"]
     tot = totals(acts)
+    sig = recovery_signals(wl, acts, as_of=today) if wl else None
 
-    ui.section("Where you are", "Everything logged so far.")
+    insight_banner("Fitness", data, today)
+
     ui.stats_row([
         {"label": "Activities", "value": tot["sessions"],
-         "note": f"over {tot['weeks']} week{'s' if tot['weeks'] != 1 else ''}"},
-        {"label": "Time", "value": hm(tot["minutes"]), "note": f"{tot['km']:.0f} km"},
+         "note": f"{tot['km']:.0f} km · {hm(tot['minutes'])}"},
         *[{"label": s.title(),
            "value": f"{int(tot['by_sport'].get(s, {}).get('sessions', 0))}",
            "note": f"{tot['by_sport'].get(s, {}).get('km', 0):.0f} km · "
@@ -355,187 +424,186 @@ def page_progress(data: dict, today: date) -> None:
           for s in ENDURANCE_SPORTS],
     ])
 
-    # --- the engine ---------------------------------------------------
-    ui.section("Is the engine improving?",
-               "A falling resting heart rate and rising HRV are the clearest signs "
-               "the aerobic base is growing. Both compare the last 28 days with the "
-               "28 before.")
+    # --- the engine, in four numbers ----------------------------------
     rhr = baseline_trend(wl, "resting_hr", as_of=today, lower_is_better=True)
     hrv = baseline_trend(wl, "hrv_last_night", as_of=today, lower_is_better=False)
-    words = {"improving": "improving", "worsening": "worsening",
-             "steady": "holding steady", "insufficient_data": "needs ~8 weeks"}
     tones = {"improving": "good", "worsening": "bad", "steady": "neutral",
              "insufficient_data": "neutral"}
+
+    def trend_note(t: dict, unit: str) -> str:
+        if t["verdict"] == "insufficient_data":
+            return f"needs {t.get('needed', 'more data')}"
+        if t["per_week"] is None:
+            return "holding steady"
+        arrow = "improving" if t["verdict"] == "improving" else (
+            "worsening" if t["verdict"] == "worsening" else "holding steady")
+        return f"{t['per_week']:+.2f} {unit}/week — {arrow}"
     ui.stats_row([
-        {"label": "Resting HR", "value": f"{rhr['recent']:.0f} bpm" if rhr["recent"] else "—",
-         "note": (f"{rhr['change']:+.1f} bpm — {words[rhr['verdict']]}"
-                  if rhr["change"] is not None else words[rhr["verdict"]]),
-         "tone": tones[rhr["verdict"]]},
+        {"label": "Resting HR",
+         "value": f"{rhr['recent']:.0f} bpm" if rhr["recent"] else "—",
+         "note": trend_note(rhr, "bpm"), "tone": tones[rhr["verdict"]]},
         {"label": "HRV", "value": f"{hrv['recent']:.0f} ms" if hrv["recent"] else "—",
-         "note": (f"{hrv['change']:+.1f} ms — {words[hrv['verdict']]}"
-                  if hrv["change"] is not None else words[hrv["verdict"]]),
-         "tone": tones[hrv["verdict"]]},
+         "note": trend_note(hrv, "ms"), "tone": tones[hrv["verdict"]]},
         {"label": "VO2max",
-         "value": f"{recovery_signals(wl, acts, as_of=today).vo2max_run:.1f}"
-                  if wl and recovery_signals(wl, acts, as_of=today).vo2max_run else "—",
+         "value": f"{sig.vo2max_run:.1f}" if sig and sig.vo2max_run else "—",
          "note": "Garmin running estimate"},
-        {"label": "Load ratio",
-         "value": (f"{recovery_signals(wl, acts, as_of=today).acwr:.2f}"
-                   if wl and recovery_signals(wl, acts, as_of=today).acwr else "—"),
+        {"label": "Load ratio", "value": f"{sig.acwr:.2f}" if sig and sig.acwr else "—",
          "note": "needs ~3 weeks of history"},
     ])
-    trend_chart(wl, today)
 
-    # --- heart rate during training -----------------------------------
-    ui.section("Your heart rate during training",
-               "Resting heart rate says how recovered you are. This says how hard "
-               "your engine is working while you train — and whether the same pace "
-               "is costing you fewer beats than it used to.")
-    training_hr_block(acts, today)
+    # --- two panels per row -------------------------------------------
+    a, b = st.columns(2, gap="medium")
+    with a, ui.card("Heart rate during training",
+                    "Each point is the heart rate this session's efficiency implies "
+                    "at your usual pace. Down is progress."):
+        training_hr_block(acts, today)
+    with b, ui.card("Where your effort goes",
+                    "Base phase wants most time easy. Hard work costs recovery "
+                    "without adding much base."):
+        intensity_block(zones, today)
 
-    # --- intensity ----------------------------------------------------
-    ui.section("Where your effort actually goes",
-               "Base phase wants most time easy. Hard sessions cost recovery without "
-               "adding much aerobic base.")
+    c, d = st.columns(2, gap="medium")
+    with c, ui.card("Efficiency against your own baseline",
+                    "Percent change in speed or watts per heartbeat, so all three "
+                    "sports share one axis."):
+        efficiency_block(acts, today)
+    with d, ui.card("Volume, and the ceiling ahead",
+                    "At most 10% growth a week, every fourth week a deload."):
+        volume_chart(data, today)
+
+    e, f = st.columns(2, gap="medium")
+    with e, ui.card("Daily signals", "Overnight measurements, against baseline."):
+        trend_chart(wl, today)
+    with f, ui.card("Aerobic drift on long sessions",
+                    "Efficiency in the second half versus the first. Under 5% is "
+                    "good durability."):
+        drift_block(acts)
+
+
+def intensity_block(zones: list[dict], today: date) -> None:
     if not zones:
         st.caption("No zone data yet — sync from Garmin.")
-    else:
-        window = st.radio("Window", ["28 days", "8 weeks", "All time"],
-                          horizontal=True, index=0, label_visibility="collapsed")
-        since = {"28 days": today - timedelta(days=28),
-                 "8 weeks": today - timedelta(weeks=8), "All time": None}[window]
-        pol = polarisation(zones, since=since)
-        ui.proportion_bar([
-            ("easy Z1–Z2", pol["easy"], TONE["good"]),
-            ("moderate Z3", pol["moderate"], TONE["caution"]),
-            ("hard Z4–Z5", pol["hard"], TONE["bad"]),
-        ])
-        tone = ("good" if pol["easy"] >= 70 else
-                "bad" if pol["hard"] >= 35 else "caution")
-        target = "On target: base phase wants 70%+ easy."
-        if tone == "bad":
-            target = ("Inverted: base phase wants roughly the reverse of this. "
-                      "It is also why efficiency cannot be measured — hard "
-                      "sessions are excluded from the trend.")
-        elif tone == "caution":
-            target = "Drifting harder than base phase wants. Aim for 70%+ easy."
-        ui.banner(f"{pol['easy']:.0f}% easy · {pol['moderate']:.0f}% moderate · "
-                  f"{pol['hard']:.0f}% hard", target, tone)
+        return
+    since = today - timedelta(days=28)
+    pol = polarisation(zones, since=since)
+    ui.proportion_bar([("easy", pol["easy"], TONE["good"]),
+                       ("moderate", pol["moderate"], TONE["caution"]),
+                       ("hard", pol["hard"], TONE["bad"])])
+    verdict = ("On target — base phase wants 70%+ easy." if pol["easy"] >= 70
+               else "Inverted: base phase wants roughly the reverse of this."
+               if pol["hard"] >= 35 else "Drifting harder than base phase wants.")
+    st.caption(f"Last 28 days. {verdict}")
+    with st.expander("Zone breakdown by sport"):
         for sport in ENDURANCE_SPORTS:
             sp = zone_distribution(zones, sport=sport, since=since)
             if sum(sp.values()) <= 0:
                 continue
-            st.markdown(f"**{EMOJI[sport]} {sport.title()}** — {hm(sum(sp.values()))}")
+            st.markdown(f"<span style='font-size:.82rem;opacity:.8'>{EMOJI[sport]} "
+                        f"{sport.title()} · {hm(sum(sp.values()))}</span>",
+                        unsafe_allow_html=True)
             ui.proportion_bar([(ZONE_LABELS[z], sp[z], ZONE_COLOR[z])
                                for z in range(1, 6)])
 
-    # --- efficiency ---------------------------------------------------
-    ui.section("Speed per heartbeat",
-               "The core question: are you going faster at the same heart rate?")
-    steady_only = st.toggle("Trend on steady aerobic sessions only", value=False,
-                            help="Hard sessions have a lower efficiency by nature, so "
-                                 "a mixed series partly tracks how hard you trained.")
-    trends = {t.sport: t for t in all_ef_trends(acts, as_of=today,
-                                                steady_only=steady_only)}
-    ui.stats_row([
-        {"label": s.title(),
-         "value": (f"{trends[s].recent_mean:.3f}" if trends[s].recent_mean else "—"),
-         "note": (f"{trends[s].change_pct:+.1f}% — {trends[s].verdict}"
-                  if trends[s].change_pct is not None
-                  else ef_data_status(acts, s)["message"].split(".")[0]),
-         "tone": {"improving": "good", "declining": "bad"}.get(trends[s].verdict,
-                                                               "neutral")}
-        for s in ENDURANCE_SPORTS
-    ])
-    ef_chart(acts, steady_only)
 
-    # --- volume + forecast --------------------------------------------
-    ui.section("Volume, and what the rules allow next",
-               "At most 10% growth a week, with every fourth week a deload. "
-               "A recovery-triggered deload can cap any week at short notice.")
-    volume_chart(data, today)
+def efficiency_block(acts: list[dict], today: date) -> None:
+    """One chart for all three sports.
+
+    Efficiency is in different units per sport — watts per beat on the bike,
+    speed per beat elsewhere — so the raw values cannot share an axis. Expressing
+    each as a percentage change from its own earliest baseline can.
+    """
+    drawn = False
+    fig = go.Figure()
+    for sport in ENDURANCE_SPORTS:
+        pts = [p for p in ef_points(acts, sport) if p.is_steady] or \
+              ef_points(acts, sport)
+        if len(pts) < 2:
+            continue
+        base = pts[0].ef
+        if not base:
+            continue
+        drawn = True
+        fig.add_scatter(
+            x=[p.date for p in pts], y=[(p.ef / base - 1) * 100 for p in pts],
+            mode="lines+markers", name=sport,
+            line=dict(color=SPORT_COLOR[sport], width=2), marker=dict(size=8),
+            hovertemplate="%{x|%a %d %b}<br>%{y:+.1f}% vs first session"
+                          f"<extra>{sport}</extra>")
+    if not drawn:
+        st.caption("Needs at least two sessions with heart rate in a sport. "
+                   "Three steady sessions gives a direction; six makes it reliable.")
+        return
+    fig.add_hline(y=0, line_dash="dot", line_color="rgba(140,158,176,.5)")
+    fig.update_layout(yaxis_title="% vs first session")
+    ui.chart(fig, 200)
+    statuses = [ef_data_status(acts, s) for s in ENDURANCE_SPORTS]
+    short = [s for s in statuses if s["total"] and s["needed_for_verdict"]]
+    if short:
+        st.caption(" · ".join(f"{s['sport']}: {s['steady']}/3 steady" for s in short))
+
+
+def drift_block(acts: list[dict]) -> None:
+    drift = [a for a in acts if a.get("decoupling_pct") is not None]
+    if not drift:
+        st.caption("No session long enough yet — drift needs 60+ minutes with a "
+                   "heart-rate stream.")
+        return
+    df = pd.DataFrame([{"Date": a["start_date"], "Sport": a["sport"],
+                        "Drift": round(a["decoupling_pct"], 2)} for a in drift])
+    fig = px.bar(df, x="Date", y="Drift", color="Sport",
+                 color_discrete_map=SPORT_COLOR)
+    fig.add_hline(y=5, line_dash="dot", annotation_text="5%")
+    fig.update_layout(yaxis_title="% drift")
+    ui.chart(fig, 200)
 
 
 def training_hr_block(acts: list[dict], today: date) -> None:
-    """Average heart rate per session, and the same figure at a fixed pace."""
-    steady_only = st.toggle("Steady aerobic sessions only", value=False,
-                            key="hr_steady",
-                            help="Hard sessions raise heart rate because they are "
-                                 "hard. Excluding them isolates the fitness signal.")
-    cards, drawn = [], False
+    """All sports on one axis, so this is one chart rather than three."""
+    view = st.radio("View", ["At your usual pace", "Raw average"], horizontal=True,
+                    index=0, label_visibility="collapsed", key="hr_view")
+    normalised = view.startswith("At")
+    field = "hr_at_reference" if normalised else "avg_hr"
+
+    fig = go.Figure()
+    drawn, notes = False, []
     for sport in ENDURANCE_SPORTS:
-        t = hr_trend(acts, sport, as_of=today, steady_only=steady_only)
-        if not t["n_sessions"]:
+        pts = [p for p in hr_points(acts, sport) if p.get(field)]
+        if not pts:
             continue
+        # Two sessions on one day would otherwise draw a vertical line, which
+        # reads as a spike rather than as two data points.
+        by_day: dict[date, list[dict]] = {}
+        for p in pts:
+            by_day.setdefault(p["date"], []).append(p)
+        days = sorted(by_day)
+        ys = [sum(q[field] for q in by_day[d]) / len(by_day[d]) for d in days]
+        mins = [sum(q["minutes"] for q in by_day[d]) for d in days]
+        raws = [sum(q["avg_hr"] for q in by_day[d]) / len(by_day[d]) for d in days]
         drawn = True
-        change = t["normalised_change_bpm"]
-        if change is not None:
-            note = (f"{change:+.1f} bpm at the same pace — "
-                    f"{'improving' if change <= -1 else 'worsening' if change >= 1 else 'flat'}")
-            tone = ("good" if change <= -1 else "bad" if change >= 1 else "neutral")
-        else:
-            note = f"{t['n_sessions']} session(s) — needs ~8 weeks to compare"
-            tone = "neutral"
-        cards.append({"label": f"{sport.title()} training HR",
-                      "value": f"{t['recent_hr']:.0f} bpm" if t["recent_hr"] else "—",
-                      "note": note, "tone": tone})
+        # A line through two points implies a trend that is not there.
+        mode = "lines+markers" if len(days) >= 3 else "markers"
+        fig.add_scatter(
+            x=days, y=ys, mode=mode, name=sport,
+            line=dict(color=SPORT_COLOR[sport], width=2),
+            marker=dict(size=10, color=SPORT_COLOR[sport]),
+            customdata=list(zip(mins, raws)),
+            hovertemplate="%{x|%a %d %b}<br>%{y:.0f} bpm<br>"
+                          "%{customdata[0]:.0f} min · raw %{customdata[1]:.0f}"
+                          f"<extra>{sport}</extra>")
+        t = hr_trend(acts, sport, as_of=today, steady_only=False)
+        if t["normalised_change_bpm"] is not None:
+            notes.append(f"{sport} {t['normalised_change_bpm']:+.1f} bpm")
     if not drawn:
         st.caption("No sessions with heart rate yet.")
         return
-    ui.stats_row(cards)
-
-    view = st.radio(
-        "View", ["At your usual pace", "Raw average per session"],
-        horizontal=True, index=0, label_visibility="collapsed", key="hr_view",
-        help="'At your usual pace' removes how hard each session was, so a falling "
-             "line means real aerobic progress.")
-    normalised = view.startswith("At")
-
-    for sport in ENDURANCE_SPORTS:
-        pts = hr_points(acts, sport)
-        if steady_only:
-            pts = [p for p in pts if p["is_steady"]]
-        field = "hr_at_reference" if normalised else "avg_hr"
-        pts = [p for p in pts if p.get(field)]
-        if len(pts) < 2:
-            continue
-        t = hr_trend(acts, sport, as_of=today, steady_only=steady_only)
-        ref = t["reference_speed_mps"]
-        df = pd.DataFrame(pts)
-        fig = go.Figure()
-        for kind, colr, op in (("steady aerobic", SPORT_COLOR[sport], 1.0),
-                               ("harder effort", TONE["neutral"], .85)):
-            sub = df[df["is_steady"] == (kind == "steady aerobic")]
-            if sub.empty:
-                continue
-            fig.add_scatter(
-                x=sub["date"], y=sub[field], mode="markers", name=kind,
-                marker=dict(size=11, color=colr, opacity=op),
-                customdata=sub[["minutes", "avg_hr"]],
-                hovertemplate="%{x|%a %d %b}<br>%{y:.0f} bpm<br>"
-                              "%{customdata[0]:.0f} min · raw avg "
-                              "%{customdata[1]:.0f}<extra></extra>")
-        if len(df) >= 3:
-            x = (pd.to_datetime(df["date"]) - pd.to_datetime(df["date"]).min()).dt.days
-            slope = ols_slope(x.tolist(), df[field].tolist())
-            if slope is not None:
-                fig.add_scatter(x=df["date"],
-                                y=df[field].mean() + slope * (x - x.mean()),
-                                mode="lines", name="trend",
-                                line=dict(color=SPORT_COLOR[sport], width=2,
-                                          dash="dash"))
-        label = (f"heart rate at {pace_str(sport, (ref or 0) * 1000, 1000)}"
-                 if normalised and ref else "average heart rate")
-        fig.update_layout(yaxis_title="bpm")
-        st.markdown(f"**{EMOJI[sport]} {sport.title()}** — {label}")
-        ui.chart(fig, 230)
-        if normalised and ref:
-            st.caption(f"Each point is the heart rate this session's efficiency "
-                       f"implies at {pace_str(sport, ref * 1000, 1000)}, your median "
-                       f"{sport} pace. Down is progress.")
-    if normalised:
-        st.caption("Bike sessions with a power meter are excluded from this view: "
-                   "watts per beat cannot be restated as a heart rate at a pace.")
+    fig.update_layout(yaxis_title="bpm")
+    ui.chart(fig, 200)
+    if notes:
+        st.caption("Change at the same pace: " + " · ".join(notes)
+                   + " (negative is progress).")
+    elif normalised:
+        st.caption("Power-based bike sessions are excluded here: watts per beat "
+                   "has no pace equivalent.")
 
 
 def trend_chart(wl: list[dict], today: date) -> None:
@@ -567,7 +635,7 @@ def trend_chart(wl: list[dict], today: date) -> None:
                         mode="lines", name="28-day baseline",
                         line=dict(color=color, width=1.5, dash="dot"))
     fig.update_layout(yaxis_title="hours" if col == "sleep_seconds" else None)
-    ui.chart(fig, 250)
+    ui.chart(fig, 200)
 
 
 def ef_chart(acts: list[dict], steady_only: bool) -> None:
@@ -647,7 +715,7 @@ def volume_chart(data: dict, today: date) -> None:
                         hovertemplate="week of %{x|%a %d %b}<br>%{y:.0f} min"
                                       "<extra>deload</extra>")
     fig.update_layout(yaxis_title="minutes per week", hovermode="x unified")
-    ui.chart(fig, 260)
+    ui.chart(fig, 200)
 
     rows = [{"week": day_label(w.week_start.isoformat()), "total minutes": w.total_minutes,
              "load": w.total_load, "rest days": w.rest_days,
