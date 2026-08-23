@@ -312,6 +312,128 @@ def all_ef_trends(
     ]
 
 
+# --------------------------------------------------------------------------
+# Training heart rate — the same question as efficiency factor, but in bpm
+# --------------------------------------------------------------------------
+
+
+def reference_speed(activities: Sequence[dict[str, Any]], sport: str) -> float | None:
+    """A stable, personal yardstick pace for one sport: the median of what you
+    actually do. Anchoring to a fixed textbook pace would make the number say more
+    about the athlete's level than about their progress."""
+    speeds = sorted(
+        s for s in (
+            _pos(a.get("avg_speed_mps")) or _derived_speed(a)
+            for a in activities
+            if a.get("sport") == sport and _pos(a.get("avg_hr"))
+        ) if s
+    )
+    if not speeds:
+        return None
+    mid = len(speeds) // 2
+    return speeds[mid] if len(speeds) % 2 else (speeds[mid - 1] + speeds[mid]) / 2
+
+
+def hr_points(
+    activities: Sequence[dict[str, Any]], sport: str, ref_speed: float | None = None
+) -> list[dict[str, Any]]:
+    """Per-session training heart rate, plus the same thing normalised to a
+    reference pace.
+
+    Raw average heart rate alone is not progress: a hard session is high because
+    it was hard, not because fitness fell. `hr_at_reference` removes that by
+    asking what heart rate this session's efficiency implies at one fixed pace —
+    so a falling line means the same pace now costs fewer beats. It is efficiency
+    factor turned back into a unit you can feel.
+    """
+    ref = ref_speed if ref_speed is not None else reference_speed(activities, sport)
+    out: list[dict[str, Any]] = []
+    for a in activities:
+        if a.get("sport") != sport:
+            continue
+        hr = _pos(a.get("avg_hr"))
+        if not hr:
+            continue
+        ef = _pos(a.get("ef"))
+        normalised = None
+        # Only meaningful for the speed-based metric: watts per beat cannot be
+        # turned into "heart rate at a pace".
+        if ef and ref and (a.get("ef_metric") or "speed_per_hr") == "speed_per_hr":
+            normalised = round(ref * 100.0 / ef, 1)
+        out.append(
+            {
+                "activity_id": a["activity_id"],
+                "date": _as_date(a["start_date"]),
+                "avg_hr": round(hr, 1),
+                "max_hr": _pos(a.get("max_hr")),
+                "minutes": round((a.get("duration_s") or 0) / 60.0, 1),
+                "speed_mps": _pos(a.get("avg_speed_mps")) or _derived_speed(a),
+                "hr_at_reference": normalised,
+                "is_steady": bool(a.get("is_steady")),
+                "steady_reason": a.get("steady_reason") or "",
+            }
+        )
+    return sorted(out, key=lambda p: p["date"])
+
+
+def hr_trend(
+    activities: Sequence[dict[str, Any]],
+    sport: str,
+    recent_days: int = 28,
+    baseline_days: int = 56,
+    as_of: date | None = None,
+    steady_only: bool = True,
+) -> dict[str, Any]:
+    """Is the heart rate you train at coming down for the same pace?
+
+    Reported in bpm, and negative is good — the opposite sign convention to
+    efficiency factor, which is exactly why it is easier to read.
+    """
+    ref = reference_speed(activities, sport)
+    pts = hr_points(activities, sport, ref)
+    if steady_only:
+        pts = [p for p in pts if p["is_steady"]]
+    out: dict[str, Any] = {
+        "sport": sport, "reference_speed_mps": ref, "n_sessions": len(pts),
+        "recent_hr": None, "baseline_hr": None, "change_bpm": None,
+        "recent_normalised": None, "baseline_normalised": None,
+        "normalised_change_bpm": None, "verdict": "insufficient_data",
+    }
+    if not pts:
+        return out
+    today = as_of or pts[-1]["date"]
+    rec_cut = today - timedelta(days=recent_days)
+    base_cut = today - timedelta(days=baseline_days)
+
+    def mean_of(rows: list[dict[str, Any]], field: str) -> float | None:
+        vals = [r[field] for r in rows if r.get(field)]
+        return round(fmean(vals), 1) if vals else None
+
+    recent = [p for p in pts if p["date"] > rec_cut]
+    baseline = [p for p in pts if base_cut <= p["date"] <= rec_cut]
+    out["recent_hr"] = mean_of(recent, "avg_hr")
+    out["baseline_hr"] = mean_of(baseline, "avg_hr")
+    out["recent_normalised"] = mean_of(recent, "hr_at_reference")
+    out["baseline_normalised"] = mean_of(baseline, "hr_at_reference")
+    if out["recent_hr"] is not None and out["baseline_hr"] is not None:
+        out["change_bpm"] = round(out["recent_hr"] - out["baseline_hr"], 1)
+    if out["recent_normalised"] is not None and out["baseline_normalised"] is not None:
+        out["normalised_change_bpm"] = round(
+            out["recent_normalised"] - out["baseline_normalised"], 1
+        )
+
+    signal = out["normalised_change_bpm"]
+    if signal is None or len(pts) < 3:
+        out["verdict"] = "insufficient_data"
+    elif signal <= -1.0:
+        out["verdict"] = "improving"     # same pace, fewer beats
+    elif signal >= 1.0:
+        out["verdict"] = "worsening"
+    else:
+        out["verdict"] = "flat"
+    return out
+
+
 def rolling(
     rows: Sequence[dict[str, Any]], field: str, days: int, as_of: date
 ) -> float | None:

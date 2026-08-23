@@ -31,6 +31,8 @@ from core.analysis import (  # noqa: E402
     ZONE_LABELS,
     all_ef_trends,
     baseline_trend,
+    hr_points,
+    hr_trend,
     ef_data_status,
     ef_points,
     ols_slope,
@@ -384,6 +386,13 @@ def page_progress(data: dict, today: date) -> None:
     ])
     trend_chart(wl, today)
 
+    # --- heart rate during training -----------------------------------
+    ui.section("Your heart rate during training",
+               "Resting heart rate says how recovered you are. This says how hard "
+               "your engine is working while you train — and whether the same pace "
+               "is costing you fewer beats than it used to.")
+    training_hr_block(acts, today)
+
     # --- intensity ----------------------------------------------------
     ui.section("Where your effort actually goes",
                "Base phase wants most time easy. Hard sessions cost recovery without "
@@ -445,6 +454,88 @@ def page_progress(data: dict, today: date) -> None:
                "At most 10% growth a week, with every fourth week a deload. "
                "A recovery-triggered deload can cap any week at short notice.")
     volume_chart(data, today)
+
+
+def training_hr_block(acts: list[dict], today: date) -> None:
+    """Average heart rate per session, and the same figure at a fixed pace."""
+    steady_only = st.toggle("Steady aerobic sessions only", value=False,
+                            key="hr_steady",
+                            help="Hard sessions raise heart rate because they are "
+                                 "hard. Excluding them isolates the fitness signal.")
+    cards, drawn = [], False
+    for sport in ENDURANCE_SPORTS:
+        t = hr_trend(acts, sport, as_of=today, steady_only=steady_only)
+        if not t["n_sessions"]:
+            continue
+        drawn = True
+        change = t["normalised_change_bpm"]
+        if change is not None:
+            note = (f"{change:+.1f} bpm at the same pace — "
+                    f"{'improving' if change <= -1 else 'worsening' if change >= 1 else 'flat'}")
+            tone = ("good" if change <= -1 else "bad" if change >= 1 else "neutral")
+        else:
+            note = f"{t['n_sessions']} session(s) — needs ~8 weeks to compare"
+            tone = "neutral"
+        cards.append({"label": f"{sport.title()} training HR",
+                      "value": f"{t['recent_hr']:.0f} bpm" if t["recent_hr"] else "—",
+                      "note": note, "tone": tone})
+    if not drawn:
+        st.caption("No sessions with heart rate yet.")
+        return
+    ui.stats_row(cards)
+
+    view = st.radio(
+        "View", ["At your usual pace", "Raw average per session"],
+        horizontal=True, index=0, label_visibility="collapsed", key="hr_view",
+        help="'At your usual pace' removes how hard each session was, so a falling "
+             "line means real aerobic progress.")
+    normalised = view.startswith("At")
+
+    for sport in ENDURANCE_SPORTS:
+        pts = hr_points(acts, sport)
+        if steady_only:
+            pts = [p for p in pts if p["is_steady"]]
+        field = "hr_at_reference" if normalised else "avg_hr"
+        pts = [p for p in pts if p.get(field)]
+        if len(pts) < 2:
+            continue
+        t = hr_trend(acts, sport, as_of=today, steady_only=steady_only)
+        ref = t["reference_speed_mps"]
+        df = pd.DataFrame(pts)
+        fig = go.Figure()
+        for kind, colr, op in (("steady aerobic", SPORT_COLOR[sport], 1.0),
+                               ("harder effort", TONE["neutral"], .85)):
+            sub = df[df["is_steady"] == (kind == "steady aerobic")]
+            if sub.empty:
+                continue
+            fig.add_scatter(
+                x=sub["date"], y=sub[field], mode="markers", name=kind,
+                marker=dict(size=11, color=colr, opacity=op),
+                customdata=sub[["minutes", "avg_hr"]],
+                hovertemplate="%{x|%a %d %b}<br>%{y:.0f} bpm<br>"
+                              "%{customdata[0]:.0f} min · raw avg "
+                              "%{customdata[1]:.0f}<extra></extra>")
+        if len(df) >= 3:
+            x = (pd.to_datetime(df["date"]) - pd.to_datetime(df["date"]).min()).dt.days
+            slope = ols_slope(x.tolist(), df[field].tolist())
+            if slope is not None:
+                fig.add_scatter(x=df["date"],
+                                y=df[field].mean() + slope * (x - x.mean()),
+                                mode="lines", name="trend",
+                                line=dict(color=SPORT_COLOR[sport], width=2,
+                                          dash="dash"))
+        label = (f"heart rate at {pace_str(sport, (ref or 0) * 1000, 1000)}"
+                 if normalised and ref else "average heart rate")
+        fig.update_layout(yaxis_title="bpm")
+        st.markdown(f"**{EMOJI[sport]} {sport.title()}** — {label}")
+        ui.chart(fig, 230)
+        if normalised and ref:
+            st.caption(f"Each point is the heart rate this session's efficiency "
+                       f"implies at {pace_str(sport, ref * 1000, 1000)}, your median "
+                       f"{sport} pace. Down is progress.")
+    if normalised:
+        st.caption("Bike sessions with a power meter are excluded from this view: "
+                   "watts per beat cannot be restated as a heart rate at a pace.")
 
 
 def trend_chart(wl: list[dict], today: date) -> None:
