@@ -236,3 +236,79 @@ def test_brick_description_matches_its_duration(healthy):
             continue
         ride, run = (int(n) for n in __import__("re").findall(r"(\d+) min", d.why)[:2])
         assert ride + run == d.duration_min
+
+
+# --- leg strength placement ---------------------------------------------
+
+
+def _plan_for(store, today):
+    facts = planner.build_facts(store, today=today)
+    env = planner.build_envelope(facts, store)
+    return facts, env, planner.enforce(
+        planner.rules_plan(facts, env, store.strength_log()), facts, env,
+        store.strength_log())
+
+
+def test_leg_strength_never_shares_a_day_with_a_run_or_ride(healthy):
+    """The athlete's rule: legs go on days free of running and riding."""
+    from datetime import date
+
+    _, _, plan = _plan_for(healthy, date(2026, 8, 24))   # a Monday, week wide open
+    strength_days = {d.day for d in plan.week_plan if d.sport == "strength"}
+    for day in strength_days:
+        clash = [d for d in plan.week_plan
+                 if d.day == day and d.sport in planner.LEG_CONFLICT_SPORTS
+                 and d.duration_min > 0]
+        assert not clash, f"legs on {day} alongside {[c.sport for c in clash]}"
+
+
+def test_leg_strength_is_never_the_day_before_a_long_run(healthy):
+    from datetime import date
+
+    from core.schemas import DAYS
+
+    _, _, plan = _plan_for(healthy, date(2026, 8, 24))
+    long_runs = [d for d in plan.week_plan
+                 if d.sport in ("run", "brick") and d.duration_min >= 70]
+    for lr in long_runs:
+        i = DAYS.index(lr.day)
+        if i == 0:
+            continue
+        before = DAYS[i - 1]
+        assert not [d for d in plan.week_plan
+                    if d.day == before and d.sport == "strength"], \
+            f"legs on {before}, the day before a long run on {lr.day}"
+
+
+def test_a_strength_only_day_still_leaves_a_genuinely_blank_rest_day(healthy):
+    """Putting legs on an otherwise-free day must not consume the last rest day."""
+    from datetime import date
+
+    from core.schemas import DAYS
+
+    facts, env, plan = _plan_for(healthy, date(2026, 8, 24))
+    busy = {d.day for d in plan.week_plan if d.duration_min > 0}
+    blank = [d for d in DAYS if d not in busy and d not in facts.trained_days]
+    assert len(blank) >= env.min_rest_days, \
+        f"only {len(blank)} blank day(s), envelope wants {env.min_rest_days}"
+
+
+def test_an_ai_plan_stacking_legs_onto_a_ride_gets_moved(wrecked):
+    """Enforcement, not just the template, has to hold this line."""
+    from datetime import date
+
+    from core.schemas import WeekPlan
+
+    facts = planner.build_facts(wrecked, today=date(2026, 8, 24))
+    env = planner.build_envelope(facts, wrecked)
+    rogue = WeekPlan(week_plan=[
+        planner.PlanDay(day="Tue", sport="bike", duration_min=90, target_zone="Z2"),
+        planner.PlanDay(day="Tue", sport="strength", duration_min=30,
+                        target_zone="n/a", exercise_ids=["rdl"]),
+    ], source="ai")
+    out = planner.enforce(rogue, facts, env, wrecked.strength_log())
+    legs = [d for d in out.week_plan if d.sport == "strength"]
+    for leg in legs:
+        assert not [d for d in out.week_plan
+                    if d.day == leg.day and d.sport in planner.LEG_CONFLICT_SPORTS
+                    and d.duration_min > 0]

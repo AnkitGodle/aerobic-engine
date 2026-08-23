@@ -1117,7 +1117,7 @@ def log_data(data: dict) -> None:
 
 def sidebar(data: dict, today: date) -> date:
     with st.sidebar:
-        st.markdown(f"### {data['name'] or 'Athlete'}")
+        st.subheader(data["name"] or "Athlete", anchor=False)
         st.caption(f"{data['counts']['activities']} activities · "
                    f"{data['counts']['daily_wellness']} days of wellness")
         st.divider()

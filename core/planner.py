@@ -91,16 +91,25 @@ PURPOSE_FOR_ROLE = {
     "rest": "full rest day",
 }
 
+# Sports whose load makes a day unsuitable for leg strength. Swimming is left
+# out on purpose: a technique swim carries little systemic or tendon load, and
+# with three sports plus two strength sessions in six training days something has
+# to share a day. Pairing legs with a swim is the cheapest sharing available.
+LEG_CONFLICT_SPORTS = ("run", "bike", "brick")
+
 # (day, sport, role, optional)
+# Leg strength sits on days free of running and riding — the athlete's own
+# preference, and it keeps the hard days single-focus. The cost, worth knowing:
+# it uses up a day that would otherwise be complete rest, so the week has fewer
+# genuinely blank days. The minimum-rest-day rule still protects one.
 DAY_TEMPLATE: tuple[tuple[str, str, str, bool], ...] = (
-    ("Mon", "swim", "technique", False),
     ("Mon", "strength", "strength", False),
+    ("Mon", "swim", "technique", False),
     ("Tue", "bike", "endurance", False),
     ("Tue", "swim", "technique", True),
     ("Wed", "run", "easy", False),
-    ("Wed", "strength", "strength", False),
-    ("Thu", "swim", "technique", False),
-    ("Thu", "bike", "easy", True),
+    ("Thu", "strength", "strength", False),
+    ("Thu", "swim", "technique", True),
     ("Fri", "rest", "rest", False),
     ("Sat", "run", "long", False),
     ("Sun", "bike", "long", False),
@@ -736,40 +745,58 @@ def enforce(
 
 
 def _fix_strength_placement(days: list[PlanDay], notes: list[str]) -> list[PlanDay]:
-    """Legs never land on, or the day before, a long run or a quality bike."""
+    """Leg strength goes on a day free of running and riding.
+
+    Three rules, in order of how much they matter:
+
+      1. Never on a day that already carries a run, a ride or a brick. Stacking
+         legs onto an endurance day is what the athlete asked to avoid, and it is
+         also how a day meant to be easy stops being easy.
+      2. Never the day before a long run. Sore calves and a two-hour run is how
+         tendons get hurt.
+      3. Prefer a day with nothing else at all, then a day with only a swim.
+    """
     order = {d: i for i, d in enumerate(DAYS)}
-    hard = {
-        d.day
-        for d in days
-        if (d.sport in ("run", "brick") and d.duration_min >= 70)
-        or (d.sport == "bike" and (d.duration_min >= 120 or d.target_zone in QUALITY_ZONES))
-    }
+
+    def endurance_on(day: str) -> bool:
+        return any(d.day == day and d.sport in LEG_CONFLICT_SPORTS
+                   and d.duration_min > 0 for d in days)
+
+    def anything_on(day: str) -> bool:
+        return any(d.day == day and d.sport != "strength" and d.duration_min > 0
+                   for d in days)
+
     day_before_long_run = {
         DAYS[order[d.day] - 1]
         for d in days
         if d.sport in ("run", "brick") and d.duration_min >= 70 and order.get(d.day, 0) > 0
     }
-    blocked = hard | day_before_long_run
-    present = {d.day for d in days}
+    present = {d.day for d in days} | set(DAYS)
 
     for d in list(days):
-        if d.sport != "strength" or d.day not in blocked:
+        if d.sport != "strength":
             continue
+        if not endurance_on(d.day) and d.day not in day_before_long_run:
+            continue  # already well placed
+
+        taken = {x.day for x in days if x.sport == "strength" and x is not d}
         candidates = [
-            c
-            for c in present
-            if c not in blocked
-            and not any(x.sport == "strength" and x.day == c for x in days)
+            c for c in present
+            if not endurance_on(c) and c not in day_before_long_run and c not in taken
         ]
         if candidates:
-            new_day = min(candidates, key=lambda c: order[c])
-            notes.append(
-                f"moved leg strength {d.day} -> {new_day}: too close to a long run "
-                f"or quality bike"
-            )
+            # Fully free days first, then swim-only days; earlier in the week wins
+            # a tie so legs are not left until the weekend.
+            new_day = min(candidates, key=lambda c: (anything_on(c), order[c]))
+            reason = ("shares the day with a run or ride" if endurance_on(d.day)
+                      else "falls the day before a long run")
+            notes.append(f"moved leg strength {d.day} -> {new_day}: {reason}")
             d.day = new_day
         else:
-            notes.append(f"dropped leg strength on {d.day}: nowhere safe to put it")
+            notes.append(
+                f"dropped leg strength on {d.day}: every other day carries a run "
+                f"or a ride, and legs do not go on those"
+            )
             days.remove(d)
     return days
 
@@ -878,10 +905,27 @@ def _fit_budget(
         ]
         if len(same_sport) <= 1:
             base += 6
+        # A brick is a long ride with a run on the end, so it already delivers
+        # most of a bike session. When one is in the week, a second ride adds
+        # less than the run it would displace — and run frequency is what
+        # protects tendons.
+        if d.sport == "bike" and any(
+            x.sport == "brick" and x.duration_min > 0 for x in days
+        ):
+            base -= 4
         return (base, d.duration_min)
 
+    # Leg strength is a fixed prescription, not progressive aerobic volume, and
+    # its whole purpose is to protect run volume. Letting it compete for the same
+    # budget meant a tight week dropped the strength session — exactly backwards.
+    # Its minutes are treated as overhead: taken off the top, never scaled, never
+    # dropped to save time. The deload allowance still limits how many there are.
+    fixed = sum(d.duration_min for d in days if d.sport == "strength")
+    budget = max(0.0, budget - fixed)
+
     while True:
-        movable = [d for d in days if d.sport != "rest" and d.duration_min > 0]
+        movable = [d for d in days
+                   if d.sport not in ("rest", "strength") and d.duration_min > 0]
         total = sum(d.duration_min for d in movable)
         if not movable or total <= budget:
             return days
@@ -891,8 +935,9 @@ def _fit_budget(
                 f"weekly volume budget is spent ({budget:.0f} min left) — "
                 f"the rest of the week is rest"
             )
-            kept = [d for d in days if d.sport == "rest"]
+            kept = [d for d in days if d.sport in ("rest", "strength")]
             covered = {d.day for d in kept}
+            covered |= {d.day for d in kept if d.sport == "strength"}
             for d in movable:
                 if d.day in covered:
                     continue
@@ -918,8 +963,6 @@ def _fit_budget(
                 f"(progression cap {envelope.progression_cap_pct:.0f}%/week)"
             )
             for d in movable:
-                if d.sport == "strength":
-                    continue
                 if factor < 0.85:
                     d.why = _annotate(d.why, "trimmed to fit the week's volume cap")
                 d.duration_min = int(d.duration_min * factor)
@@ -937,6 +980,8 @@ def _ensure_rest_days(
     days: list[PlanDay], facts: PlannerFacts, envelope: Envelope, notes: list[str]
 ) -> list[PlanDay]:
     """At least `min_rest_days` days with nothing on them, across the whole week."""
+    # A day with only leg strength on it is not a rest day. Counting it as one
+    # would let the week end up with no genuinely blank day at all.
     planned_days = {d.day for d in days if d.duration_min > 0}
     rest_days = {
         day for day in DAYS if day not in facts.trained_days and day not in planned_days
@@ -950,13 +995,16 @@ def _ensure_rest_days(
     for d in days:
         by_day[d.day] = by_day.get(d.day, 0) + d.duration_min
     # Clear the lightest remaining days — never one that has already been trained.
+    strength_days = {d.day for d in days if d.sport == "strength"}
     candidates = sorted(
         (
             day
             for day in facts.days_remaining
             if by_day.get(day, 0) > 0 and day not in facts.trained_days
         ),
-        key=lambda day: (by_day.get(day, 0), order[day]),
+        # Clear an endurance day before a strength day: strength is twice a week
+        # and hard to make up, whereas a short swim or spin is not.
+        key=lambda day: (day in strength_days, by_day.get(day, 0), order[day]),
     )
     for day in candidates[:shortfall]:
         notes.append(

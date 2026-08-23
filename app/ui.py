@@ -157,10 +157,14 @@ def load_css() -> None:
 
 
 def page_title(title: str, subtitle: str = "") -> None:
-    # Markdown headings must NOT be HTML-escaped: Streamlit escapes HTML in
-    # markdown itself, so pre-escaping makes an apostrophe render as &#x27;.
-    # esc() is only for strings interpolated into unsafe_allow_html blocks.
-    st.markdown(f"# {title}")
+    # st.title rather than a markdown "#" heading, with anchor=False: Streamlit
+    # attaches a linkable anchor to every markdown heading, which puts fragments
+    # like #everything-so-far into the address bar and leaves them stranded there
+    # when the heading is later renamed.
+    #
+    # Note st.title does its own escaping, so the raw string is correct here —
+    # esc() is only for values interpolated into unsafe_allow_html blocks.
+    st.title(title, anchor=False)
     if subtitle:
         st.markdown(f'<div class="ic-sub">{esc(subtitle)}</div>', unsafe_allow_html=True)
 
