@@ -14,6 +14,7 @@ import hmac
 import logging
 import os
 import sys
+import sqlite3
 import threading
 import time
 import zlib
@@ -50,7 +51,13 @@ from core.analysis import (  # noqa: E402
 from core.auth import PinGate, session_expired  # noqa: E402
 from core.garmin_guard import GarminBlocked  # noqa: E402
 from core.schemas import DAYS, ENDURANCE_SPORTS, SPORTS, Checkin, PlanDay, WeekPlan  # noqa: E402
-from core.store import DEFAULT_DB, Store, is_postgres, week_start_of  # noqa: E402
+from core.store import Store, default_db, is_postgres, week_start_of  # noqa: E402
+
+try:  # psycopg is only installed where Postgres is used
+    from psycopg import InterfaceError, OperationalError
+except ImportError:  # pragma: no cover - SQLite-only environments
+    class InterfaceError(Exception): ...
+    class OperationalError(Exception): ...
 
 load_dotenv()
 log = logging.getLogger("aerobic_engine.ui")
@@ -116,9 +123,7 @@ def db_path() -> str:
     # AEROBIC_ENGINE_DB left in the environment must not quietly point the app
     # at an ephemeral local file instead — losing that database means re-pulling
     # months of Garmin history, which is the traffic that gets accounts flagged.
-    return (os.getenv("DATABASE_URL")
-            or os.getenv("AEROBIC_ENGINE_DB")
-            or DEFAULT_DB)
+    return default_db()
 
 
 def db_stamp() -> float:
@@ -190,11 +195,17 @@ class _SharedStore:
             self._store = Store(self.target)
         return self._store
 
+    # Retried only for the failures reopening can actually fix. Retrying
+    # everything meant a plain AttributeError in the read function came back as
+    # "could not open the database", which sends you looking at DATABASE_URL for
+    # a bug that is in the code.
+    RETRYABLE = (OSError, sqlite3.Error, InterfaceError, OperationalError)
+
     def run(self, fn):
         with self._lock:
             try:
                 return fn(self._open())
-            except Exception:
+            except self.RETRYABLE:
                 log.info("database handle went stale; reopening")
                 try:
                     if self._store is not None:

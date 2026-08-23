@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dotenv import load_dotenv  # noqa: E402
 
 from core.garmin_guard import GarminBlocked  # noqa: E402
-from core.store import DEFAULT_DB  # noqa: E402
+from core.store import default_db  # noqa: E402
 from core.sync import guard_status, sync  # noqa: E402
 
 log = logging.getLogger("aerobic_engine.fetch")
@@ -38,7 +38,8 @@ def prompt_mfa() -> str:
 def main() -> int:
     load_dotenv()
     ap = argparse.ArgumentParser(description="Sync Garmin Connect into the database")
-    ap.add_argument("--db", default=DEFAULT_DB)
+    # Resolved after load_dotenv() below, never at import time.
+    ap.add_argument("--db", default=None)
     ap.add_argument("--days", type=int, help="re-scan this many days back")
     ap.add_argument("--full", action="store_true", help="fetch all available history")
     ap.add_argument("--no-streams", action="store_true", help="skip HR streams")

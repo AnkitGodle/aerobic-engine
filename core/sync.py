@@ -18,11 +18,14 @@ from core import strength
 from core.analysis import compute_activity_metrics
 from core.garmin_client import GarminClient, date_range
 from core.garmin_guard import GarminGuard
-from core.store import DEFAULT_DB, Store
+from core.store import Store, default_db
 
 log = logging.getLogger("aerobic_engine.sync")
 
 STREAM_SPORTS = {"run", "bike", "swim", "brick"}
+# Pool swims and strength sessions happen indoors, so asking for weather would
+# spend a request to learn nothing.
+WEATHER_SPORTS = {"run", "bike", "brick"}
 ZONE_SPORTS = {"run", "bike", "swim", "strength", "brick"}
 
 
@@ -83,7 +86,7 @@ def import_exercise_sets(store: Store, client: GarminClient) -> tuple[int, int]:
     return sets_stored, logged
 
 
-def generate_ai_notes(db: str = DEFAULT_DB, today: date | None = None) -> int:
+def generate_ai_notes(db: str | None = None, today: date | None = None) -> int:
     """Write every page summary and chart reading into the database.
 
     Done here, once per sync, rather than on page render. Streamlit executes the
@@ -241,7 +244,7 @@ def recompute_metrics(
 
 
 def _sync_locked(
-    db: str = DEFAULT_DB,
+    db: str | None = None,
     days: int | None = None,
     full: bool = False,
     streams: bool = True,
@@ -310,6 +313,29 @@ def _sync_locked(
     sets_stored, auto_logged = import_exercise_sets(store, client)
     stats["exercise_sets"] = sets_stored
     stats["strength_auto_logged"] = auto_logged
+
+    # Conditions during each outdoor session. Backfilled from the database
+    # rather than from what was new in this run, so an activity skipped by a
+    # request cap or a transient error is picked up next time instead of being
+    # left without weather permanently.
+    if progress:
+        progress("Fetching weather for outdoor sessions…")
+    weather_rows = 0
+    pending_weather = store.activities_missing_weather(sorted(WEATHER_SPORTS))
+    for a in pending_weather[:stream_limit]:
+        row = client.fetch_weather(a["activity_id"])
+        if row:
+            weather_rows += store.upsert_weather([row])
+    stats["weather_rows"] = weather_rows
+
+    # Body constants and lifetime records. One call each, so they are refreshed
+    # every sync rather than tracked for staleness.
+    profile = client.fetch_profile()
+    for key, value in profile.items():
+        if value is not None:
+            store.set_state(f"profile_{key}", str(value))
+    stats["personal_records"] = store.set_personal_records(
+        client.fetch_personal_records())
 
     thresholds = client.fetch_thresholds()
     for k, v in thresholds.items():
@@ -389,7 +415,7 @@ def _sync_locked(
 
 
 def sync(
-    db: str = DEFAULT_DB,
+    db: str | None = None,
     days: int | None = None,
     full: bool = False,
     streams: bool = True,
@@ -432,12 +458,12 @@ def sync(
     return stats
 
 
-def guard_status(db: str = DEFAULT_DB) -> dict[str, Any]:
+def guard_status(db: str | None = None) -> dict[str, Any]:
     with Store(db) as store:
         return GarminGuard(store).status()
 
 
-def can_sync(db: str = DEFAULT_DB, store: Store | None = None) -> tuple[bool, str]:
+def can_sync(db: str | None = None, store: Store | None = None) -> tuple[bool, str]:
     """Whether the rate guard would allow a sync right now.
 
     Accepts an open store because the dashboard asks this on every rerun, and

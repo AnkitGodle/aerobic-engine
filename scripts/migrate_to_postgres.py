@@ -23,7 +23,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core.store import Store, is_postgres  # noqa: E402
+from dotenv import load_dotenv  # noqa: E402
+
+from core.store import Store, default_db, is_postgres  # noqa: E402
 
 # Parents before children: hr_streams and the per-activity tables carry a
 # foreign key to activities, so the order here is a correctness requirement,
@@ -32,10 +34,12 @@ TABLES: list[tuple[str, tuple[str, ...]]] = [
     ("activities", ("activity_id",)),
     ("activity_metrics", ("activity_id",)),
     ("activity_zones", ("activity_id", "zone_number")),
+    ("activity_weather", ("activity_id",)),
     ("exercise_sets", ("id",)),
     ("hr_streams", ("activity_id", "t_s")),
     ("daily_wellness", ("day",)),
     ("race_predictions", ("day",)),
+    ("personal_records", ("type_id",)),
     ("strength_log", ("id",)),
     ("checkins", ("id",)),
     ("plans", ("id",)),
@@ -117,6 +121,9 @@ def copy(src_path: str, dest_url: str, dry_run: bool = False) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
+    # .env is read before the defaults are resolved, not after: reading it late
+    # is what let the sync write to the wrong database entirely.
+    load_dotenv()
     ap.add_argument("--from", dest="src",
                     default=os.getenv("AEROBIC_ENGINE_DB", "data/aerobic_engine.db"))
     ap.add_argument("--to", dest="dest", default=os.getenv("DATABASE_URL"))

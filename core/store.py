@@ -18,12 +18,21 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-# DATABASE_URL first: a hosted deployment sets it, and it must win over a local
-# file path left behind in the environment.
-DEFAULT_DB = (
-    os.getenv("DATABASE_URL")
-    or os.getenv("AEROBIC_ENGINE_DB", "data/aerobic_engine.db")
-)
+def default_db() -> str:
+    """Where to read and write, resolved on call rather than at import.
+
+    Import-time capture was a real split-brain bug: scripts/fetch.py imports
+    this module before it calls load_dotenv(), so DATABASE_URL was still unset
+    when the value was computed and the CLI quietly synced into the local SQLite
+    file while the dashboard read Neon. Nothing errored; the data just went to
+    two different places.
+
+    DATABASE_URL wins over AEROBIC_ENGINE_DB so a hosted deployment cannot be
+    sent back to an ephemeral local file by a stray variable.
+    """
+    return (os.getenv("DATABASE_URL")
+            or os.getenv("AEROBIC_ENGINE_DB")
+            or "data/aerobic_engine.db")
 
 PG_PREFIXES = ("postgres://", "postgresql://", "postgresql+psycopg://")
 
@@ -217,6 +226,32 @@ SCHEMA: list[str] = [
         generated_at TEXT NOT NULL
     )
     """,
+    # Heat and humidity raise heart rate at a given pace, which is exactly the
+    # signal the efficiency chart is built on. Without this, a humid week reads
+    # as lost fitness.
+    """
+    CREATE TABLE IF NOT EXISTS activity_weather (
+        activity_id   TEXT PRIMARY KEY REFERENCES activities(activity_id),
+        temp_c        REAL,
+        apparent_c    REAL,
+        dew_point_c   REAL,
+        humidity_pct  REAL,
+        wind_kph      REAL,
+        condition     TEXT,
+        fetched_at    TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS personal_records (
+        type_id     INTEGER PRIMARY KEY,
+        sport       TEXT,
+        label       TEXT,
+        value       REAL,
+        achieved_at TEXT,
+        activity_id TEXT,
+        fetched_at  TEXT NOT NULL
+    )
+    """,
     """
     CREATE TABLE IF NOT EXISTS sync_state (
         key   TEXT PRIMARY KEY,
@@ -236,6 +271,22 @@ COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("daily_wellness", "battery_charged", "REAL"),
     ("daily_wellness", "battery_drained", "REAL"),
     ("weekly_targets", "enabled", "INTEGER DEFAULT 1"),
+    # Daily context that was being left on the table. Stress and respiration are
+    # recovery signals in their own right; steps and intensity minutes are the
+    # load that happens outside a logged session and still has to be recovered
+    # from; weight turns bike watts into watts per kilo.
+    ("daily_wellness", "steps", "REAL"),
+    ("daily_wellness", "stress_avg", "REAL"),
+    ("daily_wellness", "stress_max", "REAL"),
+    ("daily_wellness", "intensity_moderate_min", "REAL"),
+    ("daily_wellness", "intensity_vigorous_min", "REAL"),
+    ("daily_wellness", "floors_climbed", "REAL"),
+    ("daily_wellness", "active_calories", "REAL"),
+    ("daily_wellness", "respiration_avg", "REAL"),
+    ("daily_wellness", "respiration_sleep_avg", "REAL"),
+    ("daily_wellness", "spo2_avg", "REAL"),
+    ("daily_wellness", "spo2_lowest", "REAL"),
+    ("daily_wellness", "weight_kg", "REAL"),
 ]
 
 
@@ -251,8 +302,8 @@ SCHEMA_FINGERPRINT = hashlib.sha256(
 class Store:
     """Thin SQLite wrapper. Use as a context manager or call close()."""
 
-    def __init__(self, path: str | Path = DEFAULT_DB) -> None:
-        target = str(path)
+    def __init__(self, path: str | Path | None = None) -> None:
+        target = str(path) if path is not None else default_db()
         self.postgres = is_postgres(target)
         if self.postgres:
             # A hosted deployment needs storage that survives a restart: a free
@@ -866,6 +917,39 @@ class Store:
     def clear_targets(self) -> None:
         with self.tx():
             self.execute("DELETE FROM weekly_targets")
+
+    # -- weather and records --------------------------------------------
+    def upsert_weather(self, rows: Iterable[dict[str, Any]]) -> int:
+        return self._upsert("activity_weather", rows, "activity_id")
+
+    def weather(self) -> dict[str, dict[str, Any]]:
+        """Keyed by activity_id, because it is only ever read alongside one."""
+        return {r["activity_id"]: r
+                for r in self.query("SELECT * FROM activity_weather")}
+
+    def activities_missing_weather(self, sports: Sequence[str]) -> list[dict[str, Any]]:
+        """Outdoor sessions with no weather row yet.
+
+        Pool swims are excluded by the caller: there is no weather indoors, and
+        asking would spend a request to learn nothing.
+        """
+        if not sports:
+            return []
+        marks = ",".join("?" * len(sports))
+        return self.query(
+            f"SELECT activity_id, sport, start_date FROM activities"
+            f" WHERE sport IN ({marks})"
+            f" AND COALESCE(is_multisport_parent, 0) = 0"
+            f" AND activity_id NOT IN (SELECT activity_id FROM activity_weather)"
+            f" ORDER BY start_time DESC", list(sports))
+
+    def set_personal_records(self, rows: Iterable[dict[str, Any]]) -> int:
+        return self._upsert("personal_records", rows, "type_id")
+
+    def personal_records(self) -> list[dict[str, Any]]:
+        return self.query(
+            "SELECT * FROM personal_records WHERE value IS NOT NULL"
+            " ORDER BY sport, type_id")
 
     # -- AI notes, written at sync time and read on render ---------------
     def set_notes(self, notes: Iterable[dict[str, Any]]) -> int:

@@ -418,8 +418,15 @@ class GarminClient:
         return out
 
     # -- wellness -------------------------------------------------------
-    def fetch_wellness_day(self, day: date) -> dict[str, Any]:
-        """One row of daily recovery metrics. Every field is best-effort."""
+    def fetch_wellness_day(self, day: date, extras: bool = True) -> dict[str, Any]:
+        """One row of daily recovery metrics. Every field is best-effort.
+
+        `extras` adds three calls per day for stress, respiration and blood
+        oxygen. They are worth it — stress and respiration are recovery signals
+        the planner can use, and steps and intensity minutes are load that
+        happens outside a logged session but still has to be recovered from —
+        but a long backfill can switch them off to keep the request count down.
+        """
         api = self.connect()
         cdate = day.isoformat()
 
@@ -443,6 +450,11 @@ class GarminClient:
             vo2_bike = dig(dig_nested(status, "cycling"), "vo2MaxPreciseValue", "vo2MaxValue")
 
         sleep = self._call(api.get_sleep_data, cdate, label="get_sleep_data")
+        summary = resp = spo2 = None
+        if extras:
+            summary = self._call(api.get_user_summary, cdate, label="get_user_summary")
+            resp = self._call(api.get_respiration_data, cdate, label="get_respiration")
+            spo2 = self._call(api.get_spo2_data, cdate, label="get_spo2")
         battery = latest_entry(
             self._call(api.get_body_battery, cdate, label="get_body_battery")
         )
@@ -470,22 +482,140 @@ class GarminClient:
             "nap_seconds": dig(sleep, "napTimeSeconds"),
             "battery_charged": dig(battery, "charged"),
             "battery_drained": dig(battery, "drained"),
+            "steps": dig(summary, "totalSteps"),
+            "stress_avg": dig(summary, "averageStressLevel"),
+            "stress_max": dig(summary, "maxStressLevel"),
+            "intensity_moderate_min": dig(summary, "moderateIntensityMinutes"),
+            "intensity_vigorous_min": dig(summary, "vigorousIntensityMinutes"),
+            "floors_climbed": dig(summary, "floorsAscended"),
+            "active_calories": dig(summary, "activeKilocalories"),
+            "respiration_avg": dig(resp, "avgWakingRespirationValue",
+                                   "avgTomorrowSleepRespirationValue"),
+            "respiration_sleep_avg": dig(resp, "avgSleepRespirationValue"),
+            "spo2_avg": dig(spo2, "averageSpO2", "averageSpo2"),
+            "spo2_lowest": dig(spo2, "lowestSpO2", "lowestSpo2"),
+            "weight_kg": _weight_kg(dig(summary, "weight")),
             "ingested_at": datetime.now().isoformat(timespec="seconds"),
         }
+        # Garmin reports a stress level of -1 or -2 for "not measured". Those are
+        # sentinels, not low stress, and would drag any average down.
+        for key in ("stress_avg", "stress_max"):
+            if row.get(key) is not None and row[key] < 0:
+                row[key] = None
         # Garmin reports ACWR as a percentage on some firmware; store it as a ratio.
         if row["load_ratio"] and row["load_ratio"] > 5:
             row["load_ratio"] = row["load_ratio"] / 100.0
         return row
 
     def fetch_wellness_range(
-        self, days: Iterable[date], skip: set[str] | None = None
+        self, days: Iterable[date], skip: set[str] | None = None,
+        extras: bool = True,
     ) -> list[dict[str, Any]]:
         skip = skip or set()
         rows = []
         for d in days:
             if d.isoformat() in skip:
                 continue
-            rows.append(self.fetch_wellness_day(d))
+            rows.append(self.fetch_wellness_day(d, extras=extras))
+        return rows
+
+    def fetch_weather(self, activity_id: str) -> dict[str, Any] | None:
+        """Conditions during one activity.
+
+        Worth a request per outdoor session because heat and humidity raise
+        heart rate at a given pace, and heart rate at a given pace is the whole
+        basis of the efficiency chart. A humid fortnight otherwise reads as lost
+        fitness.
+        """
+        api = self.connect()
+        raw = self._call(api.get_activity_weather, activity_id, label="weather")
+        if not isinstance(raw, dict) or not raw:
+            return None
+        return {
+            "activity_id": str(activity_id),
+            "temp_c": _to_celsius(raw.get("temp")),
+            "apparent_c": _to_celsius(raw.get("apparentTemp")),
+            "dew_point_c": _to_celsius(raw.get("dewPoint")),
+            "humidity_pct": _f(raw.get("relativeHumidity")),
+            "wind_kph": _f(raw.get("windSpeed")),
+            "condition": dig_str(raw.get("weatherTypeDTO") or {}, "desc"),
+            "fetched_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+    def fetch_profile(self) -> dict[str, Any]:
+        """Body and physiology constants: weight, height, age, threshold HR.
+
+        Weight is what turns bike watts into watts per kilo, and the intensity
+        zone numbers explain a discrepancy that is otherwise baffling — Garmin
+        counts zone 3 as "moderate" and zone 4 up as "vigorous", so time spent
+        at a deliberately raised aerobic ceiling never shows up as easy.
+        """
+        api = self.connect()
+        raw = self._call(api.get_user_profile, label="get_user_profile") or {}
+        data = raw.get("userData") or {}
+        grams = _f(data.get("weight"))
+        born = dig_str(data, "birthDate")
+        age = None
+        if born:
+            try:
+                b = date.fromisoformat(born[:10])
+                today = date.today()
+                age = today.year - b.year - ((today.month, today.day) < (b.month, b.day))
+            except ValueError:
+                age = None
+        return {
+            # Garmin stores weight in grams.
+            "weight_kg": round(grams / 1000.0, 1) if grams else None,
+            "height_cm": _f(data.get("height")),
+            "birth_date": born,
+            "age": age,
+            "gender": dig_str(data, "gender"),
+            "vo2max_run": _f(data.get("vo2MaxRunning")),
+            "vo2max_bike": _f(data.get("vo2MaxCycling")),
+            "threshold_hr": _f(data.get("lactateThresholdHeartRate")),
+            "moderate_zone": _f(data.get("moderateIntensityMinutesHrZone")),
+            "vigorous_zone": _f(data.get("vigorousIntensityMinutesHrZone")),
+        }
+
+    # Garmin's own numbering for personal records. Only the ones this athlete's
+    # sports can produce are named; anything else is stored with its raw id
+    # rather than guessed at.
+    PR_LABELS: dict[int, tuple[str, str]] = {
+        1: ("run", "Fastest 1 km"),
+        2: ("run", "Fastest 1 mile"),
+        3: ("run", "Fastest 5 km"),
+        4: ("run", "Fastest 10 km"),
+        5: ("run", "Fastest half marathon"),
+        6: ("run", "Fastest marathon"),
+        7: ("run", "Longest run"),
+        8: ("bike", "Longest ride"),
+        9: ("bike", "Biggest climb"),
+        12: ("other", "Most steps in a day"),
+        13: ("other", "Most steps in a week"),
+        14: ("other", "Most steps in a month"),
+        15: ("other", "Most floors in a day"),
+    }
+
+    def fetch_personal_records(self) -> list[dict[str, Any]]:
+        api = self.connect()
+        raw = self._call(api.get_personal_record, label="get_personal_record")
+        rows = []
+        for entry in _entries(raw):
+            try:
+                type_id = int(entry.get("typeId"))
+            except (TypeError, ValueError):
+                continue
+            sport, label = self.PR_LABELS.get(type_id, ("other", f"Record {type_id}"))
+            rows.append({
+                "type_id": type_id,
+                "sport": dig_str(entry, "activityType") or sport,
+                "label": label,
+                "value": _f(entry.get("value")),
+                "achieved_at": dig_str(entry, "prStartTimeLocal",
+                                       "activityStartDateTimeLocal"),
+                "activity_id": dig_str(entry, "activityId"),
+                "fetched_at": datetime.now().isoformat(timespec="seconds"),
+            })
         return rows
 
     def fetch_race_predictions(self, start: date, end: date) -> list[dict[str, Any]]:
@@ -698,6 +828,31 @@ def parse_stream(details: Any, max_points: int = 600) -> list[dict[str, Any]]:
         for s in out:
             s["t_s"] = (s["t_s"] - t0) / 1000.0
     return out
+
+
+def _weight_kg(v: Any) -> float | None:
+    """Garmin stores weight in grams; a bare 66000 in a kg column is nonsense."""
+    n = _f(v)
+    if n is None:
+        return None
+    return round(n / 1000.0, 1) if n > 500 else round(n, 1)
+
+
+def _to_celsius(v: Any) -> float | None:
+    """Garmin's weather endpoint reports Fahrenheit whatever the account says.
+
+    Verified on this account: get_unit_system() returns "metric", yet the same
+    activity came back as temp 74 / dewPoint 70 / humidity 88 — a 74C morning
+    run being impossible. The threshold below is a guard rather than a guess: it
+    only matters if Garmin ever starts honouring the setting, in which case a
+    plausible Celsius reading passes straight through.
+    """
+    n = _f(v)
+    if n is None:
+        return None
+    if n <= 45:
+        return round(n, 1)          # already Celsius
+    return round((n - 32.0) * 5.0 / 9.0, 1)
 
 
 def _f(v: Any) -> float | None:
