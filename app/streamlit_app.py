@@ -1062,8 +1062,7 @@ def page_plan(data: dict, today: date) -> None:
         refresh()
 
     stored = st.session_state.get("plan") or (data["plan"] or {}).get("plan")
-    stored, repaired = conformed_plan(stored, today, data.get("scoped_to"))
-    if repaired:
+    if data.get("plan_repaired"):
         st.info("This plan was built before your current settings, so it has been "
                 "re-checked against them — heart-rate targets, the spacing rule "
                 "and the session floor all reflect what is saved now.")
@@ -1866,6 +1865,7 @@ def scope_to_sports(data: dict, sports: list[str]) -> dict:
             if not any(sp in str(a).lower() for sp in dropped)]
         scoped["plan"] = dict(plan, plan=inner)
     scoped["scoped_to"] = sorted(sports)
+    scoped["plan_repaired"] = data.get("plan_repaired", False)
     return scoped
 
 
@@ -1985,6 +1985,17 @@ def main() -> None:
 
     page = nav()
     today, sports = filter_bar(data, today)
+
+    # Re-check the stored plan against the current rules here rather than in each
+    # page. Doing it per page meant every page had to remember to, and the Today
+    # week strip did not — so the dashboard showed a plan that predated the rules
+    # it claimed to follow.
+    stored_row = data.get("plan") or {}
+    fresh, repaired = conformed_plan(stored_row.get("plan"), today, sports)
+    if stored_row and fresh is not None:
+        data = dict(data, plan=dict(stored_row, plan=fresh),
+                   plan_repaired=repaired)
+
     data = scope_to_sports(data, sports)
 
     {"Today": page_today, "Progress": page_progress, "Plan": page_plan,
