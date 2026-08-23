@@ -314,3 +314,71 @@ def test_an_ai_plan_stacking_legs_onto_a_ride_gets_moved(wrecked):
         assert not [d for d in out.week_plan
                     if d.day == leg.day and d.sport in planner.LEG_CONFLICT_SPORTS
                     and d.duration_min > 0]
+
+
+# --------------------------------------------------------------------------
+# The dashboard-wide sport filter. It reaches the planner, not just the charts:
+# a page filtered to run and bike that still prescribes a swim contradicts
+# itself, and the athlete would reasonably trust the plan over the filter.
+# --------------------------------------------------------------------------
+
+
+def prescribed(plan):
+    """Sessions the plan is asking for, as opposed to ones already logged.
+
+    A completed session stays in the week whatever the filter says — it happened,
+    and a planner that quietly deleted training history would be lying about the
+    week. Only the prescriptions are the filter's business.
+    """
+    return [d for d in plan.week_plan
+            if d.duration_min > 0 and d.purpose != "completed"]
+
+
+def test_only_sports_removes_the_others_from_the_plan(healthy):
+    plan = planner.plan_week(healthy, today=TODAY, use_ai=False,
+                             only_sports=["run", "bike"])
+    trained = {d.sport for d in prescribed(plan)}
+    assert "swim" not in trained
+    # A brick is a ride and a run in one session, so it stays legitimate here.
+    assert trained <= {"run", "bike", "brick"}
+
+
+def test_only_sports_can_switch_strength_off(healthy):
+    plan = planner.plan_week(healthy, today=TODAY, use_ai=False,
+                             only_sports=["run", "bike"])
+    assert not [d for d in prescribed(plan) if d.sport == "strength"]
+
+
+def test_strength_survives_when_it_is_selected(healthy):
+    """Asserted on the envelope, not the plan.
+
+    The plan is the wrong place to check: this fixture has already logged its two
+    strength sessions for the week, so the frequency cap correctly prescribes no
+    more. The envelope is where "is strength on at all" actually lives.
+    """
+    facts = planner.build_facts(healthy, today=TODAY)
+    on = planner.build_envelope(facts, healthy,
+                                only_sports=["run", "bike", "strength"])
+    off = planner.build_envelope(facts, healthy, only_sports=["run", "bike"])
+    assert on.strength_sessions > 0
+    assert off.strength_sessions == 0
+
+
+def test_a_filtered_week_still_obeys_the_volume_cap(healthy):
+    """Narrowing the sports must not become a way to smuggle volume in.
+
+    The share a dropped sport held is redistributed, so the risk is real: three
+    sports' minutes landing on two.
+    """
+    facts = planner.build_facts(healthy, today=TODAY)
+    envelope = planner.build_envelope(facts, healthy, only_sports=["run", "bike"])
+    plan = planner.plan_week(healthy, today=TODAY, use_ai=False,
+                             only_sports=["run", "bike"])
+    planned = sum(d.duration_min for d in plan.week_plan)
+    assert planned <= envelope.max_week_minutes * 1.10
+
+
+def test_no_selection_at_all_plans_everything(healthy):
+    """only_sports=None is "no opinion", never "nothing enabled"."""
+    plan = planner.plan_week(healthy, today=TODAY, use_ai=False, only_sports=None)
+    assert {d.sport for d in prescribed(plan)}

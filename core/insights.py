@@ -33,7 +33,7 @@ from core.analysis import (
 )
 from core.schemas import ENDURANCE_SPORTS
 
-log = logging.getLogger("iron_coach.insights")
+log = logging.getLogger("aerobic_engine.insights")
 
 
 @dataclass
@@ -54,6 +54,18 @@ def _fmt_hm(minutes: float) -> str:
 # --------------------------------------------------------------------------
 # per page
 # --------------------------------------------------------------------------
+
+
+def _sports(data: dict) -> tuple[str, ...]:
+    """Endurance sports in scope for this page.
+
+    The dashboard's sport filter puts its selection in `scoped_to`. Reading it
+    here matters because the activity lists are already filtered, so a loop over
+    every sport would report "no steady swims yet" on a page the athlete has
+    explicitly narrowed to running and riding.
+    """
+    picked = {str(sp).lower() for sp in (data.get("scoped_to") or ENDURANCE_SPORTS)}
+    return tuple(sp for sp in ENDURANCE_SPORTS if sp in picked)
 
 
 def overview_insight(data: dict, today: date) -> PageInsight:
@@ -103,7 +115,7 @@ def overview_insight(data: dict, today: date) -> PageInsight:
             )
             tone = "error"
 
-    missing = [s for s in ENDURANCE_SPORTS
+    missing = [s for s in _sports(data)
                if ef_data_status(acts, s)["needed_for_verdict"] > 0]
     if missing:
         bullets.append(
@@ -132,7 +144,7 @@ def fitness_insight(data: dict, today: date) -> PageInsight:
     bullets, tone = [], "info"
 
     if not usable:
-        for sport in ENDURANCE_SPORTS:
+        for sport in _sports(data):
             st = ef_data_status(acts, sport)
             if st["total"]:
                 bullets.append(f"**{sport.title()}:** {st['message']}")
@@ -193,7 +205,7 @@ def intensity_insight(data: dict, today: date) -> PageInsight:
         f"{pol['hard']:.0f}% hard."
     ]
     per_sport = []
-    for sport in ENDURANCE_SPORTS:
+    for sport in _sports(data):
         sp = polarisation(zones, sport=sport, since=since)
         if sum(sp.values()) > 0:
             per_sport.append(f"{sport} {sp['easy']:.0f}% easy / {sp['hard']:.0f}% hard")

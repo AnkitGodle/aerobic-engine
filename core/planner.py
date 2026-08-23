@@ -44,7 +44,7 @@ from core.schemas import (
 )
 from core.store import Store, week_start_of
 
-log = logging.getLogger("iron_coach.planner")
+log = logging.getLogger("aerobic_engine.planner")
 
 # --- base-phase shape -----------------------------------------------------
 # Bike-heavy: it buys the most aerobic volume per unit of tissue damage and is
@@ -302,6 +302,7 @@ def build_envelope(
     store: Store | None = None,
     targets: dict[str, dict[str, Any]] | None = None,
     include_recovery_triggers: bool = True,
+    only_sports: Sequence[str] | None = None,
 ) -> Envelope:
     """The bounds the AI plans inside. Deterministic, and it always wins.
 
@@ -366,6 +367,12 @@ def build_envelope(
     # no minutes, no long-session requirement. Its share of the week goes to the
     # sports that are still on.
     disabled = {sp for sp, t in targets.items() if not t.get("enabled", 1)}
+    # An explicit selection overrides the saved flags. The dashboard needs this
+    # because a visitor without the write PIN can still filter their own view,
+    # and a plan that ignores the filter would contradict the page around it.
+    if only_sports is not None:
+        wanted = {str(sp).lower() for sp in only_sports}
+        disabled |= {sp for sp in shares if sp not in wanted}
     if disabled:
         live = {sp: v for sp, v in shares.items() if sp not in disabled}
         total_live = sum(live.values()) or 1.0
@@ -413,7 +420,11 @@ def build_envelope(
         prev_week_minutes=prev,
         progression_cap_pct=PROGRESSION_CAP_PCT,
         min_rest_days=2 if deload else 1,
-        strength_sessions=1 if deload else 2,
+        strength_sessions=(
+            0 if (only_sports is not None
+                  and "strength" not in {str(sp).lower() for sp in only_sports})
+            else (1 if deload else 2)
+        ),
         brick_required=(not deload) and idx % 2 == 1,
         max_quality_sessions=0 if deload else (2 if verdict == "build" else 1),
         readiness_verdict=verdict,
@@ -1202,10 +1213,11 @@ def plan_week(
     previous_plan: dict[str, Any] | None = None,
     save: bool = True,
     include_recovery_triggers: bool = True,
+    only_sports: Sequence[str] | None = None,
 ) -> WeekPlan:
     """Facts -> envelope -> AI (optional) -> enforcement -> saved plan."""
     facts = build_facts(store, today=today)
-    envelope = build_envelope(facts, store,
+    envelope = build_envelope(facts, store, only_sports=only_sports,
                               include_recovery_triggers=include_recovery_triggers)
     targets = store.targets()
     strength_log = store.strength_log(since=facts.week_start - timedelta(days=120))
@@ -1274,6 +1286,7 @@ def plan_next_week(
     today: date | None = None,
     use_ai: bool = False,
     save: bool = True,
+    only_sports: Sequence[str] | None = None,
 ) -> WeekPlan:
     """A full seven-day plan for the week that has not started yet.
 
@@ -1288,7 +1301,8 @@ def plan_next_week(
     today = today or date.today()
     next_monday = week_start_of(today) + timedelta(weeks=1)
     plan = plan_week(store, checkin=checkin, today=next_monday, use_ai=use_ai,
-                     save=save, include_recovery_triggers=False)
+                     save=save, include_recovery_triggers=False,
+                     only_sports=only_sports)
     plan.flags.insert(0, "Provisional: recovery is re-checked on the day, and can "
                          "still force a lighter week.")
     return plan
