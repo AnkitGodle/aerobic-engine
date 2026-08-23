@@ -40,6 +40,12 @@ class Exercise:
         unilateral: bool = False,
         cue: str = "",
         progress_to: str | None = None,
+        focus: str = "",
+        setup: str = "",
+        steps: tuple[str, ...] = (),
+        mistakes: str = "",
+        why: str = "",
+        load_note: str = "",
     ) -> None:
         self.id = id
         self.name = name
@@ -53,6 +59,16 @@ class Exercise:
         self.unilateral = unilateral
         self.cue = cue
         self.progress_to = progress_to  # harder variant once the top is reached
+        # What the exercise is for, and how to actually do it. Held here rather
+        # than in the UI because a prescription without a technique is not
+        # something you can follow, and bad technique is how strength work causes
+        # the injury it was meant to prevent.
+        self.focus = focus
+        self.setup = setup
+        self.steps = steps
+        self.mistakes = mistakes
+        self.why = why
+        self.load_note = load_note
 
 
 # --- the library. Closed set; the AI cannot add to it. --------------------
@@ -69,6 +85,16 @@ EXERCISES: dict[str, Exercise] = {
             load_step_kg=2.5,
             tempo="3s down, 1s pause",
             cue="Full range off a step; control the lowering.",
+            focus="calf / Achilles",
+            setup="Stand on the edge of a step with the balls of both feet on it and heels hanging free. Fingertips on a wall or rail for balance only.",
+            steps=(
+                "Rise as high as you can onto your toes. Pause one second at the top.",
+                "Lower over three slow seconds until your heels are below the step and you feel a stretch through the calf and Achilles.",
+                "Pause briefly at the bottom, then rise again.",
+            ),
+            mistakes="Bouncing out of the bottom, or cutting the range short at either end. The slow lowering is the part the tendon responds to.",
+            why="The Achilles takes several times your bodyweight on every running stride. This is the single most protective exercise for a runner.",
+            load_note="Hold a dumbbell or a loaded rucksack once 4x8 bodyweight reps feel controlled.",
             progress_to="calf_raise_single_leg",
         ),
         Exercise(
@@ -81,6 +107,15 @@ EXERCISES: dict[str, Exercise] = {
             load_step_kg=2.5,
             tempo="3s down",
             cue="Knee bent ~30 degrees throughout — this is the runner's calf.",
+            focus="calf / Achilles",
+            setup="Same step position, but bend your knees to about 30 degrees and keep them bent throughout. Sitting on a chair with weight on your thighs works too.",
+            steps=(
+                "With knees held bent, push through the balls of your feet to raise your heels as high as they will go.",
+                "Lower over three seconds, knees still bent.",
+            ),
+            mistakes="Letting the knees straighten as you rise — that shifts the work back to the gastrocnemius and misses the point.",
+            why="Bending the knee takes the gastrocnemius out of the movement and isolates the soleus, which carries most of the load in distance running and is usually the weak link.",
+            load_note="Weight across the thighs if seated, or a rucksack if standing.",
         ),
         Exercise(
             "calf_raise_single_leg",
@@ -93,6 +128,17 @@ EXERCISES: dict[str, Exercise] = {
             tempo="3s down",
             unilateral=True,
             cue="Per side. Add load only once bodyweight reps are clean.",
+            focus="calf / Achilles",
+            setup="One foot on the step edge, the other foot lifted clear. Fingertips on a wall for balance.",
+            steps=(
+                "Rise onto the toes of the working leg as high as possible.",
+                "Pause one second at the top.",
+                "Lower over three seconds to a full stretch below the step.",
+                "Complete all reps, then switch legs.",
+            ),
+            mistakes="Pushing through the wall with your arms, or letting the hip drop on the working side.",
+            why="Running is a single-leg activity, and side-to-side differences are common and invisible until they cause an injury.",
+            load_note="Bodyweight is plenty at first. Add a light dumbbell only when all reps on the weaker side are clean.",
         ),
         Exercise(
             "split_squat",
@@ -105,6 +151,17 @@ EXERCISES: dict[str, Exercise] = {
             tempo="2s down",
             unilateral=True,
             cue="Per side. Torso tall, front shin near vertical.",
+            focus="quad / knee",
+            setup="Stand in a long stride, front foot flat, back heel raised. Feet about hip-width apart, not on a tightrope.",
+            steps=(
+                "Lower straight down over two seconds until the back knee is just above the floor.",
+                "Keep your torso tall and the front shin close to vertical.",
+                "Drive up through the front foot. Do not push off the back toes.",
+                "Complete all reps, then switch legs.",
+            ),
+            mistakes="Leaning forward, letting the front knee travel past the toes, or using the back leg to help.",
+            why="Builds single-leg quad and glute strength, which controls how much the knee collapses inward on landing.",
+            load_note="A dumbbell in each hand, or one held at the chest.",
         ),
         Exercise(
             "reverse_lunge",
@@ -117,6 +174,17 @@ EXERCISES: dict[str, Exercise] = {
             tempo="controlled",
             unilateral=True,
             cue="Per side. Step back, not forward — kinder on the knee.",
+            focus="quad / knee",
+            setup="Stand tall, feet hip-width.",
+            steps=(
+                "Step one foot back and lower until both knees are bent about 90 degrees.",
+                "Keep your weight over the front foot throughout.",
+                "Push through the front foot to return to standing.",
+                "Complete all reps on one side, then switch.",
+            ),
+            mistakes="Stepping forward instead of back, which loads the knee harder, and letting the front heel lift.",
+            why="Same benefit as the split squat with a balance demand and less knee stress, which is why it is the reverse rather than forward version.",
+            load_note="Dumbbells at your sides.",
         ),
         Exercise(
             "rdl",
@@ -128,6 +196,17 @@ EXERCISES: dict[str, Exercise] = {
             load_step_kg=5.0,
             tempo="3s down",
             cue="Hinge at the hip, flat back, feel the hamstring.",
+            focus="hamstring / glute",
+            setup="Stand holding a weight in front of your thighs, feet hip-width, knees softly bent.",
+            steps=(
+                "Push your hips backwards, letting the weight travel down your legs.",
+                "Keep your back flat and your shins nearly vertical.",
+                "Stop when you feel a strong stretch in the hamstrings, usually around mid-shin. Depth is not the goal.",
+                "Drive your hips forward to stand up, squeezing the glutes.",
+            ),
+            mistakes="Rounding the back, squatting instead of hinging, or chasing depth past the point where your back can stay flat.",
+            why="Strong hamstrings and glutes reduce load on the calf and Achilles and protect the hamstring itself, a common runner's injury.",
+            load_note="Dumbbells, a barbell, or a rucksack held to the chest.",
             progress_to="single_leg_rdl",
         ),
         Exercise(
@@ -141,6 +220,17 @@ EXERCISES: dict[str, Exercise] = {
             tempo="3s down",
             unilateral=True,
             cue="Per side. Hips square; balance is part of the exercise.",
+            focus="hamstring / glute",
+            setup="Stand on one leg holding a weight in the opposite hand.",
+            steps=(
+                "Hinge at the hip, letting the free leg extend straight behind you as a counterweight.",
+                "Keep your hips square to the floor — the biggest challenge here.",
+                "Lower until you feel the hamstring load, then return to standing.",
+                "Complete all reps, then switch.",
+            ),
+            mistakes="Letting the hip of the free leg rotate open towards the ceiling.",
+            why="Trains the hamstring and glute while the hip resists rotation, which is exactly what they do during the stance phase of running.",
+            load_note="Light. Balance should be the limit before load is.",
         ),
         Exercise(
             "step_up",
@@ -153,6 +243,17 @@ EXERCISES: dict[str, Exercise] = {
             tempo="no push off the trailing leg",
             unilateral=True,
             cue="Per side. Knee-height step; drive through the top leg only.",
+            focus="glute / drive",
+            setup="Stand facing a knee-height step or bench.",
+            steps=(
+                "Place one whole foot on the step.",
+                "Drive up through that leg until you are standing on the step.",
+                "Do not push off the bottom foot — it should feel almost passive.",
+                "Lower slowly under control. Complete all reps, then switch.",
+            ),
+            mistakes="Pushing off the trailing foot, or hopping up. If you cannot rise without help, the step is too high.",
+            why="Closest strength movement to the drive phase of running, and it builds the glute strength that keeps the pelvis level.",
+            load_note="Dumbbells at your sides once bodyweight reps are easy.",
         ),
         Exercise(
             "wall_sit",
@@ -162,6 +263,16 @@ EXERCISES: dict[str, Exercise] = {
             sets=5,
             hold_range=(30, 45),
             cue="Thighs parallel to the floor. Breathe.",
+            focus="quad / knee",
+            setup="Back flat against a wall, feet a stride out in front, hip-width.",
+            steps=(
+                "Slide down until your thighs are parallel to the floor and your knees are above your ankles.",
+                "Hold. Breathe normally rather than holding your breath.",
+                "Stand up between sets and rest about a minute.",
+            ),
+            mistakes="Sitting too shallow to be hard, or letting the knees drift past the toes.",
+            why="A long isometric hold loads the quad tendon heavily with no impact at all, which is why it is safe to do near hard running days.",
+            load_note="Add time before adding weight. A plate on the thighs comes later.",
             progress_to="spanish_squat",
         ),
         Exercise(
@@ -172,6 +283,16 @@ EXERCISES: dict[str, Exercise] = {
             sets=5,
             hold_range=(30, 45),
             cue="Band behind the knees, sit back into it, shins vertical.",
+            focus="quad / knee",
+            setup="Loop a resistance band around a solid post at knee height and around the back of both knees. Step back until the band is taut.",
+            steps=(
+                "Let the band pull your knees back as you sit down into a squat.",
+                "Keep your shins vertical — the band makes this possible.",
+                "Hold at about parallel, chest up.",
+            ),
+            mistakes="Too little band tension, which turns it into an ordinary squat and loses the point.",
+            why="Loads the patellar tendon hard while keeping the shins vertical, so the knee joint itself stays comfortable. The standard rehab exercise for runner's knee pain.",
+            load_note="A heavier band, or hold a weight at the chest.",
         ),
         Exercise(
             "single_leg_calf_hold",
@@ -182,6 +303,16 @@ EXERCISES: dict[str, Exercise] = {
             hold_range=(30, 45),
             unilateral=True,
             cue="Per side. Top of the range, heel high, still.",
+            focus="calf / Achilles",
+            setup="Stand on one foot on flat ground or a step, fingertips on a wall.",
+            steps=(
+                "Rise to the very top of the calf raise, heel as high as it goes.",
+                "Hold still at the top. Do not let the heel sink.",
+                "Complete the hold, then switch legs.",
+            ),
+            mistakes="Slowly sinking during the hold. When the heel drops, the set is over, even if the clock has not run out.",
+            why="Isometric holds reduce tendon pain and build capacity without the repeated loading of reps, which makes this the go-to when the Achilles is grumbling.",
+            load_note="Hold a dumbbell once 4x45s per side is comfortable.",
         ),
         Exercise(
             "tib_raise",
@@ -193,8 +324,290 @@ EXERCISES: dict[str, Exercise] = {
             load_step_kg=1.0,
             tempo="slow both ways",
             cue="Back against a wall, toes up. Cheap insurance.",
+            focus="shin",
+            setup="Stand with your back and hips against a wall, heels about a foot from it, legs straight.",
+            steps=(
+                "Pull your toes up towards your shins as far as they will go.",
+                "Lower slowly, feeling the front of the shin work.",
+            ),
+            mistakes="Bending the knees or shuffling the feet closer to the wall to make it easier.",
+            why="The tibialis anterior decelerates your foot on every landing. It is the muscle behind most shin splints, and almost nobody trains it.",
+            load_note="Bodyweight is enough for a long time; a light ankle weight later.",
         ),
     ]
+}
+
+
+# --- glute, knee and hamstring work ---------------------------------------
+# Added because the original library was calf-and-hinge heavy. Weak glutes let
+# the pelvis drop and the knee fall inward on every stride, which is the usual
+# mechanism behind runner's knee and IT band pain; the knee-specific entries load
+# the patellar tendon with the shin kept vertical so the joint stays comfortable.
+# Everything here is slow and loaded. Nothing jumps: tendon injuries come from
+# load jumps, not from load, so base phase has no plyometrics.
+EXERCISES.update({e.id: e for e in [
+    Exercise(
+        "glute_bridge", "Glute bridge", STRENGTH, "glutes",
+        sets=3, rep_range=(8, 12), load_step_kg=5.0, tempo="2s up, 1s squeeze",
+        cue="Ribs down, squeeze at the top rather than arching the back.",
+        focus="glute / hip",
+        progress_to="hip_thrust",
+        setup="Lie on your back, knees bent, heels about a hand's length from "
+              "your backside, arms flat at your sides.",
+        steps=(
+            "Press through your heels and lift your hips until your body makes a "
+            "straight line from knees to shoulders.",
+            "Squeeze the glutes hard for a second at the top.",
+            "Lower under control without letting the hips touch down between reps.",
+        ),
+        mistakes="Arching the lower back to get higher, which turns it into a "
+                 "back exercise, or pushing through the toes instead of the heels.",
+        why="The glutes extend the hip on every stride and every pedal push. When "
+            "they are weak the hamstrings and lower back take over.",
+        load_note="A weight across the hips once 3x12 bodyweight is easy.",
+    ),
+    Exercise(
+        "hip_thrust", "Hip thrust", STRENGTH, "glutes (loaded)",
+        sets=3, rep_range=(6, 10), load_step_kg=5.0, tempo="2s up, 1s squeeze",
+        cue="Shoulders on a bench or sofa edge; chin tucked, ribs down.",
+        focus="glute / hip",
+        setup="Sit on the floor with your upper back against a sofa or bench, "
+              "knees bent, feet flat and hip-width. Rest a weight across your hips.",
+        steps=(
+            "Drive through your heels to lift your hips until your torso is "
+            "parallel to the floor.",
+            "Squeeze the glutes for a second at the top with your chin tucked.",
+            "Lower under control to just above the floor.",
+        ),
+        mistakes="Letting the ribs flare and the back arch at the top, or letting "
+                 "the knees fall inward.",
+        why="The heaviest glute exercise you can do with minimal kit, and stronger "
+            "glutes are what keep the pelvis level when you get tired.",
+        load_note="Dumbbell or loaded rucksack across the hips; add 5 kg at a time.",
+    ),
+    Exercise(
+        "side_lying_abduction", "Side-lying leg raise", STRENGTH,
+        "gluteus medius (unilateral)",
+        sets=3, rep_range=(10, 15), load_step_kg=1.0, tempo="slow, controlled",
+        unilateral=True,
+        cue="Per side. Toes pointed slightly down, not up.",
+        focus="glute / hip",
+        setup="Lie on your side in a straight line, bottom knee bent for balance, "
+              "top leg straight.",
+        steps=(
+            "Raise the top leg about 45 degrees, leading with the heel.",
+            "Rotate the toes slightly towards the floor as you lift — that is what "
+            "targets the gluteus medius rather than the hip flexor.",
+            "Lower slowly. Complete all reps, then switch sides.",
+        ),
+        mistakes="Rolling the hips backwards, or leading with the toes, both of "
+                 "which hand the work to the wrong muscle.",
+        why="The gluteus medius stops the pelvis dropping and the knee collapsing "
+            "inward on landing. It is the single most common weakness in runners "
+            "with knee pain.",
+        load_note="An ankle weight once 3x15 is easy.",
+    ),
+    Exercise(
+        "band_monster_walk", "Banded lateral walk", STRENGTH,
+        "gluteus medius / hip stability",
+        sets=3, rep_range=(10, 15), load_step_kg=0.0, tempo="controlled",
+        cue="Steps per direction. Keep tension on the band throughout.",
+        focus="glute / hip",
+        setup="Loop a resistance band around both legs just above the knees. "
+              "Stand in a quarter squat, feet hip-width, chest up.",
+        steps=(
+            "Step sideways against the band, keeping the knees pushed out.",
+            "Bring the trailing foot in without letting the band go slack.",
+            "Complete the reps in one direction, then come back the other way.",
+        ),
+        mistakes="Standing upright, letting the knees drop inward, or bobbing up "
+                 "and down between steps.",
+        why="Trains the hip to resist the knee falling inward while you are "
+            "moving, which is closer to what happens when you run than a static "
+            "hold is.",
+        load_note="A stiffer band. Do not chase reps past 15.",
+    ),
+    Exercise(
+        "terminal_knee_extension", "Terminal knee extension (band)", STRENGTH,
+        "quad / patellar tendon",
+        sets=3, rep_range=(10, 15), load_step_kg=0.0, tempo="2s, 1s squeeze",
+        cue="Band pulling the knee forward; straighten against it.",
+        focus="quad / knee",
+        setup="Anchor a band at knee height in front of you and loop it around the "
+              "back of one knee. Step back until it is taut, that foot flat.",
+        steps=(
+            "Let the band pull your knee into a slight bend.",
+            "Straighten the knee fully against the band and squeeze the quad.",
+            "Release slowly. Complete all reps, then switch legs.",
+        ),
+        mistakes="Locking out by leaning back rather than by using the quad.",
+        why="Strengthens the last few degrees of knee extension, which is where "
+            "the quad is weakest and where the patellar tendon is most loaded.",
+        load_note="A stiffer band, or stand further back.",
+    ),
+    Exercise(
+        "step_down", "Step-down", STRENGTH, "quad / knee control (unilateral)",
+        sets=3, rep_range=(6, 10), load_step_kg=2.0, tempo="3s down",
+        unilateral=True,
+        cue="Per side. Lower slowly; the descent is the exercise.",
+        focus="quad / knee",
+        setup="Stand on a step on one leg, the other foot hanging off the side.",
+        steps=(
+            "Bend the standing knee and lower the free heel slowly towards the "
+            "floor over three seconds.",
+            "Tap lightly and press back up, keeping the standing knee tracking "
+            "over the middle of the foot.",
+            "Complete all reps, then switch legs.",
+        ),
+        mistakes="Dropping quickly, or letting the standing knee dive inward. If "
+                 "the knee cannot stay in line, use a lower step.",
+        why="Trains the eccentric control that decelerates you on every landing "
+            "and on every downhill, which is where knee pain usually starts.",
+        load_note="A lower step first, then a higher one, then hold a dumbbell.",
+    ),
+    Exercise(
+        "nordic_curl_assisted", "Assisted Nordic curl", STRENGTH,
+        "hamstring (eccentric)",
+        sets=3, rep_range=(4, 6), load_step_kg=0.0, tempo="as slow as possible",
+        cue="Lower as slowly as you can; use your hands to catch yourself.",
+        focus="hamstring / glute",
+        setup="Kneel on something padded with your heels held down — under a sofa, "
+              "or by a partner. Hands ready in front of your chest.",
+        steps=(
+            "Keeping your hips extended and body straight, lower your chest "
+            "towards the floor as slowly as you can control.",
+            "Catch yourself with your hands when you lose control.",
+            "Push back up with your hands, then reset.",
+        ),
+        mistakes="Bending at the hips, which makes it much easier and misses the "
+                 "hamstring, or starting this while a hamstring is sore.",
+        why="The strongest known protection against hamstring strain. Start with "
+            "very few reps: this causes real soreness for a week or two.",
+        load_note="Add range and reps before anything else. Cap at 6 reps.",
+    ),
+    Exercise(
+        "goblet_squat", "Goblet squat", STRENGTH, "quad / glute",
+        sets=3, rep_range=(6, 10), load_step_kg=2.5, tempo="2s down",
+        cue="Weight at the chest, elbows inside the knees at the bottom.",
+        focus="quad / knee",
+        setup="Hold a dumbbell or kettlebell against your chest, feet a little "
+              "wider than hip-width, toes slightly out.",
+        steps=(
+            "Sit down between your feet, keeping your chest up and heels planted.",
+            "Descend until your thighs are at least parallel, elbows tracking "
+            "inside the knees.",
+            "Drive up through the whole foot.",
+        ),
+        mistakes="Heels lifting, or the knees collapsing inward on the way up.",
+        why="The most efficient way to load both legs at once, and the base of "
+            "cycling power as well as running strength.",
+        load_note="Add 2.5 kg once 3x10 is controlled.",
+    ),
+    Exercise(
+        "side_plank_hip_lift", "Side plank with hip lift", ISOMETRIC,
+        "hip stability (unilateral)",
+        sets=3, hold_range=(20, 40), tempo="hold still", unilateral=True,
+        cue="Per side. Body in one straight line; do not let the hip sag.",
+        focus="glute / hip",
+        setup="Lie on your side propped on a forearm, elbow under the shoulder, "
+              "knees bent or legs straight for a harder version.",
+        steps=(
+            "Lift your hips until your body is a straight line from shoulder to "
+            "knee or ankle.",
+            "Hold, breathing normally, without letting the hip drift down or "
+            "the shoulders rotate.",
+            "Complete the hold, then switch sides.",
+        ),
+        mistakes="Letting the top shoulder roll forward, or the hip sinking as the "
+                 "hold goes on.",
+        why="The muscles down the side of the hip are what stop your torso "
+            "swaying with each stride. Sway wastes energy and loads the knee.",
+        load_note="Straighten the legs, then add time. Weight comes last.",
+    ),
+    Exercise(
+        "copenhagen_plank", "Copenhagen plank (short)", ISOMETRIC,
+        "adductor / groin (unilateral)",
+        sets=3, hold_range=(10, 25), tempo="hold still", unilateral=True,
+        cue="Per side. Start with the bottom knee down and short holds.",
+        focus="glute / hip",
+        setup="Side plank on a forearm with the top leg resting on a chair or "
+              "bench at about knee height. Bottom knee on the floor to start.",
+        steps=(
+            "Press the top leg down into the bench to lift your hips.",
+            "Hold with the body in a straight line.",
+            "Complete the hold, then switch sides.",
+        ),
+        mistakes="Starting with the full straight-leg version. This one causes "
+                 "groin strains when rushed — build up over months, not weeks.",
+        why="The adductors stabilise the hip and are a common cycling and running "
+            "weakness. Short holds are deliberate here.",
+        load_note="Extend the bottom leg only once 3x25s with the knee down is easy.",
+    ),
+]})
+
+# Cadence work, kept out of EXERCISES on purpose. These are neuromuscular drills
+# with no external load, so they must not go through the sets-and-reps
+# progression or count towards a strength session's minutes. They belong inside a
+# run or a ride, as a finisher.
+#
+# Nothing here bounces or jumps: the base-phase ban on plyometrics is about
+# impact, and raising cadence is done by taking quicker, shorter steps rather
+# than by hopping.
+DRILLS: dict[str, dict[str, Any]] = {
+    "run_cadence_strides": {
+        "name": "Cadence strides",
+        "focus": "cadence",
+        "where": "End of an easy run",
+        "dose": "4-6 x 20 seconds, walking back to full recovery between",
+        "setup": "Flat ground, after an easy run. Set a metronome app to 5 spm "
+                 "above your usual cadence.",
+        "steps": (
+            "Run 20 seconds taking quicker, shorter steps in time with the beat.",
+            "Keep the effort easy — this is about foot speed, not pace.",
+            "Walk until you are fully recovered, then repeat.",
+        ),
+        "mistakes": "Reaching further forward with each step. Higher cadence means "
+                    "the foot lands closer to underneath you, not further ahead.",
+        "why": "Most runners land with the foot too far in front, which brakes and "
+               "loads the knee. Raising cadence by 5-10% shortens the stride and "
+               "reduces load per step without any loss of speed.",
+    },
+    "bike_spin_ups": {
+        "name": "Spin-ups",
+        "focus": "cadence",
+        "where": "Inside an easy ride",
+        "dose": "4 x 1 minute at 100-110 rpm, 2 minutes easy between",
+        "setup": "An easy gear, flat road or trainer, already warmed up.",
+        "steps": (
+            "Spin up to 100-110 rpm in a gear light enough that it stays easy.",
+            "Hold it for a minute with a still upper body and no bouncing.",
+            "Return to your normal cadence for two minutes, then repeat.",
+        ),
+        "mistakes": "Using a heavy gear, which turns a cadence drill into an "
+                    "interval and makes the ride no longer easy.",
+        "why": "A higher self-selected cadence shifts load off the muscles and "
+               "onto the cardiovascular system, which is exactly what base phase "
+               "is trying to develop.",
+    },
+    "single_leg_pedalling": {
+        "name": "Single-leg pedalling",
+        "focus": "cadence",
+        "where": "Inside an easy ride, on a trainer",
+        "dose": "3 x 30 seconds per leg, easy spinning between",
+        "setup": "On a turbo trainer in a light gear. Unclip one foot and rest it "
+                 "on a box or the frame.",
+        "steps": (
+            "Pedal with one leg only, aiming for a smooth circle rather than "
+            "stamping down.",
+            "Listen for the dead spot at the top and bottom of the stroke and try "
+            "to smooth it out.",
+            "Swap legs. Spin easy with both legs between sets.",
+        ),
+        "mistakes": "Grinding a heavy gear, or continuing once the stroke has gone "
+                    "lumpy — the point is the smoothness, so stop when it goes.",
+        "why": "Exposes side-to-side differences and the dead spots in your pedal "
+               "stroke, which is where cycling efficiency is lost.",
+    },
 }
 
 LIBRARY_IDS: frozenset[str] = frozenset(EXERCISES)
@@ -214,9 +627,25 @@ SESSION_B: tuple[str, ...] = (
     "single_leg_calf_hold",
     "tib_raise",
 )
+# The glute and knee session. A third template rather than more exercises in the
+# first two: five movements is what fits the 20-30 minute brief, and a session
+# that overruns is one that gets skipped. Two sessions a week means this cycle
+# covers everything about every ten days.
+SESSION_C: tuple[str, ...] = (
+    "glute_bridge",
+    "side_lying_abduction",
+    "step_down",
+    "spanish_squat",
+    "tib_raise",
+)
 
 # Exercises to drop first when readiness is low or a joint is complaining.
-DELOAD_DROP_ORDER: tuple[str, ...] = ("tib_raise", "step_up", "rdl", "single_leg_rdl")
+# Dropped first when readiness is low or a joint is complaining. Accessory work
+# goes before anything that loads a tendon, and the isometrics never go at all.
+DELOAD_DROP_ORDER: tuple[str, ...] = (
+    "tib_raise", "band_monster_walk", "side_lying_abduction", "step_up",
+    "step_down", "glute_bridge", "rdl", "single_leg_rdl", "nordic_curl_assisted",
+)
 
 PHYSIO_NOTE = (
     "Pain (not muscle soreness) logged on the same exercise twice or more. "
@@ -452,9 +881,36 @@ def pain_flags(log: Sequence[dict[str, Any]], lookback: int = 6) -> list[str]:
     return sorted([k for k, v in counts.items() if v >= 2])
 
 
+SESSION_CYCLE: tuple[tuple[str, ...], ...] = (SESSION_A, SESSION_B, SESSION_C)
+
+
 def session_template(session_index: int) -> tuple[str, ...]:
-    """Alternate A/B so both calf variants and both hinge patterns get worked."""
-    return SESSION_A if session_index % 2 == 0 else SESSION_B
+    """Rotate A/B/C so both calf variants, both hinge patterns and the glute and
+    knee work all get covered."""
+    return SESSION_CYCLE[session_index % len(SESSION_CYCLE)]
+
+
+def library_rows() -> list[dict[str, Any]]:
+    """The library flattened for storage. Code stays the source of truth."""
+    import json
+    from datetime import datetime as _dt
+
+    now = _dt.now().isoformat(timespec="seconds")
+    rows = []
+    for e in EXERCISES.values():
+        low, high = e.rep_range or (None, None)
+        hlow, hhigh = e.hold_range or (None, None)
+        rows.append({
+            "exercise_id": e.id, "name": e.name, "kind": e.kind,
+            "focus": e.focus, "target": e.target, "sets": e.sets,
+            "rep_low": low, "rep_high": high,
+            "hold_low": hlow, "hold_high": hhigh,
+            "unilateral": int(e.unilateral), "tempo": e.tempo, "cue": e.cue,
+            "setup": e.setup, "steps": json.dumps(list(e.steps)),
+            "mistakes": e.mistakes, "why": e.why, "load_note": e.load_note,
+            "progress_to": e.progress_to, "synced_at": now,
+        })
+    return rows
 
 
 def build_session(

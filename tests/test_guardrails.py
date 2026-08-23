@@ -12,7 +12,7 @@ import json
 from conftest import TODAY
 
 from core import ai, planner, strength
-from core.schemas import DAYS, Checkin, WeekPlan
+from core.schemas import DAYS, Checkin, PlanDay, WeekPlan
 
 # Everything a raw LLM gets wrong when told "I feel amazing": too much volume,
 # intervals during a deload, invented plyometric exercises, three strength days,
@@ -382,3 +382,67 @@ def test_no_selection_at_all_plans_everything(healthy):
     """only_sports=None is "no opinion", never "nothing enabled"."""
     plan = planner.plan_week(healthy, today=TODAY, use_ai=False, only_sports=None)
     assert {d.sport for d in prescribed(plan)}
+
+
+# --------------------------------------------------------------------------
+# Endurance sessions keep a clear day between them. Strength is exempt: it is
+# the low-impact work that belongs in the gaps.
+# --------------------------------------------------------------------------
+
+DAY_INDEX = {d: i for i, d in enumerate(DAYS)}
+
+
+def endurance_days(plan) -> list[int]:
+    return sorted(DAY_INDEX[d.day] for d in plan.week_plan
+                  if d.sport in planner.SPACED_SPORTS and d.duration_min > 0)
+
+
+def test_the_rules_plan_never_stacks_endurance_on_consecutive_days(healthy):
+    plan = planner.plan_next_week(healthy, today=TODAY, use_ai=False, save=False)
+    days = endurance_days(plan)
+    assert not [(a, b) for a, b in zip(days, days[1:]) if b - a <= 1], days
+
+
+def test_a_model_proposing_back_to_back_sessions_is_repaired(healthy):
+    """The whole point of enforce(): the model cannot quietly ignore the rule."""
+    facts = planner.build_facts(healthy, today=TODAY)
+    envelope = planner.build_envelope(facts, healthy)
+    crammed = WeekPlan(week_plan=[
+        PlanDay(day="Mon", sport="run", duration_min=40, target_zone="Z2"),
+        PlanDay(day="Tue", sport="bike", duration_min=40, target_zone="Z2"),
+        PlanDay(day="Wed", sport="swim", duration_min=30, target_zone="Z2"),
+        PlanDay(day="Thu", sport="run", duration_min=40, target_zone="Z2"),
+        PlanDay(day="Fri", sport="bike", duration_min=60, target_zone="Z2"),
+    ], flags=[], adjustments_made=[])
+    plan = planner.enforce(crammed, facts, envelope, healthy.strength_log())
+    days = endurance_days(plan)
+    assert not [(a, b) for a, b in zip(days, days[1:]) if b - a <= 1], days
+    assert plan.source in ("ai_repaired", "rules")
+
+
+def test_strength_is_exempt_from_the_spacing_rule(healthy):
+    """Strength on the day after a ride is the intended arrangement, not a bug."""
+    plan = planner.plan_next_week(healthy, today=TODAY, use_ai=False, save=False)
+    strength = [DAY_INDEX[d.day] for d in plan.week_plan
+                if d.sport == "strength" and d.duration_min > 0]
+    endurance = endurance_days(plan)
+    # Every strength day sits next to an endurance day precisely because it fills
+    # the gaps between them.
+    assert strength
+    assert all(any(abs(s - e) == 1 for e in endurance) for s in strength)
+
+
+def test_spacing_never_stacks_two_sessions_on_one_day(healthy):
+    """Dropping is preferred to stacking, which would defeat the rule."""
+    facts = planner.build_facts(healthy, today=TODAY)
+    envelope = planner.build_envelope(facts, healthy)
+    crammed = WeekPlan(week_plan=[
+        PlanDay(day=d, sport="run", duration_min=30, target_zone="Z2")
+        for d in DAYS
+    ], flags=[], adjustments_made=[])
+    plan = planner.enforce(crammed, facts, envelope, healthy.strength_log())
+    per_day: dict[str, int] = {}
+    for d in plan.week_plan:
+        if d.sport in planner.SPACED_SPORTS and d.duration_min > 0:
+            per_day[d.day] = per_day.get(d.day, 0) + 1
+    assert not [k for k, v in per_day.items() if v > 1], per_day

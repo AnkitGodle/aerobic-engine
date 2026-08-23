@@ -108,18 +108,34 @@ LEG_CONFLICT_SPORTS = ("run", "bike", "brick")
 # preference, and it keeps the hard days single-focus. The cost, worth knowing:
 # it uses up a day that would otherwise be complete rest, so the week has fewer
 # genuinely blank days. The minimum-rest-day rule still protects one.
+# Endurance sits on alternating days, because the athlete asked for a clear day
+# between sessions. That has a hard consequence worth stating: seven days with a
+# gap after every session hold at most four endurance sessions, so the brief's
+# "swim 2-3, bike 2-3, run 2-3" cannot all fit. Bike and run keep two each
+# (one long apiece, the week's aerobic anchors) and swim becomes the optional
+# fifth that only appears if the athlete's own targets ask for it over a second
+# run. Strength is exempt from the spacing rule and fills the gaps.
 DAY_TEMPLATE: tuple[tuple[str, str, str, bool], ...] = (
-    ("Mon", "strength", "strength", False),
-    ("Mon", "swim", "technique", False),
-    ("Tue", "bike", "endurance", False),
-    ("Tue", "swim", "technique", True),
+    ("Mon", "bike", "endurance", False),
+    ("Tue", "strength", "strength", False),
     ("Wed", "run", "easy", False),
     ("Thu", "strength", "strength", False),
-    ("Thu", "swim", "technique", True),
-    ("Fri", "rest", "rest", False),
-    ("Sat", "run", "long", False),
-    ("Sun", "bike", "long", False),
+    ("Fri", "bike", "long", False),
+    ("Sat", "rest", "rest", False),
+    ("Sun", "run", "long", False),
+    # Optional, and deliberately last: it is the first thing dropped when the
+    # volume cap bites, and it is the session that breaks the spacing rule.
+    ("Wed", "swim", "technique", True),
 )
+
+# Sports the spacing rule applies to. Strength is excluded on purpose — it is
+# low-impact tendon work that belongs on the days between sessions, which is the
+# whole reason it is scheduled there.
+SPACED_SPORTS = ("swim", "bike", "run", "brick")
+
+# Below this the week stops being training. Three endurance sessions is the
+# athlete's own floor.
+MIN_ENDURANCE_SESSIONS = 3
 
 QUALITY_ZONES = {"Z3", "Z4", "Z5", "mixed"}
 
@@ -758,20 +774,23 @@ def enforce(
     # 7. Required long sessions must not silently disappear two weeks running.
     days = _ensure_long_sessions(days, facts, envelope, notes)
 
-    # 8. Minimum rest days across the whole week.
+    # 8. Endurance sessions keep a clear day between them.
+    days = _space_endurance(days, facts, notes)
+
+    # 9. Minimum rest days across the whole week.
     days = _ensure_rest_days(days, facts, envelope, notes)
 
-    # 9. A sport switched off must not appear, whoever proposed it.
+    # 10. A sport switched off must not appear, whoever proposed it.
     for d in list(days):
         se = envelope.by_sport.get(d.sport)
         if se is not None and not se.enabled and d.duration_min > 0:
             notes.append(f"dropped {d.sport} on {d.day}: switched off")
             days.remove(d)
 
-    # 10. Concrete heart-rate targets, from the athlete's own Garmin zones.
+    # 11. Concrete heart-rate targets, from the athlete's own Garmin zones.
     _stamp_hr_targets(days, zone_bounds_map, aerobic_ceiling)
 
-    # 11. Descriptions must match the numbers that survived steps 1-8.
+    # 12. Descriptions must match the numbers that survived the steps above.
     _relabel(days, envelope)
 
     flags = list(plan.flags)
@@ -791,6 +810,76 @@ def enforce(
         adjustments_made=plan.adjustments_made + notes,
         source=plan.source if not notes else ("ai_repaired" if plan.source == "ai" else plan.source),
     )
+
+
+def _space_endurance(
+    days: list[PlanDay], facts: PlannerFacts, notes: list[str]
+) -> list[PlanDay]:
+    """Keep a clear day between endurance sessions.
+
+    Strength is exempt: it is low-impact tendon work that belongs in the gaps,
+    which is exactly where the placement rule already puts it.
+
+    Sessions already completed are immovable — a Tuesday that happened cannot be
+    rescheduled, so a proposed Wednesday next to it is the one that gives.
+    Moving is tried before dropping, and a session with nowhere non-adjacent to
+    go is dropped rather than stacked: two sessions on one day defeats the point
+    of spacing them.
+    """
+    order = {d: i for i, d in enumerate(DAYS)}
+
+    def idx(day: str) -> int:
+        return order.get(day, 99)
+
+    done = [d for d in days if d.purpose == "completed"
+            and d.sport in SPACED_SPORTS and d.duration_min > 0]
+    taken = {idx(d.day) for d in done}
+
+    proposed = [d for d in days if d.purpose != "completed"
+                and d.sport in SPACED_SPORTS and d.duration_min > 0]
+    # Longest first: if something has to move or go, it should not be the week's
+    # aerobic anchor that loses its slot to a short session.
+    proposed.sort(key=lambda d: (-d.duration_min, idx(d.day)))
+
+    kept: set[int] = set()
+
+    def clashes(i: int) -> bool:
+        return any(abs(i - o) <= 1 for o in taken | kept)
+
+    # Only days that have not already gone by are candidates to move into.
+    open_days = {idx(day) for day in facts.days_remaining} or set(
+        range(len(DAYS)))
+
+    for d in proposed:
+        here = idx(d.day)
+        if not clashes(here):
+            kept.add(here)
+            continue
+        free = sorted(i for i in open_days
+                      if i not in taken and i not in kept and not clashes(i))
+        if free:
+            moved_to = min(free, key=lambda i: (abs(i - here), i))
+            notes.append(
+                f"moved {d.sport} from {d.day} to {DAYS[moved_to]}: endurance "
+                f"sessions keep a clear day between them"
+            )
+            d.day = DAYS[moved_to]
+            kept.add(moved_to)
+        else:
+            notes.append(
+                f"dropped {d.sport} on {d.day}: no remaining day has a clear day "
+                f"either side of it"
+            )
+            days.remove(d)
+
+    total = len(taken) + len(kept)
+    if total < MIN_ENDURANCE_SESSIONS:
+        notes.append(
+            f"only {total} endurance sessions fit against a floor of "
+            f"{MIN_ENDURANCE_SESSIONS}: a clear day between sessions caps a full "
+            f"week at four, and fewer when days have already gone by"
+        )
+    return days
 
 
 def _fix_strength_placement(days: list[PlanDay], notes: list[str]) -> list[PlanDay]:

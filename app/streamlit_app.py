@@ -350,6 +350,62 @@ def chart_ai_note(key: str, notes: dict) -> None:
 # --------------------------------------------------------------------------
 
 
+def exercise_howto(ex, prescription=None) -> None:
+    """How to actually perform one exercise.
+
+    A prescription without a technique is not something you can follow, and bad
+    technique is how strength work causes the injury it was meant to prevent.
+    """
+    dose = ""
+    if prescription is not None:
+        if prescription.hold_s:
+            dose = f"{prescription.sets} x {prescription.hold_s}s"
+        else:
+            dose = f"{prescription.sets} x {prescription.reps}"
+        if prescription.load_kg:
+            dose += f" @ {prescription.load_kg:g} kg"
+    elif ex.rep_range:
+        dose = f"{ex.sets} x {ex.rep_range[0]}–{ex.rep_range[1]}"
+    elif ex.hold_range:
+        dose = f"{ex.sets} x {ex.hold_range[0]}–{ex.hold_range[1]}s"
+
+    head = f"**{ex.name}** — {dose}" if dose else f"**{ex.name}**"
+    if ex.unilateral:
+        head += "  ·  per side"
+    st.markdown(head)
+    meta = " · ".join(x for x in (ex.focus, ex.tempo and f"tempo {ex.tempo}") if x)
+    if meta:
+        st.caption(meta)
+    if ex.setup:
+        st.markdown(f"**Set up:** {ex.setup}")
+    if ex.steps:
+        st.markdown("\n".join(f"{i}. {step}" for i, step in enumerate(ex.steps, 1)))
+    if ex.mistakes:
+        st.markdown(f"**Common mistake:** {ex.mistakes}")
+    if ex.why:
+        st.caption(f"Why it matters: {ex.why}")
+    if ex.load_note:
+        st.caption(f"Progressing: {ex.load_note}")
+
+
+def strength_howto_block(exercise_ids: list[str], log_rows: list[dict],
+                         session_index: int = 0) -> None:
+    """The full session, with instructions, for the day it is scheduled."""
+    presc = {x.exercise_id: x for x in
+             strength.build_session(log_rows, session_index=session_index)}
+    ids = [e for e in exercise_ids if e in strength.EXERCISES] or list(presc)
+    if not ids:
+        return
+    ui.section("How to do today's session",
+               "Slow and controlled beats heavy. Stop a set if something sharp "
+               "appears — soreness is fine, pain is not.")
+    for i, eid in enumerate(ids):
+        with st.container(border=True):
+            exercise_howto(strength.EXERCISES[eid], presc.get(eid))
+        if i < len(ids) - 1:
+            st.write("")
+
+
 def page_today(data: dict, today: date) -> None:
     acts, wl = data["activities"], data["wellness"]
     sig = recovery_signals(wl, acts, as_of=today) if wl else None
@@ -426,6 +482,15 @@ def page_today(data: dict, today: date) -> None:
 
     wk = week_summaries(acts, weeks=1, as_of=today,
                         strength_rows=data["strength"])[-1]
+    # Today's strength session, spelled out. It is the one sport where knowing
+    # what to do is not enough — the exercises are only protective if they are
+    # done slowly and in the right position.
+    legs_today = next((d for d in todo if d["sport"] == "strength"), None)
+    if legs_today:
+        strength_howto_block(
+            list(legs_today.get("exercise_ids") or []), data["strength"],
+            session_index=len({str(r["day"]) for r in data["strength"]}))
+
     ui.section("This week",
                f"{hm(wk.total_minutes)} done of a {hm(env.max_week_minutes)} ceiling")
     ui.week_strip(week_cells(plan, today))
@@ -1187,13 +1252,39 @@ def log_strength(data: dict, today: date) -> None:
                 "Logged. Recording it on the watch too keeps training load accurate.")
             st.rerun()
 
-    with st.expander("The full exercise list"):
-        table(pd.DataFrame([
-            {"Exercise": e.name, "Type": e.kind, "Targets": e.target, "Sets": e.sets,
-             "Reps": f"{e.rep_range[0]}–{e.rep_range[1]}" if e.rep_range else "",
-             "Hold": f"{e.hold_range[0]}–{e.hold_range[1]}s" if e.hold_range else "",
-             "Step (kg)": e.load_step_kg, "Cue": e.cue}
-            for e in strength.EXERCISES.values()]))
+    with st.expander("Exercise guide — how to do all of them"):
+        st.caption(
+            "Every exercise the planner can pick from, grouped by what it "
+            "protects. The list is closed on purpose: the AI can choose from it "
+            "and change the sets, but it cannot invent an exercise."
+        )
+        by_focus: dict[str, list] = {}
+        for e in strength.EXERCISES.values():
+            by_focus.setdefault(e.focus or "other", []).append(e)
+        # Calves and knees first: they are what actually limit run volume.
+        order = ["calf / Achilles", "quad / knee", "glute / hip", "glute / drive",
+                 "hamstring / glute", "shin"]
+        for focus in sorted(by_focus, key=lambda f: (order.index(f)
+                                                     if f in order else 99, f)):
+            st.markdown(f"#### {focus.title()}")
+            for e in sorted(by_focus[focus], key=lambda x: x.name):
+                with st.container(border=True):
+                    exercise_howto(e)
+
+        ui.section("Cadence work",
+                   "Not strength, and not part of a leg session — these go inside "
+                   "an easy run or ride. Nothing here jumps: the ban on "
+                   "plyometrics in base phase is about impact, and cadence is "
+                   "raised with quicker, shorter steps rather than hops.")
+        for drill in strength.DRILLS.values():
+            with st.container(border=True):
+                st.markdown(f"**{drill['name']}** — {drill['dose']}")
+                st.caption(drill["where"])
+                st.markdown(f"**Set up:** {drill['setup']}")
+                st.markdown("\n".join(f"{i}. {x}"
+                                       for i, x in enumerate(drill["steps"], 1)))
+                st.markdown(f"**Common mistake:** {drill['mistakes']}")
+                st.caption(f"Why it matters: {drill['why']}")
     if log_rows:
         with st.expander("History"):
             h = pd.DataFrame(log_rows)[["day", "exercise_id", "sets", "reps", "hold_s",

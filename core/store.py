@@ -241,6 +241,35 @@ SCHEMA: list[str] = [
         fetched_at    TEXT NOT NULL
     )
     """,
+    # A mirror of core/strength.py, refreshed on every sync, so the library is
+    # queryable and visible in the data. Deliberately a mirror and not the
+    # source: the allowlist the AI is validated against stays in code, because a
+    # table the app can write is a table that could grow an exercise nobody
+    # vetted.
+    """
+    CREATE TABLE IF NOT EXISTS exercise_library (
+        exercise_id TEXT PRIMARY KEY,
+        name        TEXT NOT NULL,
+        kind        TEXT,
+        focus       TEXT,
+        target      TEXT,
+        sets        INTEGER,
+        rep_low     INTEGER,
+        rep_high    INTEGER,
+        hold_low    INTEGER,
+        hold_high   INTEGER,
+        unilateral  INTEGER DEFAULT 0,
+        tempo       TEXT,
+        cue         TEXT,
+        setup       TEXT,
+        steps       TEXT,
+        mistakes    TEXT,
+        why         TEXT,
+        load_note   TEXT,
+        progress_to TEXT,
+        synced_at   TEXT NOT NULL
+    )
+    """,
     """
     CREATE TABLE IF NOT EXISTS personal_records (
         type_id     INTEGER PRIMARY KEY,
@@ -942,6 +971,12 @@ class Store:
             f" AND COALESCE(is_multisport_parent, 0) = 0"
             f" AND activity_id NOT IN (SELECT activity_id FROM activity_weather)"
             f" ORDER BY start_time DESC", list(sports))
+
+    def sync_exercise_library(self, rows: Iterable[dict[str, Any]]) -> int:
+        return self._upsert("exercise_library", rows, "exercise_id")
+
+    def exercise_library(self) -> list[dict[str, Any]]:
+        return self.query("SELECT * FROM exercise_library ORDER BY focus, name")
 
     def set_personal_records(self, rows: Iterable[dict[str, Any]]) -> int:
         return self._upsert("personal_records", rows, "type_id")

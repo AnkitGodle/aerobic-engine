@@ -336,6 +336,9 @@ def _sync_locked(
             store.set_state(f"profile_{key}", str(value))
     stats["personal_records"] = store.set_personal_records(
         client.fetch_personal_records())
+    # Mirror the exercise library into the database so it is visible in the data
+    # alongside what was actually logged against it.
+    stats["exercise_library"] = store.sync_exercise_library(strength.library_rows())
 
     thresholds = client.fetch_thresholds()
     for k, v in thresholds.items():
