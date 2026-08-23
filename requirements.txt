@@ -1,0 +1,8 @@
+garminconnect>=0.3.2
+streamlit>=1.36
+pandas>=2.2
+plotly>=5.22
+python-dotenv>=1.0
+anthropic>=0.40
+pydantic>=2.7
+psycopg[binary]>=3.1
