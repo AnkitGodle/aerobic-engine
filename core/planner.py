@@ -22,12 +22,16 @@ from typing import Any
 from core import ai, strength
 from core.analysis import (
     all_ef_trends,
+    hr_trend,
+    polarisation,
     recovery_signals,
     week_summaries,
     week_summary,
+    zone_distribution,
 )
 from core.schemas import (
     DAYS,
+    ENDURANCE_SPORTS,
     Checkin,
     Envelope,
     PlanDay,
@@ -1034,8 +1038,16 @@ def build_payload(
     envelope: Envelope,
     strength_log: Sequence[dict[str, Any]] = (),
     checkin: Checkin | None = None,
+    zones: Sequence[dict[str, Any]] = (),
+    activities: Sequence[dict[str, Any]] = (),
 ) -> PlanPayload:
-    """Exactly what the model sees. Facts and bounds — no free-form instructions."""
+    """Exactly what the model sees. Facts and bounds — no free-form instructions.
+
+    `zones` and `activities` are what let the model act on *how* the athlete has
+    been training rather than only how much. Without the intensity split it will
+    happily add volume to a week that is already 46% in Z4-Z5, which is the
+    opposite of what such a week needs.
+    """
     strength_done = (
         facts.completed_this_week.by_sport["strength"].sessions
         if "strength" in facts.completed_this_week.by_sport
@@ -1056,6 +1068,32 @@ def build_payload(
     env_dict["days_remaining"] = facts.days_remaining
     env_dict["remaining_minutes_budget"] = round(remaining_budget(facts, envelope))
 
+    intensity: dict[str, Any] = {}
+    if zones:
+        since = facts.today - timedelta(days=28)
+        pol = polarisation(zones, since=since)
+        intensity = {
+            "last_28_days_percent": pol,
+            "base_phase_target": {"easy": "70 or more", "hard": "15 or less"},
+            "verdict": ("too_hard" if pol["hard"] >= 35 else
+                        "drifting_hard" if pol["easy"] < 70 else "on_target"),
+            "by_sport_minutes": {
+                sport: zone_distribution(zones, sport=sport, since=since)
+                for sport in ENDURANCE_SPORTS
+            },
+        }
+
+    training_hr: dict[str, Any] = {}
+    if activities:
+        for sport in ENDURANCE_SPORTS:
+            t = hr_trend(activities, sport, as_of=facts.today, steady_only=False)
+            if t["n_sessions"]:
+                training_hr[sport] = {
+                    "recent_avg_hr": t["recent_hr"],
+                    "change_bpm_at_same_pace": t["normalised_change_bpm"],
+                    "verdict": t["verdict"],
+                }
+
     return PlanPayload(
         completed_this_week=facts.completed_this_week.model_dump(mode="json"),
         recovery_signals=facts.recovery.model_dump(mode="json"),
@@ -1067,7 +1105,11 @@ def build_payload(
                 w.model_dump(mode="json") for w in facts.previous_weeks[-4:]
             ],
             "ef_trends": [t.model_dump(mode="json") for t in facts.ef_trends],
-            "recent_checkins": [c.model_dump(mode="json") for c in facts.recent_checkins],
+            "recent_checkins": [
+                c.model_dump(mode="json") for c in facts.recent_checkins[-7:]
+            ],
+            "intensity_distribution": intensity,
+            "training_heart_rate": training_hr,
         },
     )
 
@@ -1092,7 +1134,11 @@ def plan_week(
     fallback = enforce(
         rules_plan(facts, envelope, strength_log, checkin), facts, envelope, strength_log
     )
-    payload = build_payload(facts, envelope, strength_log, checkin)
+    payload = build_payload(
+        facts, envelope, strength_log, checkin,
+        zones=store.zones(since=facts.today - timedelta(days=35)),
+        activities=store.activities(since=facts.today - timedelta(days=90)),
+    )
     if targets:
         payload.envelope["athlete_weekly_targets"] = targets
 

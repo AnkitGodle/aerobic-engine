@@ -379,16 +379,49 @@ def for_page(page: str, data: dict, today: date) -> PageInsight | None:
 # --------------------------------------------------------------------------
 
 NARRATE_SYSTEM = """\
-You write one short paragraph explaining what a training-dashboard page is saying \
-to the athlete looking at it.
+You explain what a training-dashboard page is telling the athlete looking at it.
 
-You are given facts that were already computed. Rules:
-- Use ONLY those facts. Do not add numbers, causes, or recommendations that are \
-not there.
-- 2-4 sentences. Plain language, second person, no bullet points, no headings.
-- Lead with what matters most to a decision about training.
-- No medical advice. No cheerleading. If the news is bad, say it plainly.
+You are given facts already computed from their data. Rules:
+- Use ONLY those facts. Never add a number, a cause, or a recommendation that is
+  not in them. If the facts say data is missing, say what is missing.
+- Two or three sentences. Second person, plain language, no bullets, no headings,
+  and do not restate the headline you were given.
+- Lead with the thing that would change a training decision this week. Where one
+  fact explains another, join them: a flat efficiency trend caused by sessions
+  being too hard is one sentence, not two.
+- End with the single most useful next action, if the facts support one. If they
+  do not, stop rather than inventing advice.
+- No cheerleading, no hedging, no medical advice. If the news is bad, say it.
 Return the paragraph as plain text with no preamble."""
+
+CHART_NOTE_SYSTEM = """\
+You write ONE sentence, at most 20 words, saying what a single chart shows.
+
+Rules:
+- State the pattern and what it means, not the axes. "Heart rate at the same pace
+  is flat across three runs" — never "this chart shows heart rate over time".
+- Use ONLY the numbers given. If there are too few points to see a pattern, say
+  exactly that instead of guessing at a trend.
+- No preamble, no markdown, no quotes. One sentence of plain text."""
+
+
+def chart_note(title: str, data: Any, backend: Any = None) -> str | None:
+    """A one-line reading of a single chart. None when no AI is configured."""
+    from core import ai
+
+    try:
+        backend = backend or ai.get_backend()
+    except ai.AIUnavailable:
+        return None
+    try:
+        text = backend.complete(
+            CHART_NOTE_SYSTEM,
+            json.dumps({"chart": title, "data": data}, indent=1, default=str)[:2500],
+        )
+    except Exception as exc:  # noqa: BLE001 - a caption must never break a page
+        log.info("Chart note unavailable: %s", exc)
+        return None
+    return (text or "").strip().strip('"').strip()[:180] or None
 
 
 def narrate(page: str, insight: PageInsight, backend: Any = None) -> str | None:

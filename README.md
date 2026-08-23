@@ -91,6 +91,29 @@ against the database.
 | `--refresh-wellness` | re-pull wellness already stored |
 | `--guard-status` | show request budgets and breaker state |
 
+## The AI layer is optional, and can be free
+
+`AI_BACKEND=none` gives the rules-only plan, which is a complete, usable week on
+its own. For the adaptive layer, the written page summaries and the per-chart
+readings, the cheapest good option is **Groq's free tier** — no card, and
+`openai/gpt-oss-120b` is a capable 131K-context model with guaranteed JSON output:
+
+```bash
+# key from https://console.groq.com/keys
+AI_BACKEND=groq
+GROQ_API_KEY=gsk_...
+```
+
+The free plan's binding limit is **8,000 tokens per minute** (plus 30 requests a
+minute, 1,000 a day). A planner call is around 2,500 tokens, so that is
+comfortable — summaries and chart captions are cached for 30–60 minutes so a page
+reload does not spend the budget, and a 429 falls back to the rules plan rather
+than retrying into the next minute's allowance.
+
+Other backends behind the same interface: `anthropic` (API key), `claude_cli` (a
+Claude Pro/Max subscription via the Claude Code CLI — local only, since a hosted
+app has no CLI to call), and `azure` (AI Foundry).
+
 ## Being a good citizen with an unofficial API
 
 Garmin publishes no rate limits, is stricter with datacenter IPs than home ones,

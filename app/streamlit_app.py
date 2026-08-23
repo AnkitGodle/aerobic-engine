@@ -18,6 +18,7 @@ import time
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -262,6 +263,29 @@ def insight_banner(page: str, data: dict, today: date) -> None:
                 st.markdown(f"- {b}")
 
 
+@st.cache_data(show_spinner=False, ttl=3600)
+def _chart_note(title: str, data_json: str) -> str | None:
+    """Cached for an hour. Groq's free tier is capped on tokens per minute, and
+    six chart captions plus a planner call would otherwise spend it on a reload."""
+    import json as _json
+
+    from core.insights import chart_note
+    return chart_note(title, _json.loads(data_json))
+
+
+def chart_ai_note(title: str, data: Any) -> None:
+    """One AI sentence reading the chart above it. Silent with no AI configured."""
+    if not ai.available() or not data:
+        return
+    import json as _json
+    try:
+        note = _chart_note(title, _json.dumps(data, sort_keys=True, default=str))
+    except Exception:  # noqa: BLE001 - a caption must never break a page
+        return
+    if note:
+        st.caption(f"✦ {note}")
+
+
 @st.cache_data(show_spinner=False, ttl=1800)
 def _narrate(page: str, facts_json: str) -> str | None:
     import json as _json
@@ -493,6 +517,12 @@ def intensity_block(zones: list[dict], today: date) -> None:
                else "Inverted: base phase wants roughly the reverse of this."
                if pol["hard"] >= 35 else "Drifting harder than base phase wants.")
     st.caption(f"Last 28 days. {verdict}")
+    chart_ai_note("Share of training time by intensity, last 28 days "
+                  "(base phase target: 70%+ easy, under 15% hard)",
+                  {"percent": pol,
+                   "by_sport_minutes": {sp: zone_distribution(zones, sport=sp,
+                                                              since=since)
+                                        for sp in ENDURANCE_SPORTS}})
     with st.expander("Zone breakdown by sport"):
         for sport in ENDURANCE_SPORTS:
             sp = zone_distribution(zones, sport=sport, since=since)
@@ -536,6 +566,11 @@ def efficiency_block(acts: list[dict], today: date) -> None:
     fig.add_hline(y=0, line_dash="dot", line_color="rgba(140,158,176,.5)")
     fig.update_layout(yaxis_title="% vs first session")
     ui.chart(fig, 200)
+    chart_ai_note("Efficiency (speed or watts per heartbeat) as % change from each "
+                  "sport's first session",
+                  {sp: [{"date": str(p.date), "ef": round(p.ef, 3),
+                         "steady": p.is_steady} for p in ef_points(acts, sp)]
+                   for sp in ENDURANCE_SPORTS if ef_points(acts, sp)})
     statuses = [ef_data_status(acts, s) for s in ENDURANCE_SPORTS]
     short = [s for s in statuses if s["total"] and s["needed_for_verdict"]]
     if short:
@@ -598,6 +633,11 @@ def training_hr_block(acts: list[dict], today: date) -> None:
         return
     fig.update_layout(yaxis_title="bpm")
     ui.chart(fig, 200)
+    chart_ai_note(
+        "Heart rate at the athlete's usual pace, by sport (bpm; falling is better)",
+        {sp: [{"date": str(p["date"]), "bpm": p[field], "min": round(p["minutes"])}
+              for p in hr_points(acts, sp) if p.get(field)]
+         for sp in ENDURANCE_SPORTS if any(p.get(field) for p in hr_points(acts, sp))})
     if notes:
         st.caption("Change at the same pace: " + " · ".join(notes)
                    + " (negative is progress).")
@@ -716,6 +756,11 @@ def volume_chart(data: dict, today: date) -> None:
                                       "<extra>deload</extra>")
     fig.update_layout(yaxis_title="minutes per week", hovermode="x unified")
     ui.chart(fig, 200)
+    chart_ai_note("Weekly training minutes: completed weeks, then the ceiling the "
+                  "rules allow for the next four",
+                  {"completed": [{"week": str(d), "min": round(m)} for d, m in done],
+                   "planned": [{"week": str(d), "min": m, "deload": dl}
+                               for d, m, dl in pts]})
 
     rows = [{"week": day_label(w.week_start.isoformat()), "total minutes": w.total_minutes,
              "load": w.total_load, "rest days": w.rest_days,

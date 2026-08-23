@@ -49,14 +49,16 @@ ROGUE_PLAN = {
 class RogueBackend:
     name = "rogue"
 
-    def complete(self, system: str, user: str) -> str:
+    # json_mode is part of the backend protocol: the planner asks for guaranteed
+    # JSON where a provider supports it.
+    def complete(self, system: str, user: str, json_mode: bool = False) -> str:
         return json.dumps(ROGUE_PLAN)
 
 
 class BabblingBackend:
     name = "babbling"
 
-    def complete(self, system: str, user: str) -> str:
+    def complete(self, system: str, user: str, json_mode: bool = False) -> str:
         return "I'd love to help you train! Here are some thoughts..."
 
 

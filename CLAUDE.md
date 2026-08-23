@@ -159,7 +159,9 @@ heavy/low-rep; tendons want slow, heavy or isometric loading and adapt slowly.
 
 ## 10. AI contract (`ai.py`)
 
-- `plan_week(payload) -> plan`, behind an interface: `anthropic` (API key),
+- `plan_week(payload) -> plan`, behind an interface: `groq` (free tier,
+  `openai/gpt-oss-120b`, JSON mode — the recommended default),
+  `anthropic` (API key),
   `claude_cli` (a Pro/Max subscription, via the Claude Code CLI's headless mode —
   local only, since a hosted dashboard has no CLI to call), `azure` (AI Foundry),
   or `none` to disable.

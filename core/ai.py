@@ -52,6 +52,18 @@ duration_min 0).
 - Do not schedule leg strength on the same day before a long run or a quality \
 bike, and do not schedule it the day before a long run.
 
+Read `history.intensity_distribution` before anything else. It is the share of \
+the last 28 days spent easy, moderate and hard, against a base-phase target of \
+70%+ easy and under 15% hard. If its verdict is "too_hard", the athlete's problem \
+is not volume — it is that their easy sessions are not easy. In that case:
+- Prescribe Z2 and say in "why" what that actually feels like, once.
+- Do NOT add volume to fix it. Fixing the mix comes first.
+- Raise it in flags once, not on every session.
+
+`history.training_heart_rate` gives, per sport, the change in heart rate at the \
+same pace. Negative is progress. If it is positive while intensity is high, the \
+athlete is digging a hole: hold volume flat rather than adding.
+
 Judgement you DO own, within those limits:
 - Shifting sessions between the remaining days to fit the athlete's stated time \
 and how they feel.
@@ -77,11 +89,15 @@ target_zone is one of: Z1, Z2, Z3, Z4, Z5, mixed, technique, n/a.
 
 
 class LLMBackend(Protocol):
-    """Anything that can turn a payload into raw model text."""
+    """Anything that can turn a payload into raw model text.
+
+    `json_mode` asks the provider to guarantee a JSON object where it can. The
+    planner needs it; the prose summaries must not have it.
+    """
 
     name: str
 
-    def complete(self, system: str, user: str) -> str: ...
+    def complete(self, system: str, user: str, json_mode: bool = False) -> str: ...
 
 
 class AIUnavailable(RuntimeError):
@@ -97,7 +113,7 @@ class AnthropicBackend:
         if not self.api_key:
             raise AIUnavailable("ANTHROPIC_API_KEY is not set")
 
-    def complete(self, system: str, user: str) -> str:
+    def complete(self, system: str, user: str, json_mode: bool = False) -> str:
         try:
             from anthropic import Anthropic
         except ImportError as exc:  # pragma: no cover
@@ -132,7 +148,7 @@ class AzureAIFoundryBackend:
         if not self.endpoint or not self.api_key:
             raise AIUnavailable("AZURE_AI_ENDPOINT / AZURE_AI_API_KEY are not set")
 
-    def complete(self, system: str, user: str) -> str:
+    def complete(self, system: str, user: str, json_mode: bool = False) -> str:
         import urllib.error
         import urllib.request
 
@@ -198,7 +214,7 @@ class ClaudeCLIBackend:
                 "log in, then retry."
             )
 
-    def complete(self, system: str, user: str) -> str:
+    def complete(self, system: str, user: str, json_mode: bool = False) -> str:
         # The CLI's system-prompt flags have moved between versions, so the
         # instructions ride along in the prompt itself.
         prompt = f"{system}\n\n---\n\n{user}"
@@ -235,12 +251,85 @@ class ClaudeCLIBackend:
         return out
 
 
+class GroqBackend:
+    """Groq's free tier — OpenAI-compatible chat completions.
+
+    Model choice: `openai/gpt-oss-120b` is Groq's most capable production text
+    model (131K context, structured outputs, tool use) and costs nothing on the
+    free plan. `openai/gpt-oss-20b` is the faster, smaller alternative.
+
+    The binding constraint is not requests but **tokens per minute** — 8K on the
+    free plan, against 30 requests/min and 1000/day. A full planner payload plus
+    system prompt is a meaningful slice of that, so `planner.build_payload` keeps
+    the history it sends deliberately short, and page summaries are cached. If a
+    minute's budget is exceeded Groq returns 429; the caller falls back to the
+    rules plan rather than retrying, because a retry would just spend the next
+    minute's budget too.
+    """
+
+    name = "groq"
+    BASE = "https://api.groq.com/openai/v1/chat/completions"
+
+    def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
+        self.api_key = api_key or os.getenv("GROQ_API_KEY")
+        self.model = model or os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+        self.timeout = int(os.getenv("GROQ_TIMEOUT", "90"))
+        if not self.api_key:
+            raise AIUnavailable(
+                "GROQ_API_KEY is not set. Get a free key at console.groq.com/keys"
+            )
+
+    def complete(self, system: str, user: str, json_mode: bool = False) -> str:
+        import urllib.error
+        import urllib.request
+
+        body: dict[str, Any] = {
+            "model": self.model,
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user", "content": user}],
+            "max_tokens": MAX_TOKENS,
+            "temperature": 0.4,
+        }
+        if json_mode:
+            # Guarantees a parseable object, so a stray sentence of preamble
+            # cannot invalidate a whole week's plan.
+            body["response_format"] = {"type": "json_object"}
+
+        req = urllib.request.Request(
+            self.BASE, data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {self.api_key}"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                data = json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = json.loads(exc.read()).get("error", {}).get("message", "")
+            except Exception:  # noqa: BLE001
+                pass
+            if exc.code == 429:
+                raise AIUnavailable(
+                    f"Groq rate limit reached (free tier is 8K tokens/minute). "
+                    f"{detail}".strip()
+                ) from exc
+            raise AIUnavailable(f"Groq returned {exc.code}: {detail or exc.reason}") from exc
+        except urllib.error.URLError as exc:
+            raise AIUnavailable(f"Groq unreachable: {exc.reason}") from exc
+
+        choices = data.get("choices") or []
+        if not choices:
+            raise AIUnavailable("Groq returned no choices")
+        return (choices[0].get("message") or {}).get("content") or ""
+
+
 class NullBackend:
     """Explicitly no AI. `plan_week` raises so the planner uses rules only."""
 
     name = "none"
 
-    def complete(self, system: str, user: str) -> str:
+    def complete(self, system: str, user: str, json_mode: bool = False) -> str:
         raise AIUnavailable("AI_BACKEND=none")
 
 
@@ -252,6 +341,8 @@ def get_backend(name: str | None = None) -> LLMBackend:
         return AzureAIFoundryBackend()
     if name in ("claude_cli", "claude-cli", "cli", "subscription"):
         return ClaudeCLIBackend()
+    if name == "groq":
+        return GroqBackend()
     if name in ("none", "off", ""):
         return NullBackend()
     raise AIUnavailable(f"Unknown AI_BACKEND {name!r}")
@@ -291,7 +382,7 @@ def plan_week(
             "If what they are asking for breaks a hard limit, keep the limit and "
             "say so in flags."
         )
-    raw = backend.complete(SYSTEM_PROMPT, "\n\n".join(parts))
+    raw = backend.complete(SYSTEM_PROMPT, "\n\n".join(parts), json_mode=True)
     parsed = extract_json(raw)
     if parsed is None:
         raise AIUnavailable("model returned no parseable JSON")
