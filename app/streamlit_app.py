@@ -638,12 +638,44 @@ def page_progress(data: dict, today: date) -> None:
          "note": "needs ~3 weeks of history"},
     ])
 
+    # Load Garmin already measures that the app was storing without using.
+    # Steps and intensity minutes are training that happens outside a logged
+    # session and still has to be recovered from; stress is its own signal.
+    recent = [r for r in wl if r.get("day")
+              and date.fromisoformat(str(r["day"])[:10]) >= today - timedelta(days=7)]
+
+    def avg(field: str) -> float | None:
+        vals = [float(r[field]) for r in recent if r.get(field) is not None]
+        return sum(vals) / len(vals) if vals else None
+
+    # Garmin doubles vigorous minutes against a 150-a-week goal.
+    weekly_im = sum(float(r.get("intensity_moderate_min") or 0)
+                    + 2 * float(r.get("intensity_vigorous_min") or 0)
+                    for r in recent)
+    steps, stress, resp = avg("steps"), avg("stress_avg"), avg("respiration_avg")
+    if any(v is not None for v in (steps, stress, resp)) or weekly_im:
+        ui.stats_row([
+            {"label": "Steps / day", "value": f"{steps:,.0f}" if steps else "—",
+             "note": "7-day average"},
+            {"label": "Intensity minutes",
+             "value": f"{weekly_im:.0f}" if weekly_im else "—",
+             "note": "last 7 days, against a 150 goal" if weekly_im
+                     else "nothing recorded",
+             "tone": "good" if weekly_im >= 150 else "neutral"},
+            {"label": "Stress", "value": f"{stress:.0f}" if stress else "—",
+             "note": "7-day average, 0-100",
+             "tone": "bad" if stress and stress >= 50 else "neutral"},
+            {"label": "Respiration", "value": f"{resp:.0f}" if resp else "—",
+             "note": "breaths per minute"},
+        ])
+
     # --- two panels per row -------------------------------------------
     a, b = st.columns(2, gap="medium")
     with a, ui.card("Heart rate during training",
                     "Each point is the heart rate this session's efficiency implies "
                     "at your usual pace. Down is progress."):
-        training_hr_block(acts, today, data.get("notes"))
+        training_hr_block(acts, today, data.get("notes"),
+                          data.get("weather"))
     with b, ui.card("Where your effort goes",
                     "Base phase wants most time easy. Hard work costs recovery "
                     "without adding much base."):
@@ -653,7 +685,8 @@ def page_progress(data: dict, today: date) -> None:
     with c, ui.card("Efficiency against your own baseline",
                     "Percent change in speed or watts per heartbeat, so all three "
                     "sports share one axis."):
-        efficiency_block(acts, today, data.get("notes"))
+        efficiency_block(acts, today, data.get("notes"),
+                         data.get("weather"))
     with d, ui.card("Volume, and the ceiling ahead",
                     "At most 10% growth a week, every fourth week a deload."):
         volume_chart(data, today, data.get("notes"))
@@ -720,7 +753,8 @@ def intensity_block(zones: list[dict], today: date,
 
 
 def efficiency_block(acts: list[dict], today: date,
-                     notes: dict | None = None) -> None:
+                     notes: dict | None = None,
+                     weather: dict | None = None) -> None:
     """One chart for all three sports.
 
     Efficiency is in different units per sport — watts per beat on the bike,
@@ -748,6 +782,15 @@ def efficiency_block(acts: list[dict], today: date,
         st.caption("Needs at least two sessions with heart rate in a sport. "
                    "Three steady sessions gives a direction; six makes it reliable.")
         return
+    muggy = humid_days(acts, weather)
+    if muggy:
+        marks = sorted(muggy)
+        fig.add_scatter(
+            x=marks, y=[0] * len(marks), mode="markers", name="humid",
+            marker=dict(size=11, symbol="triangle-up", color=TONE["caution"],
+                        opacity=.75),
+            customdata=[muggy[d] for d in marks],
+            hovertemplate="%{customdata}<extra>humid — efficiency reads low</extra>")
     fig.add_hline(y=0, line_dash="dot", line_color="rgba(140,158,176,.5)")
     fig.update_layout(yaxis_title="% vs first session")
     ui.chart(fig, 200, date_axis=True)
@@ -773,8 +816,40 @@ def drift_block(acts: list[dict]) -> None:
     ui.chart(fig, 200, date_axis=True)
 
 
+# Dew point above this limits evaporative cooling enough to cost several beats
+# a minute at the same pace. Below it, conditions are not the explanation.
+MUGGY_DEW_C = 18.0
+
+
+def humid_days(acts: list[dict], weather: dict | None) -> dict[date, str]:
+    """Days whose conditions were muggy enough to inflate heart rate.
+
+    Returned so a chart can mark those points. A session that looks like lost
+    fitness because it was 24C with a 22C dew point is the most common false
+    alarm this app could raise, and the data to rule it out is already stored.
+    """
+    out: dict[date, str] = {}
+    for a in acts:
+        wx = (weather or {}).get(str(a.get("activity_id")))
+        if not wx:
+            continue
+        dew = wx.get("dew_point_c")
+        if dew is None or float(dew) < MUGGY_DEW_C:
+            continue
+        try:
+            day = date.fromisoformat(str(a["start_date"])[:10])
+        except (ValueError, KeyError, TypeError):
+            continue
+        label = f"{wx.get('temp_c', '?')}C, dew {float(dew):.0f}C"
+        if wx.get("humidity_pct"):
+            label += f", {float(wx['humidity_pct']):.0f}% humidity"
+        out[day] = label
+    return out
+
+
 def training_hr_block(acts: list[dict], today: date,
-                      notes: dict | None = None) -> None:
+                      notes: dict | None = None,
+                      weather: dict | None = None) -> None:
     """All sports on one axis, so this is one chart rather than three."""
     view = st.radio("View", ["At your usual pace", "Raw average"], horizontal=True,
                     index=0, label_visibility="collapsed", key="hr_view")
@@ -810,6 +885,27 @@ def training_hr_block(acts: list[dict], today: date,
         t = hr_trend(acts, sport, as_of=today, steady_only=False)
         if t["normalised_change_bpm"] is not None:
             notes.append(f"{sport} {t['normalised_change_bpm']:+.1f} bpm")
+    muggy = humid_days(acts, weather)
+    if muggy and drawn:
+        # Marked, not corrected. There is no defensible constant to subtract for
+        # humidity, so the honest move is to say which points to distrust.
+        rings = []
+        for d in sorted(muggy):
+            same = [p[field] for sp in shown_sports()
+                    for p in hr_points(acts, sp)
+                    if p.get(field) and p["date"] == d]
+            if same:
+                rings.append((d, sum(same) / len(same), muggy[d]))
+        if rings:
+            fig.add_scatter(
+                x=[r[0] for r in rings], y=[r[1] for r in rings],
+                mode="markers", name="humid",
+                marker=dict(size=19, color="rgba(0,0,0,0)", symbol="circle-open",
+                            line=dict(color=TONE["caution"], width=2)),
+                customdata=[r[2] for r in rings],
+                hovertemplate="%{customdata}<extra>humid — expect a few beats "
+                              "more at the same pace</extra>")
+
     if not drawn:
         st.caption("No sessions with heart rate yet.")
         return
@@ -1360,8 +1456,14 @@ def page_lifetime(data: dict, today: date) -> None:
 
     with right:
         ui.section("Body and physiology", "From your Garmin profile.")
+        best = max((float(a.get("norm_power_w") or a.get("avg_power_w") or 0)
+                    for a in acts), default=0.0)
+        wkg = (best / float(body["weight_kg"])
+               if best and body.get("weight_kg") else None)
         ui.rows([
             ("Age", body.get("age") or "—"),
+            ("Best power", f"{best:.0f} W" if best else "—",
+             f"{wkg:.2f} W/kg" if wkg else ""),
             ("Weight", f"{body['weight_kg']} kg" if body.get("weight_kg") else "—"),
             ("Height", f"{float(body['height_cm']):.0f} cm"
              if body.get("height_cm") else "—"),
@@ -1387,7 +1489,8 @@ def page_lifetime(data: dict, today: date) -> None:
                "The headline trend: the same pace costing fewer beats is fitness. "
                "Every session on record.")
     with ui.frame():
-        training_hr_block(acts, today, data.get("notes"))
+        training_hr_block(acts, today, data.get("notes"),
+                          data.get("weather"))
         chart_ai_note("lifetime_hr", data.get("notes"))
 
     ui.section("Resting heart rate, HRV and sleep",
@@ -1579,6 +1682,31 @@ def log_sessions(data: dict, today: date) -> None:
         ui.banner("Not counted as steady", f"{act.get('steady_reason')}. It still "
                   f"appears on the efficiency chart, marked as a harder effort.",
                   "caution")
+    # Watts per kilo, from the profile weight. Garmin's running power is an
+    # estimate derived from pace and elevation rather than a measurement, so it
+    # is shown as context, not promoted into the efficiency trend where it would
+    # break comparability with everything already stored.
+    weight = (data.get("profile") or {}).get("weight_kg")
+    power = act.get("norm_power_w") or act.get("avg_power_w")
+    if power and weight:
+        try:
+            wkg = float(power) / float(weight)
+            ui.section("Power")
+            ui.rows([
+                ("Average power", f"{float(act.get('avg_power_w') or 0):.0f} W"),
+                ("Normalised power",
+                 f"{float(act['norm_power_w']):.0f} W" if act.get("norm_power_w")
+                 else "—"),
+                ("Watts per kilo", f"{wkg:.2f} W/kg",
+                 f"at {float(weight):.0f} kg"),
+                ("Watts per beat",
+                 f"{float(power) / float(act['avg_hr']):.2f}"
+                 if act.get("avg_hr") else "—",
+                 "power divided by heart rate"),
+            ])
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+
     wx = (data.get("weather") or {}).get(aid)
     if wx and wx.get("temp_c") is not None:
         dew = wx.get("dew_point_c")
