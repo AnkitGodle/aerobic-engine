@@ -24,6 +24,7 @@ from typing import Any, Protocol
 log = logging.getLogger("iron_coach.ai")
 
 DEFAULT_MODEL = os.getenv("AI_MODEL", "claude-sonnet-5")
+USER_AGENT = os.getenv("AI_USER_AGENT", "aerobic-engine/1.0")
 MAX_TOKENS = int(os.getenv("AI_MAX_TOKENS", "2000"))
 
 SYSTEM_PROMPT = """\
@@ -56,7 +57,9 @@ Read `history.intensity_distribution` before anything else. It is the share of \
 the last 28 days spent easy, moderate and hard, against a base-phase target of \
 70%+ easy and under 15% hard. If its verdict is "too_hard", the athlete's problem \
 is not volume — it is that their easy sessions are not easy. In that case:
-- Prescribe Z2 and say in "why" what that actually feels like, once.
+- Prescribe Z2 on the swim, bike and run sessions, and say in "why" what that
+  actually feels like — once, on one session, not on every row. Never put zone
+  or pace language on a strength row: its target_zone is "n/a".
 - Do NOT add volume to fix it. Fixing the mix comes first.
 - Raise it in flags once, not on every session.
 
@@ -167,6 +170,7 @@ class AzureAIFoundryBackend:
                 "Content-Type": "application/json",
                 "api-key": self.api_key,
                 "anthropic-version": "2023-06-01",
+                "User-Agent": USER_AGENT,
             },
         )
         try:
@@ -251,32 +255,91 @@ class ClaudeCLIBackend:
         return out
 
 
-class GroqBackend:
-    """Groq's free tier — OpenAI-compatible chat completions.
+# Providers that speak the OpenAI chat-completions dialect. Base URLs and model
+# IDs below were checked against each provider's own docs; free-tier limits move,
+# so treat the notes as a starting point rather than a guarantee.
+#
+# The practical difference for this app is the *shape* of the free allowance. A
+# planner call is a chunky ~2.5K tokens, so a provider that caps tokens-per-minute
+# pinches, while one that caps requests-per-day does not.
+OPENAI_COMPAT: dict[str, dict[str, Any]] = {
+    "groq": {
+        "base": "https://api.groq.com/openai/v1",
+        "model": "openai/gpt-oss-120b",
+        "keys": ("GROQ_API_KEY",),
+        "console": "https://console.groq.com/keys",
+        "free": "30 req/min, 1000/day, 8K tokens/min — the token cap pinches",
+        "json": "json_object",
+    },
+    "gemini": {
+        "base": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "model": "gemini-3.7-flash",
+        "keys": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+        "console": "https://aistudio.google.com/apikey",
+        "free": "~1500 requests/day, 1M context, no card — most generous for "
+                "chunky calls like ours",
+        "json": "json_object",
+    },
+    "cerebras": {
+        "base": "https://api.cerebras.ai/v1",
+        "model": "gpt-oss-120b",
+        "keys": ("CEREBRAS_API_KEY",),
+        "console": "https://cloud.cerebras.ai",
+        "free": "~1M tokens/day — the largest token budget of the three",
+        "json": "json_schema",
+    },
+    "openrouter": {
+        "base": "https://openrouter.ai/api/v1",
+        "model": "meta-llama/llama-3.3-70b-instruct:free",
+        "keys": ("OPENROUTER_API_KEY",),
+        "console": "https://openrouter.ai/keys",
+        "free": "many models tagged :free behind one key; limits vary per model",
+        "json": "json_object",
+    },
+}
 
-    Model choice: `openai/gpt-oss-120b` is Groq's most capable production text
-    model (131K context, structured outputs, tool use) and costs nothing on the
-    free plan. `openai/gpt-oss-20b` is the faster, smaller alternative.
 
-    The binding constraint is not requests but **tokens per minute** — 8K on the
-    free plan, against 30 requests/min and 1000/day. A full planner payload plus
-    system prompt is a meaningful slice of that, so `planner.build_payload` keeps
-    the history it sends deliberately short, and page summaries are cached. If a
-    minute's budget is exceeded Groq returns 429; the caller falls back to the
-    rules plan rather than retrying, because a retry would just spend the next
-    minute's budget too.
+class OpenAICompatBackend:
+    """One backend for every provider that speaks OpenAI chat-completions.
+
+    Groq, Google's Gemini, Cerebras and OpenRouter all expose the same dialect,
+    so switching provider is a base URL, a key and a model name rather than new
+    code. `AI_BASE_URL` lets an unlisted provider work without touching this
+    file at all.
+
+    `json_mode` asks for a guaranteed JSON object where the provider supports it,
+    which stops a stray sentence of preamble from invalidating a week's plan.
     """
 
-    name = "groq"
-    BASE = "https://api.groq.com/openai/v1/chat/completions"
-
-    def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
-        self.api_key = api_key or os.getenv("GROQ_API_KEY")
-        self.model = model or os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
-        self.timeout = int(os.getenv("GROQ_TIMEOUT", "90"))
-        if not self.api_key:
+    def __init__(
+        self,
+        provider: str = "groq",
+        api_key: str | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
+        spec = OPENAI_COMPAT.get(provider, {})
+        self.name = provider
+        self.spec = spec
+        self.base = (base_url or os.getenv("AI_BASE_URL") or spec.get("base", "")).rstrip("/")
+        self.model = model or os.getenv("AI_MODEL_OVERRIDE") or os.getenv(
+            f"{provider.upper()}_MODEL", spec.get("model", "")
+        )
+        self.timeout = int(os.getenv("AI_TIMEOUT", "90"))
+        self.api_key = api_key or os.getenv("AI_API_KEY") or next(
+            (os.getenv(k) for k in spec.get("keys", ()) if os.getenv(k)), None
+        )
+        if not self.base:
             raise AIUnavailable(
-                "GROQ_API_KEY is not set. Get a free key at console.groq.com/keys"
+                f"No base URL for provider {provider!r}. Set AI_BASE_URL, or use "
+                f"one of: {', '.join(sorted(OPENAI_COMPAT))}."
+            )
+        if not self.api_key:
+            wanted = " or ".join(spec.get("keys", ("AI_API_KEY",)))
+            console = spec.get("console", "")
+            raise AIUnavailable(
+                f"{wanted} is not set."
+                + (f" Free key at {console}" if console else "")
             )
 
     def complete(self, system: str, user: str, json_mode: bool = False) -> str:
@@ -290,15 +353,20 @@ class GroqBackend:
             "max_tokens": MAX_TOKENS,
             "temperature": 0.4,
         }
-        if json_mode:
-            # Guarantees a parseable object, so a stray sentence of preamble
-            # cannot invalidate a whole week's plan.
+        if json_mode and self.spec.get("json"):
             body["response_format"] = {"type": "json_object"}
+            body["stream"] = False   # Cerebras rejects JSON mode with streaming
 
         req = urllib.request.Request(
-            self.BASE, data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json",
-                     "Authorization": f"Bearer {self.api_key}"},
+            f"{self.base}/chat/completions", data=json.dumps(body).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+                # Required, not cosmetic: urllib's default "Python-urllib/x.y"
+                # is blocked by Groq's Cloudflare with error 1010, which surfaces
+                # as a 403 and looks exactly like a bad API key.
+                "User-Agent": USER_AGENT,
+            },
         )
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
@@ -306,22 +374,35 @@ class GroqBackend:
         except urllib.error.HTTPError as exc:
             detail = ""
             try:
-                detail = json.loads(exc.read()).get("error", {}).get("message", "")
+                detail = (json.loads(exc.read()).get("error") or {}).get("message", "")
             except Exception:  # noqa: BLE001
                 pass
             if exc.code == 429:
                 raise AIUnavailable(
-                    f"Groq rate limit reached (free tier is 8K tokens/minute). "
+                    f"{self.name} rate limit reached "
+                    f"({self.spec.get('free', 'see the provider console')}). "
                     f"{detail}".strip()
                 ) from exc
-            raise AIUnavailable(f"Groq returned {exc.code}: {detail or exc.reason}") from exc
+            if exc.code in (401, 403):
+                raise AIUnavailable(
+                    f"{self.name} rejected the key ({exc.code}). {detail}".strip()
+                ) from exc
+            raise AIUnavailable(
+                f"{self.name} returned {exc.code}: {detail or exc.reason}") from exc
         except urllib.error.URLError as exc:
-            raise AIUnavailable(f"Groq unreachable: {exc.reason}") from exc
+            raise AIUnavailable(f"{self.name} unreachable: {exc.reason}") from exc
 
         choices = data.get("choices") or []
         if not choices:
-            raise AIUnavailable("Groq returned no choices")
+            raise AIUnavailable(f"{self.name} returned no choices")
         return (choices[0].get("message") or {}).get("content") or ""
+
+
+class GroqBackend(OpenAICompatBackend):
+    """Kept as a name because the config value `AI_BACKEND=groq` is documented."""
+
+    def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
+        super().__init__("groq", api_key=api_key, model=model)
 
 
 class NullBackend:
@@ -341,8 +422,11 @@ def get_backend(name: str | None = None) -> LLMBackend:
         return AzureAIFoundryBackend()
     if name in ("claude_cli", "claude-cli", "cli", "subscription"):
         return ClaudeCLIBackend()
-    if name == "groq":
-        return GroqBackend()
+    if name in OPENAI_COMPAT:
+        return OpenAICompatBackend(name)
+    if name == "openai_compat":
+        # Any provider not listed above: set AI_BASE_URL, AI_API_KEY, AI_MODEL_OVERRIDE.
+        return OpenAICompatBackend("openai_compat")
     if name in ("none", "off", ""):
         return NullBackend()
     raise AIUnavailable(f"Unknown AI_BACKEND {name!r}")

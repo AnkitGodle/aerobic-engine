@@ -88,7 +88,9 @@ def test_rate_limit_is_actionable_not_a_crash(groq, monkeypatch):
     with pytest.raises(ai.AIUnavailable) as e:
         groq.complete("s", "u")
     msg = str(e.value)
-    assert "rate limit" in msg.lower() and "8K tokens/minute" in msg
+    assert "rate limit" in msg.lower()
+    assert "8K tokens/min" in msg, "the message must name the limit that was hit"
+    assert "TPM exceeded" in msg, "the provider's own detail should survive"
 
 
 def test_an_empty_response_does_not_silently_pass(groq, monkeypatch):

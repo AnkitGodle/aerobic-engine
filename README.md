@@ -110,9 +110,22 @@ comfortable — summaries and chart captions are cached for 30–60 minutes so a
 reload does not spend the budget, and a 429 falls back to the rules plan rather
 than retrying into the next minute's allowance.
 
-Other backends behind the same interface: `anthropic` (API key), `claude_cli` (a
-Claude Pro/Max subscription via the Claude Code CLI — local only, since a hosted
-app has no CLI to call), and `azure` (AI Foundry).
+Groq, Gemini, Cerebras and OpenRouter all speak the OpenAI chat-completions
+dialect, so switching between them is config rather than code:
+
+| `AI_BACKEND` | Default model | Free tier, and its shape |
+| --- | --- | --- |
+| `gemini` | `gemini-3.7-flash` | ~1500 requests/day, 1M context. Caps *requests*, not tokens — the best fit here, because each planner call is chunky. |
+| `cerebras` | `gpt-oss-120b` | ~1M tokens/day. The largest token budget; also enforces JSON schemas. |
+| `groq` | `openai/gpt-oss-120b` | 30 req/min, 1000/day, **8K tokens/min**. Fastest, but the per-minute token cap is the one you feel. |
+| `openrouter` | `…:free` variants | Many free models behind one key; limits vary per model. |
+
+For an unlisted provider that speaks the same dialect, set `AI_BASE_URL`,
+`AI_API_KEY` and `AI_MODEL_OVERRIDE` and leave the code alone.
+
+Also behind the same interface: `anthropic` (API key), `claude_cli` (a Claude
+Pro/Max subscription via the Claude Code CLI — local only, since a hosted app has
+no CLI to call), and `azure` (AI Foundry).
 
 ## Being a good citizen with an unofficial API
 
