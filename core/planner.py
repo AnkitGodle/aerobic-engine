@@ -1388,6 +1388,73 @@ def build_payload(
     )
 
 
+def suggest_targets(
+    store: Store,
+    today: date | None = None,
+    only_sports: Sequence[str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """A starting point for the weekly targets, derived from what has happened.
+
+    An empty number box is a bad question: it asks the athlete to guess a figure
+    the app already has the evidence for, and a guess that is too high just gets
+    trimmed by the volume cap later anyway.
+
+    So the suggestion is the recent typical week nudged by one progression step,
+    clamped to what the envelope will actually allow. Where there is no history
+    for a sport it falls back to the base-phase share of the budget rather than
+    to zero, because zero reads as "do not do this sport" — which is what the
+    on/off toggle is for.
+    """
+    today = today or date.today()
+    facts = build_facts(store, today=today)
+    envelope = build_envelope(facts, store, only_sports=only_sports)
+
+    # Completed weeks only: the current one is partial, and including it would
+    # suggest a smaller week every time it is opened early on a Monday.
+    past = [w for w in facts.previous_weeks if w.total_minutes > 0][-4:]
+
+    out: dict[str, dict[str, Any]] = {}
+    for sport in ("swim", "bike", "run"):
+        se = envelope.by_sport.get(sport)
+        if se is None or not se.enabled:
+            continue
+
+        history = [w.by_sport[sport] for w in past
+                   if sport in w.by_sport and w.by_sport[sport].minutes > 0]
+        if history:
+            typical = sum(h.minutes for h in history) / len(history)
+            sessions = round(sum(h.sessions for h in history) / len(history))
+            step = 1.0 + (PROGRESSION_CAP_PCT / 100.0)
+            minutes = typical * (1.0 if envelope.deload else step)
+            basis = (f"{len(history)} week(s) of history, averaging "
+                     f"{typical:.0f} min")
+        else:
+            share = SPORT_SHARE.get(sport, 0.0)
+            minutes = envelope.max_week_minutes * share
+            sessions = max(1, se.min_sessions)
+            basis = "no history yet — the base-phase share of the week"
+
+        # Never suggest something the envelope would immediately cut back — and
+        # say so when that happens, because "averaging 123 min" beside a 45 min
+        # suggestion otherwise looks like an arithmetic error.
+        if se.max_minutes and minutes > se.max_minutes:
+            basis += (f", capped at {se.max_minutes:.0f} by this week's "
+                      f"progression budget")
+            minutes = se.max_minutes
+        if minutes and minutes < SESSION_FLOOR.get(sport, 25):
+            minutes = float(SESSION_FLOOR.get(sport, 25))
+        sessions = max(1, min(int(sessions or 1), se.max_sessions or 1))
+
+        out[sport] = {
+            "sessions": sessions,
+            # Rounded to a quarter hour: the input steps in 15s, and a target of
+            # 87 minutes implies a precision nobody plans to.
+            "minutes": int(round(minutes / 15.0) * 15),
+            "basis": basis,
+        }
+    return out
+
+
 def reapply_rules(
     store: Store,
     plan: dict[str, Any],

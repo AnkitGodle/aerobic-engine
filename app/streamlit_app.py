@@ -974,27 +974,35 @@ def page_plan(data: dict, today: date) -> None:
                "How much of each sport you want. The scheduler builds around this; "
                "the safety rules still cap the total.")
     existing = data["targets"]
+    suggestions = suggested_targets(today, data.get("scoped_to"))
     with st.form("targets"):
-        st.caption("How much of each sport you want, for the sports switched on "
-                   "in the header. Use the toggle up there to drop a sport "
-                   "entirely — it then gets no sessions and no long-session "
+        st.caption("Pre-filled from your own recent weeks — edit anything you "
+                   "disagree with. Use the header toggle to drop a sport "
+                   "entirely; it then gets no sessions and no long-session "
                    "requirement, and its share of the week goes to the rest.")
         rows = []
         for sport in shown_sports():
             cur = existing.get(sport) or {}
-            c = st.columns([1.1, 1, 1], vertical_alignment="center")
+            hint = suggestions.get(sport) or {}
+            # An empty box asks the athlete to guess a number the app already has
+            # the evidence for, so a saved value wins and a suggestion fills the
+            # gap. The reasoning is shown either way.
+            default_sessions = int(cur.get("sessions") or hint.get("sessions") or 0)
+            default_minutes = int(cur.get("minutes") or hint.get("minutes") or 0)
+            c = st.columns([1.35, 1, 1], vertical_alignment="center")
             c[0].markdown(f"{EMOJI[sport]} **{sport.title()}**")
+            if hint.get("basis"):
+                c[0].caption(("saved" if cur.get("sessions") else "suggested")
+                             + f" · {hint['basis']}")
             rows.append({
                 "sport": sport,
                 # Preserved, not re-decided here: the header toggle is the one
                 # place that answers "is this sport on?".
                 "enabled": int(bool(cur.get("enabled", 1))),
-                "sessions": c[1].number_input("sessions", 0, 7,
-                                              int(cur.get("sessions") or 0),
+                "sessions": c[1].number_input("sessions", 0, 7, default_sessions,
                                               key=f"ts_{sport}"),
-                "minutes": c[2].number_input("minutes", 0, 900,
-                                             int(cur.get("minutes") or 0), step=15,
-                                             key=f"tm_{sport}"),
+                "minutes": c[2].number_input("minutes", 0, 900, default_minutes,
+                                             step=15, key=f"tm_{sport}"),
             })
         b = st.columns(2)
         save = b[0].form_submit_button("Save targets", type="primary",
@@ -1217,6 +1225,23 @@ def conformed_plan(plan: dict | None, today: date,
     return _conformed_plan(db_stamp(), today.isoformat(),
                            _json.dumps(plan, sort_keys=True, default=str),
                            tuple(sorted(sports or ())))
+
+
+@st.cache_data(show_spinner=False, ttl=900)
+def _suggested_targets(stamp: float, iso_today: str,
+                       sports: tuple[str, ...] = ()) -> dict:  # noqa: ARG001
+    try:
+        return with_store(lambda s: planner.suggest_targets(
+            s, today=date.fromisoformat(iso_today),
+            only_sports=list(sports) or None))
+    except Exception as exc:  # noqa: BLE001 - an empty form beats a broken page
+        log.warning("Could not derive target suggestions: %s", exc)
+        return {}
+
+
+def suggested_targets(today: date, sports: list[str] | None = None) -> dict:
+    return _suggested_targets(db_stamp(), today.isoformat(),
+                              tuple(sorted(sports or ())))
 
 
 def page_lifetime(data: dict, today: date) -> None:
