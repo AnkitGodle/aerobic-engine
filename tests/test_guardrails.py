@@ -446,3 +446,41 @@ def test_spacing_never_stacks_two_sessions_on_one_day(healthy):
         if d.sport in planner.SPACED_SPORTS and d.duration_min > 0:
             per_day[d.day] = per_day.get(d.day, 0) + 1
     assert not [k for k, v in per_day.items() if v > 1], per_day
+
+
+def test_a_tight_budget_cannot_drop_below_three_endurance_sessions(healthy):
+    """The floor and the progression cap genuinely conflict on a light week.
+
+    A near-empty previous week makes the +10% budget small enough that
+    _fit_budget drops whole sessions. Three short easy sessions is not what the
+    cap exists to prevent, so the floor wins and the overshoot is declared.
+    """
+    plan = planner.plan_week(healthy, today=TODAY, use_ai=False, save=False)
+    live = [d for d in plan.week_plan
+            if d.sport in planner.SPACED_SPORTS and d.duration_min > 0]
+    assert len(live) >= planner.MIN_ENDURANCE_SESSIONS, [
+        (d.day, d.sport, d.duration_min) for d in plan.week_plan]
+
+
+def test_restored_sessions_still_obey_spacing_and_the_sport_filter(healthy):
+    """Whatever the floor puts back must satisfy every other rule too."""
+    plan = planner.plan_week(healthy, today=TODAY, use_ai=False, save=False,
+                             only_sports=["bike", "strength"])
+    # Prescriptions only. A completed run stays in the week whatever the filter
+    # says, and two sessions that already happened on adjacent days cannot be
+    # spaced retrospectively.
+    live = [d for d in prescribed(plan) if d.sport in planner.SPACED_SPORTS]
+    assert {d.sport for d in live} <= {"bike", "brick"}, [
+        (d.day, d.sport) for d in live]
+
+
+def test_the_floor_declares_any_overshoot(healthy):
+    """Going over the budget silently would be the actual problem."""
+    facts = planner.build_facts(healthy, today=TODAY)
+    envelope = planner.build_envelope(facts, healthy)
+    plan = planner.plan_week(healthy, today=TODAY, use_ai=False, save=False)
+    planned = sum(d.duration_min for d in plan.week_plan
+                  if d.purpose != "completed")
+    if planned > envelope.max_week_minutes:
+        assert any("floor" in a or "long" in a for a in plan.adjustments_made), \
+            plan.adjustments_made

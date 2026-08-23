@@ -774,23 +774,26 @@ def enforce(
     # 7. Required long sessions must not silently disappear two weeks running.
     days = _ensure_long_sessions(days, facts, envelope, notes)
 
-    # 8. Endurance sessions keep a clear day between them.
+    # 8. Three endurance sessions is the floor, even if the budget is tight.
+    days = _ensure_minimum_endurance(days, facts, envelope, notes)
+
+    # 9. Endurance sessions keep a clear day between them.
     days = _space_endurance(days, facts, notes)
 
-    # 9. Minimum rest days across the whole week.
+    # 10. Minimum rest days across the whole week.
     days = _ensure_rest_days(days, facts, envelope, notes)
 
-    # 10. A sport switched off must not appear, whoever proposed it.
+    # 11. A sport switched off must not appear, whoever proposed it.
     for d in list(days):
         se = envelope.by_sport.get(d.sport)
         if se is not None and not se.enabled and d.duration_min > 0:
             notes.append(f"dropped {d.sport} on {d.day}: switched off")
             days.remove(d)
 
-    # 11. Concrete heart-rate targets, from the athlete's own Garmin zones.
+    # 12. Concrete heart-rate targets, from the athlete's own Garmin zones.
     _stamp_hr_targets(days, zone_bounds_map, aerobic_ceiling)
 
-    # 12. Descriptions must match the numbers that survived the steps above.
+    # 13. Descriptions must match the numbers that survived the steps above.
     _relabel(days, envelope)
 
     flags = list(plan.flags)
@@ -810,6 +813,88 @@ def enforce(
         adjustments_made=plan.adjustments_made + notes,
         source=plan.source if not notes else ("ai_repaired" if plan.source == "ai" else plan.source),
     )
+
+
+def _ensure_minimum_endurance(
+    days: list[PlanDay],
+    facts: PlannerFacts,
+    envelope: Envelope,
+    notes: list[str],
+) -> list[PlanDay]:
+    """Put back endurance sessions the volume cap dropped below the floor.
+
+    The budget and the floor genuinely conflict early on: a light previous week
+    makes the +10% cap small, `_fit_budget` drops whole sessions to fit, and the
+    week ends up with two endurance sessions or fewer. Three short easy sessions
+    is not what the progression cap exists to prevent — it exists to stop big
+    jumps — so the floor wins, at the per-sport minimum duration, and the
+    overshoot is stated rather than hidden. Same precedent as a required long
+    session.
+    """
+    # A deload outranks the floor, without exception. The floor is there so a
+    # cautious budget does not erase the week; a deload is the rules deciding the
+    # week *should* be smaller, and adding sessions back would defeat the one
+    # constraint that exists to be un-negotiable.
+    if envelope.deload:
+        return days
+
+    order = {d: i for i, d in enumerate(DAYS)}
+    live = [d for d in days if d.sport in SPACED_SPORTS and d.duration_min > 0]
+    if len(live) >= MIN_ENDURANCE_SESSIONS:
+        return days
+
+    per_sport: dict[str, int] = {}
+    for d in live:
+        per_sport[d.sport] = per_sport.get(d.sport, 0) + 1
+
+    def room(sport: str) -> bool:
+        se = envelope.by_sport.get(sport)
+        if se is None or not se.enabled:
+            return False
+        return per_sport.get(sport, 0) < max(1, se.max_sessions)
+
+    # Bike first: it is the best low-impact way to add aerobic volume, which is
+    # the same reason the base-phase template leans on it.
+    candidates = [sp for sp in ("bike", "run", "swim") if room(sp)]
+    if not candidates:
+        return days
+
+    used = {d.day for d in days if d.duration_min > 0}
+    open_days = [day for day in (facts.days_remaining or DAYS) if day not in used]
+    # Furthest from what is already scheduled, so the spacing step has to move
+    # as little as possible afterwards.
+    busy = sorted(order[d.day] for d in live if d.day in order)
+
+    def gap(day: str) -> int:
+        i = order.get(day, 99)
+        return min((abs(i - b) for b in busy), default=99)
+
+    open_days.sort(key=lambda d: (-gap(d), order.get(d, 99)))
+
+    added = 0
+    while len(live) + added < MIN_ENDURANCE_SESSIONS and open_days:
+        sport = next((sp for sp in candidates if room(sp)), None)
+        if sport is None:
+            break
+        day = open_days.pop(0)
+        minutes = int(SESSION_FLOOR.get(sport, 25))
+        days.append(PlanDay(
+            day=day, sport=sport, duration_min=minutes, target_zone="Z2",
+            purpose=PURPOSE_FOR_ROLE.get("endurance", "aerobic base"),
+            why=f"the week needs at least {MIN_ENDURANCE_SESSIONS} endurance "
+                f"sessions",
+        ))
+        per_sport[sport] = per_sport.get(sport, 0) + 1
+        added += 1
+
+    if added:
+        planned = sum(d.duration_min for d in days)
+        notes.append(
+            f"added {added} short session(s) to reach the {MIN_ENDURANCE_SESSIONS}"
+            f"-session floor; the week is now {planned} min against a "
+            f"{envelope.max_week_minutes:.0f} min budget"
+        )
+    return days
 
 
 def _space_endurance(

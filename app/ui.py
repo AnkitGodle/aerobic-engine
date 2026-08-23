@@ -82,6 +82,33 @@ CSS = """
   .ic-stat-note.caution { color: var(--ic-caution); opacity: .95; }
   .ic-stat-note.bad { color: var(--ic-bad); opacity: .95; }
 
+  /* Figures band: no cards. Used where the numbers are the content and a grid
+     of bordered boxes reads as decoration rather than information. */
+  .ic-figs { display: flex; flex-wrap: wrap; gap: 0;
+             border-top: 1px solid var(--ic-line);
+             border-bottom: 1px solid var(--ic-line);
+             margin: .1rem 0 1.1rem; }
+  .ic-fig { flex: 1 1 8.5rem; padding: .7rem 1.1rem .75rem 0; min-width: 7rem; }
+  .ic-fig + .ic-fig { padding-left: 1.1rem;
+                      border-left: 1px solid var(--ic-line); }
+  .ic-fig-label { font-size: .66rem; letter-spacing: .09em; text-transform: uppercase;
+                  opacity: .55; margin-bottom: .2rem; }
+  .ic-fig-value { font-size: 1.5rem; font-weight: 640; line-height: 1.15;
+                  font-variant-numeric: tabular-nums; }
+  .ic-fig-note { font-size: .74rem; opacity: .55; margin-top: .1rem;
+                 font-variant-numeric: tabular-nums; }
+
+  /* Dense two-column rows for "label ..... value" reference data. */
+  .ic-rows { border-top: 1px solid var(--ic-line); margin: .1rem 0 1.1rem; }
+  .ic-row { display: flex; justify-content: space-between; align-items: baseline;
+            gap: 1rem; padding: .42rem .1rem;
+            border-bottom: 1px solid var(--ic-line); }
+  .ic-row-key { font-size: .87rem; opacity: .8; }
+  .ic-row-val { font-size: .93rem; font-weight: 600;
+                font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .ic-row-note { font-size: .74rem; opacity: .5; margin-left: .5rem;
+                 font-weight: 400; }
+
   .ic-banner { border-radius: 14px; padding: 15px 18px; margin: 0 0 14px;
                border: 1px solid var(--ic-line); background: var(--ic-surface); }
   .ic-banner.good { border-left: 3px solid var(--ic-good); }
@@ -205,6 +232,50 @@ def stats_row(items: list[dict]) -> None:
             stat(**item)
 
 
+def figures(items: list[dict]) -> None:
+    """A band of numbers with hairline rules instead of cards.
+
+    For places where the figures *are* the content: a row of bordered boxes there
+    reads as decoration and takes three times the vertical space to say the same
+    thing.
+    """
+    items = [i for i in items if i]
+    if not items:
+        return
+    cells = "".join(
+        f'<div class="ic-fig">'
+        f'<div class="ic-fig-label">{esc(i.get("label", ""))}</div>'
+        f'<div class="ic-fig-value">{esc(i.get("value", "—"))}</div>'
+        + (f'<div class="ic-fig-note">{esc(i["note"])}</div>' if i.get("note") else "")
+        + "</div>"
+        for i in items
+    )
+    st.markdown(f'<div class="ic-figs">{cells}</div>', unsafe_allow_html=True)
+
+
+def rows(items: list[tuple]) -> None:
+    """Dense `label — value` list for reference data, in place of a table widget.
+
+    A dataframe brings its own chrome, sorting affordances and row indices; for a
+    dozen fixed facts that is all noise.
+    """
+    items = [i for i in items if i]
+    if not items:
+        return
+    out = []
+    for item in items:
+        key, val = item[0], item[1]
+        note = item[2] if len(item) > 2 else ""
+        out.append(
+            f'<div class="ic-row"><div class="ic-row-key">{esc(key)}</div>'
+            f'<div class="ic-row-val">{esc(val)}'
+            + (f'<span class="ic-row-note">{esc(note)}</span>' if note else "")
+            + "</div></div>"
+        )
+    st.markdown(f'<div class="ic-rows">{"".join(out)}</div>',
+                unsafe_allow_html=True)
+
+
 def banner(headline: str, body: str = "", tone: Tone = "neutral") -> None:
     st.markdown(
         f'<div class="ic-banner {tone}">'
@@ -286,8 +357,13 @@ def card(title: str = "", note: str = ""):
         yield
 
 
-def chart(fig, height: int = 260) -> None:
-    """One chart style for the whole app: transparent, minimal, no chartjunk."""
+def chart(fig, height: int = 260, date_axis: bool = False) -> None:
+    """One chart style for the whole app: transparent, minimal, no chartjunk.
+
+    `date_axis` puts the weekday on the ticks. Training is planned by day of the
+    week — a long run is a Sunday thing — so a bare "24 Aug" makes the reader do
+    a calendar lookup to answer the question they actually have.
+    """
     fig.update_layout(
         height=height, margin=dict(t=8, b=4, l=4, r=4),
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
@@ -296,5 +372,7 @@ def chart(fig, height: int = 260) -> None:
         hoverlabel=dict(font_size=12),
     )
     fig.update_xaxes(showgrid=False, zeroline=False, title=None)
+    if date_axis:
+        fig.update_xaxes(tickformat="%a %-d %b", hoverformat="%a %-d %b %Y")
     fig.update_yaxes(gridcolor="rgba(140,158,176,.15)", zeroline=False)
     st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})

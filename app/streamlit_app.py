@@ -148,6 +148,11 @@ def load(stamp: float) -> dict:  # noqa: ARG001 - stamp is the cache key
     def read(s: Store) -> dict:
         state = s.get_states(("last_sync", "athlete_name", "threshold_hr",
                               "running_ftp", "cycling_ftp", "aerobic_ceiling_bpm"))
+        # Body constants, stored one key per field by the sync.
+        fields = ("weight_kg", "height_cm", "age", "gender", "vo2max_run",
+                  "vo2max_bike", "threshold_hr", "moderate_zone", "vigorous_zone")
+        raw = s.get_states(tuple(f"profile_{f}" for f in fields))
+        profile = {f: raw.get(f"profile_{f}") for f in fields}
         return {
             "activities": s.activities(),
             "all_activities": s.activities(include_parents=True),
@@ -160,6 +165,9 @@ def load(stamp: float) -> dict:  # noqa: ARG001 - stamp is the cache key
             "thresholds": {k: state[k]
                            for k in ("threshold_hr", "running_ftp", "cycling_ftp")},
             "aerobic_ceiling": state["aerobic_ceiling_bpm"],
+            "profile": profile,
+            "records": s.personal_records(),
+            "weather": s.weather(),
             "plan": s.latest_plan(week_start_of(date.today())),
         }
 
@@ -482,15 +490,6 @@ def page_today(data: dict, today: date) -> None:
 
     wk = week_summaries(acts, weeks=1, as_of=today,
                         strength_rows=data["strength"])[-1]
-    # Today's strength session, spelled out. It is the one sport where knowing
-    # what to do is not enough — the exercises are only protective if they are
-    # done slowly and in the right position.
-    legs_today = next((d for d in todo if d["sport"] == "strength"), None)
-    if legs_today:
-        strength_howto_block(
-            list(legs_today.get("exercise_ids") or []), data["strength"],
-            session_index=len({str(r["day"]) for r in data["strength"]}))
-
     ui.section("This week",
                f"{hm(wk.total_minutes)} done of a {hm(env.max_week_minutes)} ceiling")
     ui.week_strip(week_cells(plan, today))
@@ -503,6 +502,16 @@ def page_today(data: dict, today: date) -> None:
                    f"arrives.")
         ui.week_strip(week_cells(nxt, week_start_of(today) + timedelta(weeks=1),
                                  mark_today=False))
+
+    # Today's strength session, spelled out. It is the one sport where knowing
+    # what to do is not enough — the exercises are only protective if they are
+    # done slowly and in the right position.
+    legs_today = next((d for d in todo if d["sport"] == "strength"), None)
+    if legs_today:
+        strength_howto_block(
+            list(legs_today.get("exercise_ids") or []), data["strength"],
+            session_index=len({str(r["day"]) for r in data["strength"]}))
+
 
 
 
@@ -690,7 +699,7 @@ def efficiency_block(acts: list[dict], today: date,
         return
     fig.add_hline(y=0, line_dash="dot", line_color="rgba(140,158,176,.5)")
     fig.update_layout(yaxis_title="% vs first session")
-    ui.chart(fig, 200)
+    ui.chart(fig, 200, date_axis=True)
     chart_ai_note("efficiency", notes)
     statuses = [ef_data_status(acts, s) for s in shown_sports()]
     short = [s for s in statuses if s["total"] and s["needed_for_verdict"]]
@@ -710,7 +719,7 @@ def drift_block(acts: list[dict]) -> None:
                  color_discrete_map=SPORT_COLOR)
     fig.add_hline(y=5, line_dash="dot", annotation_text="5%")
     fig.update_layout(yaxis_title="% drift")
-    ui.chart(fig, 200)
+    ui.chart(fig, 200, date_axis=True)
 
 
 def training_hr_block(acts: list[dict], today: date,
@@ -754,7 +763,7 @@ def training_hr_block(acts: list[dict], today: date,
         st.caption("No sessions with heart rate yet.")
         return
     fig.update_layout(yaxis_title="bpm")
-    ui.chart(fig, 200)
+    ui.chart(fig, 200, date_axis=True)
     chart_ai_note("training_hr", notes)
     if notes:
         st.caption("Change at the same pace: " + " · ".join(notes)
@@ -793,7 +802,7 @@ def trend_chart(wl: list[dict], today: date) -> None:
                         mode="lines", name="28-day baseline",
                         line=dict(color=color, width=1.5, dash="dot"))
     fig.update_layout(yaxis_title="hours" if col == "sleep_seconds" else None)
-    ui.chart(fig, 200)
+    ui.chart(fig, 200, date_axis=True)
 
 
 def volume_chart(data: dict, today: date,
@@ -833,7 +842,7 @@ def volume_chart(data: dict, today: date,
                         hovertemplate="week of %{x|%a %d %b}<br>%{y:.0f} min"
                                       "<extra>deload</extra>")
     fig.update_layout(yaxis_title="minutes per week", hovermode="x unified")
-    ui.chart(fig, 200)
+    ui.chart(fig, 200, date_axis=True)
     chart_ai_note("volume", notes)
 
     rows = [{"week": day_label(w.week_start.isoformat()), "total minutes": w.total_minutes,
@@ -1118,6 +1127,118 @@ def page_plan(data: dict, today: date) -> None:
 # --------------------------------------------------------------------------
 
 
+def pr_value(row: dict) -> str:
+    """Garmin stores a record as a bare number whose meaning depends on the type.
+
+    Distance records are metres and time records are seconds, and nothing in the
+    payload says which — so the label decides. Showing "401.9" for a 6:42 kilometre
+    is worse than showing nothing.
+    """
+    v = row.get("value")
+    if v is None:
+        return "—"
+    label = (row.get("label") or "").lower()
+    if label.startswith("fastest"):
+        total = int(round(float(v)))
+        h, rem = divmod(total, 3600)
+        m, sec = divmod(rem, 60)
+        return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+    if label.startswith("longest") or "climb" in label:
+        return f"{float(v) / 1000:.2f} km" if float(v) > 100 else f"{float(v):.0f} m"
+    return f"{float(v):,.0f}"
+
+
+def page_lifetime(data: dict, today: date) -> None:
+    """Everything that is not about this week.
+
+    A separate page because the framing is different: a weekly dashboard answers
+    "am I on track", and these numbers answer "how far have I come", which is the
+    question that actually keeps people training.
+
+    Deliberately typographic rather than card-based. On a page that is almost
+    entirely numbers, a grid of bordered boxes is decoration — it triples the
+    vertical space and adds nothing a hairline rule does not.
+    """
+    acts = data["activities"]
+    if not acts:
+        st.caption("No activities yet — sync from the sidebar.")
+        return
+    tot = totals(acts)
+    body = data.get("profile") or {}
+
+    span = "no dated sessions"
+    if tot["first_day"]:
+        span = (f"{day_label(tot['first_day'].isoformat(), year=True)} — "
+                f"{day_label(tot['last_day'].isoformat(), year=True)}")
+    ui.page_title("Lifetime", span)
+
+    ui.figures([
+        {"label": "Sessions", "value": f"{tot['sessions']:,}"},
+        {"label": "Moving time", "value": hm(tot["minutes"])},
+        {"label": "Distance", "value": f"{tot['km']:,.0f} km"},
+        {"label": "Weeks", "value": f"{tot['weeks']:.0f}",
+         "note": f"{tot['sessions'] / max(tot['weeks'], 1):.1f} / week"},
+    ])
+
+    left, right = st.columns([1.15, 1], gap="large")
+    with left:
+        ui.section("By sport")
+        sport_rows = []
+        for sp in shown_sports():
+            row = tot["by_sport"].get(sp) or {}
+            n = int(row.get("sessions") or 0)
+            if not n:
+                sport_rows.append((f"{EMOJI.get(sp, '')} {sp.title()}", "—",
+                                   "nothing logged"))
+                continue
+            km = row.get("km") or 0
+            sport_rows.append((
+                f"{EMOJI.get(sp, '')} {sp.title()}",
+                f"{km:,.0f} km" if km else hm(row.get("minutes") or 0),
+                f"{n} session{'s' if n != 1 else ''} · {hm(row.get('minutes') or 0)}",
+            ))
+        legs = tot["by_sport"].get("strength") or {}
+        if legs.get("sessions"):
+            sport_rows.append((f"{EMOJI['strength']} Strength",
+                               f"{int(legs['sessions'])} sessions",
+                               hm(legs.get("minutes") or 0)))
+        ui.rows(sport_rows)
+
+    with right:
+        ui.section("Body and physiology", "From your Garmin profile.")
+        ui.rows([
+            ("Age", body.get("age") or "—"),
+            ("Weight", f"{body['weight_kg']} kg" if body.get("weight_kg") else "—"),
+            ("Height", f"{float(body['height_cm']):.0f} cm"
+             if body.get("height_cm") else "—"),
+            ("VO2max (run)", body.get("vo2max_run") or "—", "Garmin estimate"),
+            ("Threshold HR", f"{float(body['threshold_hr']):.0f} bpm"
+             if body.get("threshold_hr") else "—", "lactate threshold"),
+        ])
+
+    records = data.get("records") or []
+    if records:
+        ui.section("Personal records", "Garmin's own, not recomputed here.")
+        pr_rows = [(r["label"], pr_value(r),
+                    day_label(r["achieved_at"]) if r.get("achieved_at") else "")
+                   for r in records]
+        half = (len(pr_rows) + 1) // 2
+        cols = st.columns(2, gap="large")
+        with cols[0]:
+            ui.rows(pr_rows[:half])
+        with cols[1]:
+            ui.rows(pr_rows[half:])
+
+    ui.section("Heart rate at your usual pace",
+               "The headline trend: the same pace costing fewer beats is fitness. "
+               "Every session on record.")
+    training_hr_block(acts, today, data.get("notes"))
+
+    ui.section("Resting heart rate, HRV and sleep",
+               "All time, not a rolling window.")
+    trend_chart(data["wellness"], today)
+
+
 def page_log(data: dict, today: date) -> None:
     tabs = st.tabs(["Sessions", "Strength", "Data"])
     with tabs[0]:
@@ -1366,7 +1487,7 @@ def sidebar(data: dict) -> None:
 FILTER_SPORTS = ("run", "bike", "swim", "strength")
 
 
-PAGES = ("Today", "Progress", "Plan", "Log")
+PAGES = ("Today", "Progress", "Plan", "Lifetime", "Log")
 
 
 def nav() -> str:
@@ -1632,8 +1753,8 @@ def main() -> None:
     today, sports = filter_bar(data, today)
     data = scope_to_sports(data, sports)
 
-    {"Today": page_today, "Progress": page_progress,
-     "Plan": page_plan, "Log": page_log}[page](data, today)
+    {"Today": page_today, "Progress": page_progress, "Plan": page_plan,
+     "Lifetime": page_lifetime, "Log": page_log}[page](data, today)
 
 
 main()

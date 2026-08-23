@@ -982,8 +982,9 @@ class Store:
         return self._upsert("personal_records", rows, "type_id")
 
     def personal_records(self) -> list[dict[str, Any]]:
+        # A zero is Garmin saying "no record of this kind", not a record of zero.
         return self.query(
-            "SELECT * FROM personal_records WHERE value IS NOT NULL"
+            "SELECT * FROM personal_records WHERE value IS NOT NULL AND value > 0"
             " ORDER BY sport, type_id")
 
     # -- AI notes, written at sync time and read on render ---------------
