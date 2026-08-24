@@ -65,16 +65,45 @@ available, free text) and weekly targets per sport.
 
 ## What it tells you
 
+- **Heart rate at your usual pace** — the headline. Each session's efficiency
+  expressed as the heart rate it implies at your median pace, so sessions of
+  different speeds are comparable and a falling line is unambiguous progress
 - **Efficiency factor** per sport — speed or watts per heartbeat — trended over
   *steady aerobic sessions only*, because mixing in intervals makes the trend
   track how hard you trained rather than how fit you are
-- **Aerobic drift** on long sessions: efficiency in the second half versus the first
-- **Where your effort actually goes** — the easy/moderate/hard split, against a
-  base-phase target of 70%+ easy
+- **Aerobic drift**, two ways: efficiency in the second half of a long session
+  versus the first, and — for sessions too short to halve — heart rate across
+  laps held at the same pace, which is the version that works from week one
+- **Where your effort actually goes** — the easy/moderate/hard split against a
+  base-phase target of 70%+ easy, recounted from your own stored samples so it
+  follows *your* aerobic ceiling rather than Garmin's fixed zone 2
+- **Whether the mix is drifting** — the same split week by week, because a base
+  block slides into accidental tempo work a few minutes at a time
+- **The load ramp** — daily load with its 7-day and 28-day averages and the
+  ratio between them, because a single acute:chronic number cannot say which way
+  it is moving
+- **Cadence and stride**, ground contact and vertical ratio, against the
+  overstriding threshold
+- **Heat** — heart rate at a reference pace against dew point, so a bad session
+  in humidity is read as weather rather than lost fitness
 - **Whether the engine is improving** — resting HR and HRV baselines, 28 days
-  against the 28 before
-- **A plan for the rest of the week** that responds to recovery data, and a
-  plain-English summary of every page so you needn't read the charts
+  against the 28 before, plus Garmin's own race predictions plotted as pace
+- **Showing up** — sixteen weeks as a calendar, because endurance is mostly an
+  attendance problem and a gap is invisible in a line chart
+- **A plan for the rest of the week** that responds to recovery data, a
+  plain-English summary at the top of every page, a sentence under every chart,
+  and a coach you can ask a question in your own words
+
+## The pages
+
+| Page | Answers |
+| --- | --- |
+| **Today** | What do I do now — the session, a written reading, this week at a glance, and a coach you can ask |
+| **Progress** | Is it working — heart rate at pace, intensity mix, load ramp, cadence, drift, heat |
+| **Plan** | The week — check in, see it, edit any row, send it to the watch |
+| **Rules** | Your settings — session floors, growth cap, deload cadence, zones, weekly targets, and the limits you cannot move |
+| **Lifetime** | How far you have come — totals, race predictions, records, every day you showed up |
+| **Log** | The record — sessions and splits, leg work, raw tables, and the app's own errors |
 
 ## How it works
 
@@ -115,6 +144,7 @@ flowchart TD
     subgraph UI["app/ — thin, no logic"]
         SA["streamlit_app.py"]
         UIM["ui.py<br/>design system"]
+        FR["freshness.py<br/>survive a deploy"]
     end
 
     subgraph CORE["core/ — pure Python, no Streamlit"]
@@ -125,17 +155,23 @@ flowchart TD
         AN["analysis.py<br/>deterministic maths"]
         PL["planner.py<br/>facts + rules + enforce"]
         STR["strength.py<br/>closed exercise library"]
+        RU["rules.py<br/>the editable half<br/>of the envelope"]
         AI["ai.py<br/>the only module<br/>that knows an LLM"]
         AU["auth.py<br/>read + write PINs"]
+        AL["applog.py<br/>errors into the database"]
+        SI["strava_import.py<br/>history, walled off<br/>from the AI"]
     end
 
     EXT["Gemini / Groq"]
 
-    SA --> ST & AN & PL & GW & AU
+    SA --> ST & AN & PL & GW & AU & AL
+    FR -.->|"reload after a deploy"| SA
     GC --> GG
     GC --> ST
+    SI --> ST
     PL --> AN
     PL --> STR
+    PL --> RU
     PL --> AI
     AI -.->|"JSON in, JSON out"| EXT
     AI -.->|"answer re-checked<br/>by planner.enforce()"| PL
@@ -174,10 +210,21 @@ when the numbers no longer support it.
 Three layers, in this order:
 
 1. **Facts** — deterministic analysis of what you actually did (`core/analysis.py`)
-2. **Rules envelope** — the non-negotiables: 10%/week volume cap, deload every
-   fourth week or whenever recovery says so, session counts, required long
-   sessions, minimum rest days, and where leg strength may be placed
-   (`core/planner.py`)
+2. **Rules envelope** — the non-negotiables: volume cap, deload cadence, session
+   counts, required long sessions, minimum rest days, endurance sessions spaced a
+   day apart, and where leg strength may be placed (`core/planner.py`)
+
+   Half of those are the athlete's to set, and visible on the Rules page:
+   endurance sessions a week, leg sessions, rest days, the growth cap, weeks per
+   block, the deload cut, brick frequency, spacing on or off. They live in
+   `core/rules.py`, stored one key per rule and clamped to a sane range on the way
+   in — because a settings page is a very good way to talk yourself into a 40%
+   jump.
+
+   The other half is not, and the page says so: the deload triggers (HRV below
+   baseline, resting HR above it, readiness under 35, load ratio over 1.3), the
+   fixed exercise library, the hard-session cap, no plyometrics in base. "You
+   cannot change this" is itself information.
 3. **The AI** — adjusts inside that envelope and explains each choice
    (`core/ai.py`)
 
@@ -191,6 +238,30 @@ that none of it survives.
 Nothing under `core/` imports Streamlit, and only `core/ai.py` knows a language
 model exists. That is what makes the training logic testable at all — the
 guardrail suite drives the planner directly, with no UI in the way.
+
+## What goes back to the watch
+
+The plan is not a suggestion you then re-enter by hand:
+
+- **Runs and rides** are pushed as timed workouts with your heart-rate range
+  attached, so the watch holds you to the ceiling you set
+- **Leg sessions** are pushed with every exercise, set, rep, hold and weight,
+  named — which matters because the watch counts reps well and usually does not
+  know which exercise it is watching. Every Garmin exercise name in the mapping
+  was verified by uploading a workout and reading it back: a name Garmin does not
+  recognise is silently blanked, and the watch then shows the bare category, so a
+  tibialis raise displayed as "Calf raise" — the muscle it exists to balance
+- **Finished sessions are removed**, from the saved list *and* the training
+  calendar, because a workout is pushed most days and Garmin keeps every one of
+  them until something deletes it
+- **Swims and bricks stay off the watch** — a Garmin swim workout is built from
+  pool length and stroke rather than minutes, and wrist heart rate in water is
+  not reliable enough to hold you to
+
+Sets come back on the next sync, mapped into the exercise library, and the
+weights progress from what was actually logged. Where the watch could not name a
+set, the Log page lets you assign it, and that assignment survives every later
+re-import.
 
 ## Running it
 
@@ -355,8 +426,12 @@ pip install -r requirements-dev.txt
 python -m pytest tests -q
 ```
 
-60 tests: guardrails, analysis maths, the rate guard, PIN security, and the
-SQLite→Postgres dialect translation.
+240 tests, and the ones worth knowing about are not the maths: the guardrail
+suite drives `planner.enforce()` with a deliberately reckless plan and asserts
+none of it survives, and there are separate suites for the rate guard, PIN
+security, the SQLite→Postgres dialect translation, the Strava importer's
+timezone and duplicate handling, the week strip's markup, and the stale-module
+guard that keeps a hosted container from serving code it no longer has.
 
 ## Documentation
 

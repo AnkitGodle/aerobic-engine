@@ -1234,6 +1234,27 @@ class Store:
         "plans", "weekly_targets", "ai_notes",
     )
 
+    def data_stamp(self) -> str:
+        """A cheap fingerprint of the stored data, for cache invalidation.
+
+        The dashboard used to key its cache on `last_sync` alone, which is only
+        written by a Garmin sync. Anything else that changes the data — importing
+        a Strava export, re-mapping exercise sets, a fix applied from a script —
+        left the key untouched, so a running dashboard kept serving what it had
+        cached before. That is how the About page came to say six sessions while
+        the database held fifty-five.
+
+        Three scalars in one query: the sync marker, how many activities there
+        are, and when the newest row was written. Between them they move for any
+        write worth re-reading.
+        """
+        row = dict(self.execute(
+            "SELECT (SELECT value FROM sync_state WHERE key = 'last_sync') AS synced,"
+            " (SELECT COUNT(*) FROM activities) AS rows,"
+            " (SELECT MAX(ingested_at) FROM activities) AS newest"
+        ).fetchone() or {})
+        return f"{row.get('synced') or ''}|{row.get('rows') or 0}|{row.get('newest') or ''}"
+
     def counts(self) -> dict[str, int]:
         """Row counts for every table, in a single round trip.
 

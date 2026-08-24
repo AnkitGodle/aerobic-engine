@@ -199,14 +199,16 @@ def db_stamp() -> float:
     """Cache key for load(): must change whenever the data could have."""
     target = db_path()
     if is_postgres(target):
-        # A remote database has no mtime, so the sync marker stands in. One
-        # cheap query per rerun, and unlike a constant it also notices a sync
-        # run from the command line rather than from this page.
+        # A remote database has no mtime, so a fingerprint of the data stands in:
+        # the sync marker, the activity count and the newest ingest time. One
+        # cheap query per rerun. The marker alone was not enough — it only moves
+        # on a Garmin sync, so importing history or repairing rows from a script
+        # left every open dashboard serving what it had already cached.
         try:
-            marker = with_store(lambda s: s.get_state("last_sync")) or ""
+            marker = with_store(lambda s: s.data_stamp()) or ""
             return float(zlib.crc32(marker.encode("utf-8")))
         except Exception:  # noqa: BLE001 - a dead cache key beats a dead page
-            log.warning("could not read the sync marker for the cache key")
+            log.warning("could not read the data stamp for the cache key")
             return 0.0
     p = Path(target)
     return p.stat().st_mtime if p.exists() else 0.0
@@ -2758,141 +2760,179 @@ def page_lifetime(data: dict, today: date) -> None:
         chart_ai_note("lifetime_recovery", data.get("notes"))
 
 
-def page_about(data: dict, today: date) -> None:
-    """Short, plain, and honest about what it does.
+def page_about(data: dict, today: date) -> None:  # noqa: ARG001
+    """What this is, in the order someone actually asks it.
 
-    An earlier version listed every rule and every limit, which read as
-    documentation for the code rather than an answer to "what is this". This
-    leads with the loop the athlete actually lives in and keeps the caveats to
-    the ones that change what they would do.
+    Restructured once already: it used to answer "what may the AI do" twice, in
+    two tables that disagreed about wording, and hid the page tour in the middle
+    where nobody arriving for the first time would look. It now goes what it is,
+    the loop, where things are, then the detail — and the caveats stay where they
+    change what you would do.
     """
     # No brand block here: the sticky header already carries the name, and
     # printing it twice on the one page that talks about the app looks like a
     # mistake.
+    ceiling = data.get("aerobic_ceiling")
+    ceiling_txt = f"{int(float(ceiling))} bpm" if ceiling else "your own ceiling"
+    # Unfiltered on purpose: this page describes the app, not the current view.
+    counts = data.get("counts_all") or data.get("counts") or {}
+
     st.markdown(
         "### AI plans your week. The plan goes to your watch.\n\n"
         "Your watch collects the data. This reads it, works out whether your "
-        "fitness is rising while your heart rate falls, and builds the week "
-        "that follows — swim, bike, run and leg strength, together."
+        "fitness is rising while your heart rate falls, and builds the week that "
+        "follows — swim, bike, run and leg strength as one plan, not four apps. "
+        "Then it sends each session back to the watch, and reads what you "
+        "actually did."
     )
 
     ui.figures([
         {"label": "It plans", "value": "4 sports",
-         "note": "as one week, not four apps"},
+         "note": "as one week, together"},
         {"label": "It sends", "value": "to your watch",
-         "note": "runs, rides and leg sessions"},
-        {"label": "It targets", "value": "your bpm",
-         "note": "your ceiling, not Garmin's"},
-        {"label": "It checks", "value": "in code",
-         "note": "every limit, after the AI answers"},
+         "note": "named sets, or a bpm range"},
+        {"label": "Easy means", "value": ceiling_txt,
+         "note": "your number, not Garmin's"},
+        {"label": "Every limit", "value": "checked in code",
+         "note": "after the model answers"},
+        {"label": "On record", "value": f"{counts.get('activities', 0)} sessions",
+         "note": f"{counts.get('daily_wellness', 0)} days of recovery data, "
+                 f"Garmin and imported history together"},
     ])
 
-    ui.section("The loop")
+    ui.section("The loop", "Five steps, all of which already work.")
     ui.rows([
         ("1. It plans the week", "AI",
          "inside limits it is not allowed to cross"),
         ("2. You send it to the watch", "one tap",
          "named exercises, or a heart-rate range"),
         ("3. You train", "the watch guides",
-         "it buzzes if you drift out of the range"),
+         "it buzzes when you drift out of the range"),
         ("4. It reads what happened", "on Refresh",
-         "and rebuilds the rest of the week, and clears the done session off "
-         "the watch"),
+         "marks the session done, rebuilds the rest of the week, and clears the "
+         "finished workout off the watch"),
         ("5. You ask it anything", "Ask the coach",
-         "answered from your own numbers, on the Today page"),
+         "answered from your own numbers, on Today"),
     ])
 
-    ui.section("What the AI is allowed to do",
-               "Worth being precise about, because the limits are the product.")
+    ui.section("Where things are", "Six pages, in the order you would use them.")
     ui.rows([
-        ("Adjust the week", "yes",
-         "volume, intensity and which day — inside the envelope"),
-        ("Write the reasons", "yes", "one line per session, in plain language"),
-        ("Read a chart for you", "yes",
-         "a sentence under each one, so charts are optional"),
-        ("Answer a question", "yes",
-         "from your stored sessions, signals and plan — nothing else"),
-        ("Exceed the volume cap", "no", "re-checked in code after it answers"),
-        ("Overrule a deload", "no", "recovery data decides that, not mood"),
-        ("Invent an exercise", "no", "the strength library is fixed"),
+        ("Today", "what to do now",
+         "the session, a written reading, this week at a glance, and a coach you "
+         "can ask"),
+        ("Progress", "is it working",
+         "heart rate at your usual pace, intensity mix, load ramp, cadence, "
+         "aerobic drift, heat"),
+        ("Plan", "the week",
+         "check in, see the week, edit any row, send it to the watch"),
+        ("Rules", "your settings",
+         "session floors, growth cap, deload cadence, zones, targets — and the "
+         "limits you cannot move"),
+        ("Lifetime", "how far you have come",
+         "totals, race predictions, records, and every day you showed up"),
+        ("Log", "the record",
+         "sessions and splits, leg work, raw tables, and the app's own errors"),
     ])
 
-    ui.section("What goes to the watch")
+    ui.section("What goes to the watch",
+               "On the watch: START → the sport → pick the session.")
     st.markdown(
         "- **Runs and rides** — timed, with your heart-rate range attached. The "
         "watch holds you to it, which is the whole point of setting a ceiling.\n"
         "- **Leg sessions** — every exercise, set, rep, hold and weight, named. "
-        "Sets come back matched, and the weights move up on their own.\n"
+        "Sets come back matched to the exercise, and the weights move up on "
+        "their own.\n"
+        "- **Nothing lingers.** Once a session is logged, the next sync takes it "
+        "off the watch and off the Garmin calendar, so START offers tomorrow's "
+        "session rather than a fortnight of history.\n"
         "- **Swims and bricks stay off the watch.** Garmin builds swim workouts "
         "from pool length and stroke rather than minutes, and wrist heart rate "
         "in water is not reliable enough to hold you to."
     )
-    st.markdown("On the watch: **START → the sport → pick the session.**")
 
-    ui.section("Why not just use Garmin?",
-               "Garmin's numbers are good. This does the part it does not.")
+    ui.section("What the AI may and may not do",
+               "Worth being precise about, because the limits are the product.")
     ui.rows([
-        ("Your watch has no triathlon coach", "so", "nothing plans four sports"),
-        ("Garmin's easy zone is fixed", "so",
-         "yours is 137 bpm, and every target follows it"),
-        ("Garmin logs strength", "but", "it does not decide the weights"),
-        ("Garmin shows the weather", "but", "it does not say a humid day "
-                                            "explains your heart rate"),
-        ("Garmin waits 28 days for a trend", "this", "answers in about two"),
-    ])
-
-    ui.section("Where things are",
-               "Six pages, in the order you would use them.")
-    ui.rows([
-        ("Today", "what to do now",
-         "the session, a written reading, and a coach you can ask"),
-        ("Progress", "is it working",
-         "heart rate at your usual pace, intensity mix, load ramp, drift"),
-        ("Plan", "the week", "check in, see the week, edit it, send it"),
-        ("Rules", "the settings",
-         "session floors, growth cap, deload cadence, zones and targets"),
-        ("Lifetime", "how far you have come",
-         "totals, race predictions, records, and every day you showed up"),
-        ("Log", "the record", "sessions, leg work, raw tables, and app errors"),
-    ])
-
-    ui.section("What the AI is not allowed to do",
-               "It writes and it places sessions. It does not do the arithmetic.")
-    ui.rows([
-        ("Invent an exercise", "blocked", "it picks from a fixed 22"),
-        ("Cancel an easy week", "blocked", "your recovery data decides"),
-        ("Add more than 10% volume", "blocked", "that is how injuries start"),
-        ("Choose a heart-rate number", "blocked", "those come from your zones"),
-        ("Set how much weight", "blocked", "one rep, then one step"),
+        ("Adjust volume, intensity and which day", "yes",
+         "inside the envelope the rules set"),
+        ("Write the reason for each session", "yes", "one line, plain language"),
+        ("Read a chart for you", "yes",
+         "a sentence under each one, so the charts are optional"),
+        ("Answer a question about your data", "yes",
+         "from your sessions, signals and plan — nothing else"),
+        ("Exceed the weekly volume cap", "no",
+         "re-checked in code after it answers"),
+        ("Overrule a deload", "no", "your recovery data decides that, not mood"),
+        ("Invent an exercise", "no", "it picks from a fixed 22"),
+        ("Choose a heart-rate number", "no", "those come from your own zones"),
+        ("Decide how much weight", "no", "one rep, then one step, when clean"),
     ])
     st.caption(
         "A model asked how your training should go will agree with you — say you "
         "feel strong and it offers a bigger week, say you are tired and it "
         "cancels one. So every limit is re-checked in code after it answers, and "
-        "the plan says ai_repaired when that changed something."
+        "the plan is marked ai_repaired when that changed something. Your own "
+        "edits outrank both: a week you save by hand is kept exactly as entered."
     )
 
-    ui.section("Logging your leg sessions", "Two ways.")
+    ui.section("Logging your leg sessions",
+               "Any of three ways, but do one of them.")
     st.markdown(
         "**Send it from Today**, then on the watch **START → Strength → pick "
         "it**. Reps are counted for you and every set arrives named.\n\n"
         "**Or record it yourself:** START → Strength → lift → save. Turn on rep "
         "counting and rest detection in that activity's settings first. Sets "
         "arrive counted but sometimes unnamed, and the Log page lets you assign "
-        "them.\n\n"
-        "**Or by hand** on the Log page, if you forgot the watch entirely.\n\n"
-        "Either way, record it somehow. A leg session the watch never saw counts "
-        "as a rest day, and then tomorrow's readiness — and this plan — are "
-        "built on a week that did not happen."
+        "them — an assignment sticks, and nothing derived overwrites it.\n\n"
+        "**Or by hand** on the Log page, if the watch never came.\n\n"
+        "A leg session the watch never saw counts as a rest day, and then "
+        "tomorrow's readiness — and this plan — are built on a week that did not "
+        "happen."
     )
+
+    with st.expander("Why not just use Garmin?"):
+        st.caption("Garmin's numbers are good. This does the parts it does not.")
+        ui.rows([
+            ("Your watch has no triathlon coach", "so",
+             "nothing plans four sports"),
+            ("Garmin's easy zone is fixed", "so",
+             f"yours is {ceiling_txt}, and every target follows it"),
+            ("Garmin logs strength", "but", "it does not decide the weights"),
+            ("Garmin shows the weather", "but",
+             "it does not say a humid day explains your heart rate"),
+            ("Garmin waits 28 days for a trend", "this",
+             "answers in about two"),
+            ("Garmin keeps every workout you send", "this",
+             "removes the ones you have done"),
+        ])
+
+    with st.expander("Where the numbers come from"):
+        st.caption("All of it is your own data, pulled once and kept.")
+        ui.rows([
+            ("Sessions, streams, zones", "Garmin",
+             "heart rate downsampled per session, so drift can be recomputed"),
+            ("Recovery", "Garmin",
+             "resting heart rate, overnight HRV, readiness, sleep, battery"),
+            ("Splits and weather", "Garmin",
+             "per-lap pace and heart rate; temperature and dew point"),
+            ("Leg sessions", "the watch's strength mode",
+             "sets mapped into the exercise library and logged"),
+            ("History before the watch", "a Strava export",
+             "imported once, and kept out of the planner and every AI prompt"),
+            ("How you feel", "you",
+             "sleep, soreness, motivation, time, free text"),
+        ])
 
     ui.section("Straight answers")
     st.markdown(
         "- **Your real easy limit** is whatever heart rate you can still talk in "
         "full sentences at. No watch knows that; the number here is a starting "
-        "point you can change.\n"
+        "point you can change on the Rules page.\n"
         "- **Efficiency needs three steady sessions per sport** before it means "
-        "anything. Until then it says how many more you need.\n"
+        "anything. Until then it says how many more you need rather than drawing "
+        "a trend through two points.\n"
+        "- **A missing session is worse than a bad one.** An unlogged week makes "
+        "every number that follows it wrong, and the plan with them.\n"
         "- **Not medical advice.** Tendon pain that keeps coming back is a "
         "physio, not a training problem."
     )
@@ -2900,9 +2940,14 @@ def page_about(data: dict, today: date) -> None:
     ui.section("Your data")
     ui.rows([
         ("Where it lives", "one database", "shared with nobody"),
-        ("Garmin sign-in", "never from the web", "a saved session, copied by hand"),
-        ("Changing anything", "needs your PIN", "stored scrambled, never as text"),
-        ("Reading", "open if you share the link", "closeable with a second PIN"),
+        ("Garmin sign-in", "never from the web",
+         "a saved session, copied across by hand"),
+        ("Changing anything", "needs your PIN",
+         "stored scrambled, never as text"),
+        ("Reading", "open if you share the link",
+         "closeable with a second PIN"),
+        ("When something breaks", "written down",
+         "errors land in the database and read back on the Log page"),
     ])
     st.markdown(
         "Code: [github.com/AnkitGodle/aerobic-engine]"
@@ -2912,9 +2957,12 @@ def page_about(data: dict, today: date) -> None:
     ui.link_chips(PROFILE_LINKS)
     if STRAVA_PROFILE_URL:
         st.caption(
-            "Links only. Nothing is read from Strava and nothing is sent to "
-            "it: their API terms forbid using their data with a language model, "
-            "and the planning here is one. Garmin remains the single source.")
+            "Links only. Nothing is read from Strava and nothing is sent to it: "
+            "their terms forbid using their data with a language model, and the "
+            "planning here is one. The one exception is a bulk export you "
+            "download yourself, imported once for the history before the watch — "
+            "and even that is kept away from the AI. Garmin is the live source."
+        )
     st.caption(
         "Built on the unofficial Garmin Connect API for personal use. Not "
         "connected to Garmin. Not medical advice."
@@ -3579,7 +3627,8 @@ def scope_to_sports(data: dict, sports: list[str]) -> dict:
     """
     st.session_state["scope"] = list(sports or FILTER_SPORTS)
     if not sports or set(sports) >= set(FILTER_SPORTS):
-        return dict(data, scoped_to=list(FILTER_SPORTS))
+        return dict(data, scoped_to=list(FILTER_SPORTS),
+                counts_all=dict(data["counts"]))
     keep = set(sports)
     # A brick counts as both its parts, so it survives a bike-only or run-only
     # filter rather than vanishing from the record.
@@ -3587,7 +3636,7 @@ def scope_to_sports(data: dict, sports: list[str]) -> dict:
         keep.add("brick")
 
     scoped = dict(data)
-    for key in ("activities", "all_activities"):
+    for key in ("activities", "all_activities", "history"):
         scoped[key] = [a for a in data.get(key) or [] if a.get("sport") in keep]
     ids = {a.get("activity_id") for a in scoped["all_activities"]}
     scoped["zones"] = [z for z in data.get("zones") or []
@@ -3599,6 +3648,10 @@ def scope_to_sports(data: dict, sports: list[str]) -> dict:
         scoped["sets"] = [x for x in data.get("sets") or []
                           if x.get("activity_id") in ids or not x.get("activity_id")]
     scoped["counts"] = dict(data["counts"], activities=len(scoped["activities"]))
+    # The whole record, kept alongside the filtered view. The About page is
+    # describing the app rather than this view of it, and "6 sessions on record"
+    # under a filter that hides two sports is simply wrong there.
+    scoped["counts_all"] = dict(data["counts"])
     # The stored plan was built when the filter may have been wider, so filter it
     # for display too — otherwise a run-and-bike dashboard still lists a swim.
     plan = data.get("plan")

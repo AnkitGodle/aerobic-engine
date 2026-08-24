@@ -201,3 +201,15 @@ def test_imported_history_does_not_move_the_sync_watermark(tmp_path):
     assert store.latest_activity_start() == datetime(2026, 8, 20, 18, 0, 0)
     assert store.earliest_activity_date().isoformat() == "2026-08-20"
     store.close()
+
+
+def test_an_import_changes_the_dashboards_cache_key(tmp_path):
+    """The dashboard keys its cache on a fingerprint of the data. Keyed on the
+    sync marker alone, an import left every open page serving what it had
+    already cached — which is how About came to say six sessions while the
+    database held fifty-five."""
+    store = Store(str(tmp_path / "db.sqlite"))
+    before = store.data_stamp()
+    si.import_export(store, _archive(tmp_path, [_row()]))
+    assert store.data_stamp() != before
+    store.close()
