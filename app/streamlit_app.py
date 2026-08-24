@@ -2228,8 +2228,14 @@ def sidebar(data: dict) -> None:
             f'<div class="ic-sidebrand-name">Aerobic Engine</div></div>',
             unsafe_allow_html=True)
         st.subheader(data["name"] or "Athlete", anchor=False)
-        st.caption(f"{data['counts']['activities']} activities · "
-                   f"{data['counts']['daily_wellness']} days of wellness")
+        ui.rows([
+            ("Watch", "Forerunner 265"),
+            ("Phase", "Base"),
+            ("Last synced",
+             (data["last_sync"] or "never")[:16].replace("T", " ")),
+            ("On record", f"{data['counts']['activities']} activities",
+             f"{data['counts']['daily_wellness']} days"),
+        ])
         st.divider()
         unlock_control()
         sync_control()
@@ -2317,7 +2323,11 @@ def header_controls(data: dict, today: date) -> tuple[str, date, list[str]]:
     # brand's own vertical block is the whole page, so sticking that would pin
     # everything.
     with st.container(key="topbar"):
-        ui.brand("Aerobic Engine", data["subtitle"])
+        # Name only. Who the athlete is, which watch, which phase and when it
+        # last synced are all reference detail — true, rarely needed, and they
+        # were costing a wrapped line at the top of every page. They live in the
+        # sidebar now.
+        ui.brand("Aerobic Engine")
 
         # The filters live in a popover rather than laid out beside the tabs.
         # Column ratios only ever "fit" a window you happened to test: a week
@@ -2551,10 +2561,6 @@ def main() -> None:
         return
 
     sidebar(data)
-    data["subtitle"] = (
-        (f"{data['name']} · " if data["name"] else "")
-        + "Garmin Forerunner 265 · base phase · synced "
-        + (data["last_sync"] or "never")[:16].replace("T", " "))
     page, today, sports = header_controls(data, today)
 
     # Re-check the stored plan against the current rules here rather than in each

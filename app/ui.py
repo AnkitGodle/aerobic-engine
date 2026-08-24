@@ -167,11 +167,40 @@ CSS = """
     :root { --ic-page: #0e1117; }
   }
 
-  .ic-brand { display: flex; align-items: center; gap: .7rem;
-              margin: 0 0 .35rem; padding-top: .1rem; }
+  /* Phones. Measured at 390x844 before this: the bar was 420px, half the
+     viewport, with the title wrapping, the subtitle wrapping under it and six
+     tabs wrapping onto three rows. Content did not start until 472px.
+
+     Four changes, in order of how much they buy: the bar stops being sticky
+     (half a phone screen permanently spent on navigation is not a trade worth
+     making when scrolling back up is one flick), the subtitle is hidden as
+     reference detail that belongs on About, the tabs become one horizontally
+     scrollable row instead of three stacked ones, and the title and logo shrink. */
+  @media (max-width: 700px) {
+    .stMain [data-testid="stLayoutWrapper"]:has(> .st-key-topbar) {
+        position: static; padding: .1rem 0 .35rem; margin-bottom: .6rem; }
+    .ic-brand-sub { display: none; }
+    .ic-brand { gap: .5rem; margin-bottom: .25rem; }
+    .ic-brand svg { width: 26px; height: 26px; }
+    .ic-brand-name { font-size: 1.15rem; }
+    /* One row that scrolls, rather than three that stack. */
+    .st-key-topbar [data-testid="stButtonGroup"] {
+        display: flex; flex-wrap: nowrap; overflow-x: auto;
+        scrollbar-width: none; }
+    .st-key-topbar [data-testid="stButtonGroup"]::-webkit-scrollbar {
+        display: none; }
+    .st-key-topbar [data-testid="stButtonGroup"] button { flex: 0 0 auto; }
+    .block-container { padding-left: .9rem; padding-right: .9rem; }
+    /* Figures read as a two-up grid on a phone; five across is unreadable. */
+    .ic-fig { flex: 1 1 44%; min-width: 44%; }
+  }
+
+  .ic-brand { display: flex; align-items: center; gap: .55rem;
+              margin: 0 0 .3rem; }
+  .ic-brand svg { width: 26px; height: 26px; }
   .ic-brand svg { flex: 0 0 auto; opacity: .95; }
-  .ic-brand-name { font-size: 1.5rem; font-weight: 680; line-height: 1.3;
-                   letter-spacing: -.01em; padding-top: .05rem; }
+  .ic-brand-name { font-size: 1.22rem; font-weight: 680; line-height: 1.25;
+                   letter-spacing: -.01em; }
   .ic-brand-sub { font-size: .8rem; opacity: .58; margin-top: .12rem; }
   .ic-sidebrand { display: flex; align-items: center; gap: .55rem;
                   margin: 0 0 .5rem; }
@@ -293,7 +322,12 @@ def logo(size: int = 34) -> str:
 
 
 def brand(title: str, subtitle: str = "") -> None:
-    """Mark and wordmark together, for the top of the page."""
+    """Mark and wordmark, sized to sit level with Streamlit's toolbar buttons.
+
+    The subtitle is optional and normally unused: reference detail at the top of
+    every page wrapped onto a second line and pushed the content down, so it
+    moved to the sidebar.
+    """
     st.markdown(
         f'<div class="ic-brand">{logo(38)}'
         f'<div><div class="ic-brand-name">{esc(title)}</div>'
