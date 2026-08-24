@@ -706,3 +706,49 @@ def test_swims_and_bricks_are_refused_rather_than_mangled():
     for sport in ("swim", "brick", "strength"):
         with pytest.raises(ValueError):
             garmin_workout.build_endurance(sport, 30, "112-137 bpm", "x")
+
+
+def test_a_hand_edited_week_can_be_saved(healthy):
+    """The Plan page's "Save my plan" wrote source="manual", which the schema
+    never listed — so every attempt to save an edited week raised a
+    ValidationError instead of saving it."""
+    from core.schemas import PlanDay, WeekPlan
+
+    mine = WeekPlan(
+        week_plan=[PlanDay(day="Mon", sport="bike", duration_min=60)],
+        source="manual", flags=["Your own plan — the rules were not applied."])
+    assert mine.source == "manual"
+    # It has to survive the round trip through the database as well.
+    assert WeekPlan.model_validate(mine.model_dump(mode="json")).source == "manual"
+
+
+def test_an_unknown_source_is_still_refused():
+    import pytest
+    from pydantic import ValidationError
+
+    from core.schemas import WeekPlan
+
+    with pytest.raises(ValidationError):
+        WeekPlan(source="whatever-the-model-said")
+
+
+def test_a_hand_edited_week_is_left_exactly_as_saved(healthy):
+    """Everything else gets pushed back through enforce() on every page load. A
+    manual week does not: the button promises what you entered is what you get,
+    and its own flag records that the rules were not applied."""
+    from core import planner
+    from core.schemas import PlanDay, WeekPlan
+
+    # Deliberately reckless: three sessions on one day, Z5 in a base week.
+    mine = WeekPlan(
+        week_plan=[PlanDay(day="Sat", sport="run", duration_min=95,
+                           target_zone="Z5"),
+                   PlanDay(day="Sat", sport="bike", duration_min=180,
+                           target_zone="Z4"),
+                   PlanDay(day="Sat", sport="swim", duration_min=60)],
+        source="manual")
+    after, changed = planner.reapply_rules(healthy, mine.model_dump(mode="json"),
+                                          today=TODAY)
+    assert changed is False
+    assert [d.duration_min for d in after.week_plan] == [95, 180, 60]
+    assert [d.target_zone for d in after.week_plan] == ["Z5", "Z4", "Z2"]

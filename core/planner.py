@@ -1480,6 +1480,13 @@ def reapply_rules(
     ceiling = int(float(ceiling_raw)) if ceiling_raw else None
 
     before = WeekPlan.model_validate(plan)
+    # A week the athlete edited by hand is left exactly as they saved it. The
+    # button that writes it says so, and enforce() would quietly move the
+    # sessions they had just moved. Its flags already record that the rules were
+    # not applied, so nothing is hidden — this is the one plan the rules do not
+    # own, and the athlete asked for it explicitly.
+    if before.source == "manual":
+        return before, False
     after = enforce(before, facts, envelope, store.strength_log(),
                     zone_bounds_map=bounds, aerobic_ceiling=ceiling)
 

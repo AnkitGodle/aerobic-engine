@@ -217,7 +217,8 @@ class WeekPlan(BaseModel):
     week_plan: list[PlanDay] = Field(default_factory=list)
     flags: list[str] = Field(default_factory=list)
     adjustments_made: list[str] = Field(default_factory=list)
-    source: Literal["rules", "ai", "ai_repaired"] = "rules"
+    # "manual" is the athlete's own edited week, saved from the Plan page.
+    source: Literal["rules", "ai", "ai_repaired", "manual"] = "rules"
 
     def minutes(self) -> float:
         return float(sum(d.duration_min for d in self.week_plan))
