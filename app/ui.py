@@ -293,6 +293,19 @@ CSS = """
   .ic-day.slipped { border-left: 3px solid var(--ic-caution); }
   .ic-strip-key { font-size: .74rem; opacity: .55; margin: -.5rem 0 1rem; }
 
+  /* A link that leaves the app. Deliberately not st.link_button, which is
+     styled as a form control and so reads like something that changes state
+     here. The brand colour carries it. */
+  /* !important on the underline only: Streamlit styles links inside its own
+     markdown containers with a more specific selector, so the chip arrived
+     underlined and read as body text with a border round it. */
+  a.ic-linkchip, a.ic-linkchip:hover, a.ic-linkchip:visited {
+      display: inline-flex; align-items: center; gap: .4rem;
+      border: 1px solid currentColor; border-radius: 999px;
+      padding: .3rem .75rem; font-size: .84rem; font-weight: 600;
+      text-decoration: none !important; margin: .1rem 0 .35rem; }
+  a.ic-linkchip:hover { filter: brightness(1.08); }
+
   /* Chart panels */
   .ic-card-title { font-size: .93rem; font-weight: 620; letter-spacing: -.01em;
                    margin: 0 0 .15rem; }
@@ -476,6 +489,20 @@ def rows(items: list[tuple]) -> None:
         )
     st.markdown(f'<div class="ic-rows">{"".join(out)}</div>',
                 unsafe_allow_html=True)
+
+
+def link_chip(label: str, url: str, color: str = "#FC5200") -> None:
+    """An outbound link, styled as a chip in the destination's own colour.
+
+    `target="_blank"` with `rel="noopener noreferrer"`: the app sits behind a PIN
+    and a new tab must not be handed a reference back to this one.
+    """
+    st.markdown(
+        f'<a class="ic-linkchip" style="color:{esc(color)}" '
+        f'href="{esc(url)}" target="_blank" rel="noopener noreferrer">'
+        f"{esc(label)} ↗</a>",
+        unsafe_allow_html=True,
+    )
 
 
 def banner(headline: str, body: str = "", tone: Tone = "neutral") -> None:

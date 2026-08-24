@@ -3305,6 +3305,10 @@ def sidebar(data: dict) -> None:
         # No logo or app name here: the top bar carries both, and a third copy
         # in the sidebar is just noise.
         st.subheader(data["name"] or "Athlete", anchor=False)
+        # At the top and in Strava's own colour: it is the one link out of
+        # the app, and buried at the foot of the sidebar nobody found it.
+        if STRAVA_PROFILE_URL:
+            ui.link_chip("Strava profile", STRAVA_PROFILE_URL)
         # Which store is in use, always visible. Neon is the real database and
         # the SQLite file is a local fallback, and the two cost a whole evening
         # once already: the CLI wrote to the file while the dashboard read Neon
@@ -3333,11 +3337,6 @@ def sidebar(data: dict) -> None:
         if st.button("Reload page data", width="stretch"):
             refresh()
             st.rerun()
-        if STRAVA_PROFILE_URL:
-            st.markdown(
-                f'<a href="{ui.esc(STRAVA_PROFILE_URL)}" target="_blank" '
-                f'rel="noopener noreferrer" style="font-size:.82rem">'
-                f'Strava profile ↗</a>', unsafe_allow_html=True)
         st.caption(f"AI: {os.getenv('AI_BACKEND', 'anthropic')} "
                    f"({'ready' if ai.available() else 'off'})")
         st.caption("Not medical advice. Persistent tendon pain is a physio visit.")
