@@ -7,6 +7,13 @@
 # carrying for the convenience of automatic updates.
 #
 # To upgrade: raise a pin, run the suite, look at the pages, commit.
+#
+# Streamlit Cloud keys its environment cache on this file, so editing it
+# forces a fresh install and a cold process start. That matters: a warm
+# container can re-execute the app script while still holding the previous
+# revision's `core` modules in sys.modules, and the app then fails on an
+# import of a function that exists in the checked-out source. Rebuild
+# marker: 2026-08-24.
 # Compatible releases (~=) rather than exact for patch-level fixes.
 
 garminconnect==0.3.2      # unofficial API; pinned hard, its shape moves
