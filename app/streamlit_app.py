@@ -1669,23 +1669,52 @@ def page_about(data: dict, today: date) -> None:
     ui.section("How to log a leg session",
                "Two ways. The first is better, and the difference matters.")
     st.markdown(
-        "**On the watch, as you train — do this one.**\n\n"
-        "1. Press the top-right button to open the activity list.\n"
-        "2. Choose **Strength**. Start it before your first set.\n"
-        "3. Lift. The watch counts reps and rest on its own — you do not need "
-        "to press anything between sets.\n"
-        "4. If it miscounts, press **lap** at the end of a set to close it "
-        "manually.\n"
-        "5. Stop and save when you finish. It syncs with your phone as usual.\n\n"
-        "Next time you press Refresh here, the session comes in by itself: the "
-        "exercises are matched to the ones in the plan, the sets and reps are "
-        "read off the watch, and the weights for next time move up from what you "
-        "actually did.\n\n"
+        "**Set the watch up once.** The exact wording moves between firmware "
+        "versions, so look for the setting rather than the exact path:\n\n"
+        "1. Press **START**, scroll to **Strength**, then hold **MENU**.\n"
+        "2. Open the activity settings and turn on **rep counting** and "
+        "**set/rest detection**. Rep counting is what makes this automatic; "
+        "rest detection is what closes one set and starts the next without you "
+        "touching the watch.\n"
+        "3. Wear the watch on the wrist as normal. Reps are counted from wrist "
+        "movement, so a very tight grip on a bar, or resting the wrist on a "
+        "bench, is what usually causes a miscount."
+    )
+    st.markdown(
+        "**Then, each session:**\n\n"
+        "1. **START** → **Strength** → start it before your first set.\n"
+        "2. Lift. Reps and rest are counted for you.\n"
+        "3. If a set gets miscounted, press **lap** to close it by hand.\n"
+        "4. Save at the end. It syncs with your phone as usual.\n\n"
+        "Next time you press Refresh here, the session comes in on its own: "
+        "sets and reps are read off the watch, matched to the exercises in the "
+        "plan, and next time's weights move up from what you actually did."
+    )
+    st.markdown(
+        "**One thing the watch cannot do:** it counts reps well but often does "
+        "not know *which* exercise you did, so sets can arrive unnamed. Two "
+        "fixes, either is fine:\n\n"
+        "- Name them in the Garmin Connect app after the session — open the "
+        "activity, tap a set, choose the exercise.\n"
+        "- Or build the session as a **workout** in Garmin Connect with the "
+        "exercises named in order and send it to the watch. Then the watch "
+        "knows what each set is while you do it, and everything arrives labelled.\n\n"
+        "Anything that still arrives unnamed shows up on the Log page for you "
+        "to assign. Unnamed sets are never guessed at: a set logged against the "
+        "wrong exercise would drive the wrong exercise's weights."
+    )
+    st.info(
+        "Not tested on your data yet — you have no strength sessions recorded "
+        "on the watch so far. The first one you log is also the first real test "
+        "of this path, so check the Log page afterwards and tell me if the sets "
+        "came through unnamed."
+    )
+    st.markdown(
         "**Why it is worth the extra taps:** a strength session logged on the "
-        "watch counts towards your training load, which is what Training "
-        "Readiness is built from. Do the work without recording it and the watch "
-        "thinks you rested, so the next day's readiness — and this app's plan — "
-        "are both built on a week that did not happen."
+        "watch counts towards your training load, and training load is what "
+        "Training Readiness is built from. Do the work without recording it and "
+        "the watch thinks you rested — so the next day's readiness, and this "
+        "app's plan, are both built on a week that did not happen."
     )
     st.markdown(
         "**By hand, on the Log page — for when you forgot.**\n\n"
