@@ -1493,134 +1493,6 @@ def page_plan(data: dict, today: date) -> None:
          "note": "allowed this week"},
     ])
 
-    with Store(db_path()) as _s:
-        bounds = zone_bounds(_s.zones())
-    if bounds:
-        with Store(db_path()) as _s:
-            lthr = _s.get_state("threshold_hr")
-            saved_ceiling = _s.get_state("aerobic_ceiling_bpm")
-        lthr_f = float(lthr) if lthr else None
-        opts = aerobic_ceiling_options(bounds, lthr_f)
-        ceiling = int(float(saved_ceiling)) if saved_ceiling else opts["garmin_z2_top"]
-
-        ui.section("Your heart-rate zones",
-                   "From Garmin, so they match the watch. Note Z5 starts exactly "
-                   "at your threshold heart rate — these zones are anchored to "
-                   "threshold, not to an estimated maximum.")
-        ui.stats_row([
-            {"label": f"Z{z}", "value": (f"{lo}–{hi}" if hi else f"{lo}+"),
-             "note": {1: "recovery", 2: "aerobic base", 3: "tempo",
-                      4: "threshold", 5: "VO2max"}.get(z, ""),
-             "tone": "good" if z == 2 else ("bad" if z >= 4 else "neutral")}
-            for z, (lo, hi) in sorted(bounds.items())
-        ])
-
-        if opts["candidates"]:
-            ui.section("What counts as easy for you",
-                       f"Garmin's Z2 ceiling is {opts['garmin_z2_top']} bpm — "
-                       f"{opts['garmin_z2_top'] / lthr_f * 100:.0f}% of your "
-                       f"{int(lthr_f)} bpm threshold, which is conservative next to "
-                       f"the common threshold-anchored schemes below. If Z2 feels "
-                       f"absurdly slow, you are probably right; set your own "
-                       f"ceiling and every Z2 target follows it.")
-            ui.stats_row([
-                {"label": c["label"], "value": f"{c['bpm']} bpm", "note": c["note"],
-                 "tone": "good" if c["bpm"] == ceiling else "neutral"}
-                for c in opts["candidates"]
-            ])
-            with st.form("ceiling"):
-                cc = st.columns([2, 1], vertical_alignment="bottom")
-                new_ceiling = cc[0].slider(
-                    "Your aerobic-base ceiling (bpm)",
-                    int(bounds[2][0]) + 5, int(lthr_f) - 5, int(ceiling),
-                    help="The real test is speech: the highest heart rate at which "
-                         "you can still talk in full sentences. Nothing in the "
-                         "data can tell you that, so this is your call.")
-                if cc[1].form_submit_button("Save ceiling", type="primary",
-                                           width="stretch",
-                                           disabled=not unlocked) and writes_allowed():
-                    with Store(db_path()) as _s:
-                        _s.set_state("aerobic_ceiling_bpm", str(int(new_ceiling)))
-                        # Every Z2 target is derived from this, so a saved ceiling
-                        # that leaves the plan untouched looks like it did nothing.
-                        with st.spinner("Restamping your targets…"):
-                            rebuilt = planner.plan_week(
-                                _s, today=today, use_ai=False,
-                                only_sports=data.get("scoped_to"))
-                    st.session_state["plan"] = rebuilt.model_dump(mode="json")
-                    st.session_state.pop("plan_editor", None)
-                    refresh()
-                    st.rerun()
-            if ceiling and ceiling > (bounds[2][1] or 0):
-                st.caption(
-                    f"At {ceiling} bpm you are above Garmin's Z2, so Garmin itself "
-                    f"will call that time 'moderate'. The Intensity page measures "
-                    f"against this ceiling instead, from your stored heart-rate "
-                    f"samples, and shows both numbers side by side."
-                )
-
-    ui.section("Your weekly targets",
-               "How much of each sport you want. The scheduler builds around this; "
-               "the safety rules still cap the total.")
-    existing = data["targets"]
-    suggestions = suggested_targets(today, data.get("scoped_to"))
-    with st.form("targets"):
-        st.caption("Pre-filled from your own recent weeks — edit anything you "
-                   "disagree with. Use the header toggle to drop a sport "
-                   "entirely; it then gets no sessions and no long-session "
-                   "requirement, and its share of the week goes to the rest.")
-        rows = []
-        for sport in shown_sports():
-            cur = existing.get(sport) or {}
-            hint = suggestions.get(sport) or {}
-            # An empty box asks the athlete to guess a number the app already has
-            # the evidence for, so a saved value wins and a suggestion fills the
-            # gap. The reasoning is shown either way.
-            default_sessions = int(cur.get("sessions") or hint.get("sessions") or 0)
-            default_minutes = int(cur.get("minutes") or hint.get("minutes") or 0)
-            c = st.columns([1.35, 1, 1], vertical_alignment="center")
-            c[0].markdown(f"{EMOJI[sport]} **{sport.title()}**")
-            if hint.get("basis"):
-                c[0].caption(("saved" if cur.get("sessions") else "suggested")
-                             + f" · {hint['basis']}")
-            rows.append({
-                "sport": sport,
-                # Preserved, not re-decided here: the header toggle is the one
-                # place that answers "is this sport on?".
-                "enabled": int(bool(cur.get("enabled", 1))),
-                "sessions": c[1].number_input("sessions", 0, 7, default_sessions,
-                                              key=f"ts_{sport}"),
-                "minutes": c[2].number_input("minutes", 0, 900, default_minutes,
-                                             step=15, key=f"tm_{sport}"),
-            })
-        b = st.columns(2)
-        save = b[0].form_submit_button("Save targets", type="primary",
-                                       width="stretch", disabled=not unlocked)
-        clear = b[1].form_submit_button("Clear", width="stretch",
-                                        disabled=not unlocked)
-    if (save or clear) and writes_allowed():
-        # Changing which sports are on IS a planning decision, so rebuild
-        # immediately rather than making the athlete find a second button.
-        with Store(db_path()) as s:
-            if clear:
-                s.clear_targets()
-            else:
-                s.set_targets(rows)
-            last = s.latest_checkin()
-            ci = Checkin(
-                date=today, sleep=(last or {}).get("sleep") or 3,
-                soreness=(last or {}).get("soreness") or 3,
-                motivation=(last or {}).get("motivation") or 3,
-                time_available_min=(last or {}).get("time_available_min") or 90,
-                notes=(last or {}).get("notes") or "") if last else None
-            with st.spinner("Rebuilding your week around that…"):
-                plan = planner.plan_week(s, checkin=ci, today=today,
-                                         use_ai=ai.available(),
-                                         only_sports=data.get("scoped_to"))
-        st.session_state["plan"] = plan.model_dump(mode="json")
-        st.session_state.pop("plan_editor", None)
-        refresh()
-        st.rerun()
 
     ui.section("How do you feel?", "This shapes the week inside what the rules allow. "
                                    "Deload triggers come from data, not mood.")
@@ -1754,6 +1626,141 @@ def page_plan(data: dict, today: date) -> None:
         st.session_state.pop("plan_editor", None)
         refresh()
         st.rerun()
+    # Settings last, and deliberately. The week is what this page is for;
+    # zones, the easy ceiling and weekly volume get set once and then left,
+    # and having them first pushed the plan itself halfway down the page.
+    ui.section("Settings", "Set these once. They shape every week that follows.")
+
+    with Store(db_path()) as _s:
+        bounds = zone_bounds(_s.zones())
+    if bounds:
+        with Store(db_path()) as _s:
+            lthr = _s.get_state("threshold_hr")
+            saved_ceiling = _s.get_state("aerobic_ceiling_bpm")
+        lthr_f = float(lthr) if lthr else None
+        opts = aerobic_ceiling_options(bounds, lthr_f)
+        ceiling = int(float(saved_ceiling)) if saved_ceiling else opts["garmin_z2_top"]
+
+        ui.section("Your heart-rate zones",
+                   "From Garmin, so they match the watch. Note Z5 starts exactly "
+                   "at your threshold heart rate — these zones are anchored to "
+                   "threshold, not to an estimated maximum.")
+        ui.stats_row([
+            {"label": f"Z{z}", "value": (f"{lo}–{hi}" if hi else f"{lo}+"),
+             "note": {1: "recovery", 2: "aerobic base", 3: "tempo",
+                      4: "threshold", 5: "VO2max"}.get(z, ""),
+             "tone": "good" if z == 2 else ("bad" if z >= 4 else "neutral")}
+            for z, (lo, hi) in sorted(bounds.items())
+        ])
+
+        if opts["candidates"]:
+            ui.section("What counts as easy for you",
+                       f"Garmin's Z2 ceiling is {opts['garmin_z2_top']} bpm — "
+                       f"{opts['garmin_z2_top'] / lthr_f * 100:.0f}% of your "
+                       f"{int(lthr_f)} bpm threshold, which is conservative next to "
+                       f"the common threshold-anchored schemes below. If Z2 feels "
+                       f"absurdly slow, you are probably right; set your own "
+                       f"ceiling and every Z2 target follows it.")
+            ui.stats_row([
+                {"label": c["label"], "value": f"{c['bpm']} bpm", "note": c["note"],
+                 "tone": "good" if c["bpm"] == ceiling else "neutral"}
+                for c in opts["candidates"]
+            ])
+            with st.form("ceiling"):
+                cc = st.columns([2, 1], vertical_alignment="bottom")
+                new_ceiling = cc[0].slider(
+                    "Your aerobic-base ceiling (bpm)",
+                    int(bounds[2][0]) + 5, int(lthr_f) - 5, int(ceiling),
+                    help="The real test is speech: the highest heart rate at which "
+                         "you can still talk in full sentences. Nothing in the "
+                         "data can tell you that, so this is your call.")
+                if cc[1].form_submit_button("Save ceiling", type="primary",
+                                           width="stretch",
+                                           disabled=not unlocked) and writes_allowed():
+                    with Store(db_path()) as _s:
+                        _s.set_state("aerobic_ceiling_bpm", str(int(new_ceiling)))
+                        # Every Z2 target is derived from this, so a saved ceiling
+                        # that leaves the plan untouched looks like it did nothing.
+                        with st.spinner("Restamping your targets…"):
+                            rebuilt = planner.plan_week(
+                                _s, today=today, use_ai=False,
+                                only_sports=data.get("scoped_to"))
+                    st.session_state["plan"] = rebuilt.model_dump(mode="json")
+                    st.session_state.pop("plan_editor", None)
+                    refresh()
+                    st.rerun()
+            if ceiling and ceiling > (bounds[2][1] or 0):
+                st.caption(
+                    f"At {ceiling} bpm you are above Garmin's Z2, so Garmin itself "
+                    f"will call that time 'moderate'. The Intensity page measures "
+                    f"against this ceiling instead, from your stored heart-rate "
+                    f"samples, and shows both numbers side by side."
+                )
+
+    ui.section("Your weekly targets",
+               "How much of each sport you want. The scheduler builds around this; "
+               "the safety rules still cap the total.")
+    existing = data["targets"]
+    suggestions = suggested_targets(today, data.get("scoped_to"))
+    with st.form("targets"):
+        st.caption("Pre-filled from your own recent weeks — edit anything you "
+                   "disagree with. Use the header toggle to drop a sport "
+                   "entirely; it then gets no sessions and no long-session "
+                   "requirement, and its share of the week goes to the rest.")
+        rows = []
+        for sport in shown_sports():
+            cur = existing.get(sport) or {}
+            hint = suggestions.get(sport) or {}
+            # An empty box asks the athlete to guess a number the app already has
+            # the evidence for, so a saved value wins and a suggestion fills the
+            # gap. The reasoning is shown either way.
+            default_sessions = int(cur.get("sessions") or hint.get("sessions") or 0)
+            default_minutes = int(cur.get("minutes") or hint.get("minutes") or 0)
+            c = st.columns([1.35, 1, 1], vertical_alignment="center")
+            c[0].markdown(f"{EMOJI[sport]} **{sport.title()}**")
+            if hint.get("basis"):
+                c[0].caption(("saved" if cur.get("sessions") else "suggested")
+                             + f" · {hint['basis']}")
+            rows.append({
+                "sport": sport,
+                # Preserved, not re-decided here: the header toggle is the one
+                # place that answers "is this sport on?".
+                "enabled": int(bool(cur.get("enabled", 1))),
+                "sessions": c[1].number_input("sessions", 0, 7, default_sessions,
+                                              key=f"ts_{sport}"),
+                "minutes": c[2].number_input("minutes", 0, 900, default_minutes,
+                                             step=15, key=f"tm_{sport}"),
+            })
+        b = st.columns(2)
+        save = b[0].form_submit_button("Save targets", type="primary",
+                                       width="stretch", disabled=not unlocked)
+        clear = b[1].form_submit_button("Clear", width="stretch",
+                                        disabled=not unlocked)
+    if (save or clear) and writes_allowed():
+        # Changing which sports are on IS a planning decision, so rebuild
+        # immediately rather than making the athlete find a second button.
+        with Store(db_path()) as s:
+            if clear:
+                s.clear_targets()
+            else:
+                s.set_targets(rows)
+            last = s.latest_checkin()
+            ci = Checkin(
+                date=today, sleep=(last or {}).get("sleep") or 3,
+                soreness=(last or {}).get("soreness") or 3,
+                motivation=(last or {}).get("motivation") or 3,
+                time_available_min=(last or {}).get("time_available_min") or 90,
+                notes=(last or {}).get("notes") or "") if last else None
+            with st.spinner("Rebuilding your week around that…"):
+                plan = planner.plan_week(s, checkin=ci, today=today,
+                                         use_ai=ai.available(),
+                                         only_sports=data.get("scoped_to"))
+        st.session_state["plan"] = plan.model_dump(mode="json")
+        st.session_state.pop("plan_editor", None)
+        refresh()
+        st.rerun()
+
+
 
 
 # --------------------------------------------------------------------------
