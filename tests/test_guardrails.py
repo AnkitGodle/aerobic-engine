@@ -551,3 +551,78 @@ def test_an_unknown_exercise_is_left_unmapped_not_guessed():
     assert strength.map_garmin_exercise("BENCH_PRESS", "BARBELL_BENCH_PRESS") is None
     assert strength.map_garmin_exercise("SHOULDER_PRESS", "OVERHEAD_PRESS") is None
     assert strength.map_garmin_exercise(None, None) is None
+
+
+# --------------------------------------------------------------------------
+# Pushing a session to the watch. It writes to the Garmin account, so the
+# payload has to be right before it is sent, not after.
+# --------------------------------------------------------------------------
+
+
+def test_the_workout_payload_names_the_right_sport():
+    """sportTypeId 5 is strength_training. 13, the plausible guess, is rucking —
+    established by uploading both to the live account and reading them back."""
+    from core import garmin_workout
+
+    presc = strength.build_session([], session_index=0)
+    w = garmin_workout.build(presc, "Legs A")
+    assert w["sportType"]["sportTypeKey"] == "strength_training"
+    assert w["sportType"]["sportTypeId"] == 5
+    assert w["workoutSegments"][0]["sportType"] == w["sportType"]
+
+
+def test_every_library_exercise_can_be_sent():
+    """An unmapped exercise would silently reach the watch as a bare SQUAT."""
+    from core import garmin_workout
+
+    missing = set(strength.EXERCISES) - set(garmin_workout.GARMIN_TARGET)
+    assert not missing, sorted(missing)
+
+
+def test_a_set_becomes_one_step_each_with_rest_between():
+    from core import garmin_workout
+
+    presc = strength.build_session([], session_index=0)
+    steps = garmin_workout.build(presc, "Legs A")["workoutSegments"][0]["workoutSteps"]
+    work = [s for s in steps if s["stepType"]["stepTypeKey"] == "interval"]
+    assert len(work) == sum(max(1, p.sets) for p in presc)
+    # Rest between every pair of working sets, and none trailing at the end.
+    assert steps[-1]["stepType"]["stepTypeKey"] == "interval"
+    assert all(s["stepOrder"] == i + 1 for i, s in enumerate(steps))
+
+
+def test_isometric_holds_go_as_time_not_reps():
+    """A 30-second wall sit sent as "30 reps" would be nonsense on the watch."""
+    from core import garmin_workout
+
+    presc = strength.build_session([], session_index=0)
+    steps = garmin_workout.build(presc, "Legs A")["workoutSegments"][0]["workoutSteps"]
+    holds = [p for p in presc if p.hold_s]
+    assert holds, "session A should contain an isometric"
+    timed = [s for s in steps if s["stepType"]["stepTypeKey"] == "interval"
+             and s["endCondition"]["conditionTypeKey"] == "time"]
+    assert len(timed) == sum(max(1, p.sets) for p in holds)
+    assert all(s["endConditionValue"] > 0 for s in timed)
+
+
+def test_an_exercise_without_a_trusted_garmin_name_still_carries_it():
+    """Category-only entries must put the real name in the description, or the
+    watch shows a bare category and the athlete cannot tell the sets apart."""
+    from core import garmin_workout
+
+    category_only = [eid for eid, (_, name)
+                     in garmin_workout.GARMIN_TARGET.items() if name is None]
+    assert category_only, "the conservative mapping should have some of these"
+    for eid in category_only:
+        presc = strength.next_prescription(eid, [], 1.0)
+        step = garmin_workout._step(1, presc, strength.EXERCISES[eid])
+        assert "exerciseName" not in step
+        assert strength.EXERCISES[eid].name in step["description"]
+
+
+def test_an_empty_session_is_refused_rather_than_uploaded():
+    """Sending an empty workout would leave a useless entry on the watch."""
+    from core import garmin_workout
+
+    with pytest.raises(ValueError):
+        garmin_workout.push(object(), [], "Legs A")

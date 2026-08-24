@@ -51,6 +51,8 @@ from core.analysis import (  # noqa: E402
     zone_distribution,
 )
 from core.auth import PinGate, session_expired  # noqa: E402
+from core import garmin_workout  # noqa: E402
+from core.garmin_client import GarminClient  # noqa: E402
 from core.garmin_guard import GarminBlocked  # noqa: E402
 from core.schemas import DAYS, ENDURANCE_SPORTS, SPORTS, Checkin, PlanDay, WeekPlan  # noqa: E402
 from core.store import Store, default_db, is_postgres, week_start_of  # noqa: E402
@@ -428,6 +430,54 @@ def exercise_howto(ex, prescription=None) -> None:
         st.caption(f"Progressing: {ex.load_note}")
 
 
+def send_to_watch(prescriptions: list, day: date, label: str) -> None:
+    """Push the session to Garmin as a named workout.
+
+    The point is not convenience. The watch counts reps well but usually does
+    not know which exercise it is watching, so sets come back unnamed and have
+    to be assigned by hand before the progression can use them. A named workout
+    removes that step entirely.
+
+    PIN-gated and once-per-day: this writes to the Garmin account, and pushing
+    twice leaves two identical workouts on the watch.
+    """
+    key = f"workout_pushed_{day.isoformat()}"
+    already = with_store(lambda st: st.get_state(key))
+    unlocked = writes_allowed()
+
+    if already:
+        st.caption(f"✓ Sent to your watch — look for “{label}” under saved "
+                   f"workouts. Starting it there names every set for you.")
+        if not st.button("Send again", key=f"resend_{day}", disabled=not unlocked):
+            return
+    elif not st.button("Send this session to my watch", type="primary",
+                       key=f"send_{day}", disabled=not unlocked,
+                       help=None if unlocked else "Unlock with your PIN first."):
+        if not unlocked:
+            st.caption("🔒 Unlock with your PIN to send workouts to the watch.")
+        return
+    if not writes_allowed():
+        return
+
+    try:
+        with st.spinner("Sending…"):
+            client = GarminClient()
+            created = garmin_workout.push(
+                client.connect(), prescriptions, label, on_date=day.isoformat())
+        with_store(lambda st_: st_.set_state(key, str(created.get("workoutId", ""))))
+        st.success(
+            f"Sent. On the watch: START → Strength → it should offer “{label}”. "
+            f"Every set arrives already named, so nothing needs assigning "
+            f"afterwards.")
+        refresh()
+    except GarminBlocked as exc:
+        st.warning(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Could not send the workout")
+        st.error(f"Could not send it ({type(exc).__name__}). The session is "
+                 f"unchanged — log it by hand and nothing is lost.")
+
+
 def strength_howto_block(exercise_ids: list[str], log_rows: list[dict],
                          session_index: int = 0) -> None:
     """The full session, with instructions, for the day it is scheduled."""
@@ -439,6 +489,8 @@ def strength_howto_block(exercise_ids: list[str], log_rows: list[dict],
     ui.section("How to do today's session",
                "Slow and controlled beats heavy. Stop a set if something sharp "
                "appears — soreness is fine, pain is not.")
+    send_to_watch(list(presc.values()), date.today(),
+                  f"Legs {chr(65 + session_index % 3)} · Aerobic Engine")
     for i, eid in enumerate(ids):
         with st.container(border=True):
             exercise_howto(strength.EXERCISES[eid], presc.get(eid))
@@ -1690,8 +1742,16 @@ def page_about(data: dict, today: date) -> None:
         "sets and reps are read off the watch, matched to the exercises in the "
         "plan, and next time's weights move up from what you actually did."
     )
+    st.success(
+        "**Easiest route: let the app do it.** On a leg day, Today has a "
+        "**Send this session to my watch** button. It builds the session as a "
+        "Garmin workout — exercises named, sets, reps, holds and weights — and "
+        "schedules it for that day. On the watch: START → Strength → pick it. "
+        "Every set then arrives already named, so nothing needs assigning "
+        "afterwards and the weights progress on their own."
+    )
     st.markdown(
-        "**One thing the watch cannot do:** it counts reps well but often does "
+        "**One thing the watch cannot do on its own:** it counts reps well but often does "
         "not know *which* exercise you did, so sets can arrive unnamed. Two "
         "fixes, either is fine:\n\n"
         "- Name them in the Garmin Connect app after the session — open the "
