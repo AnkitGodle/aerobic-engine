@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dotenv import load_dotenv  # noqa: E402
 
-from core.store import Store, default_db, is_postgres  # noqa: E402
+from core.store import Store, is_postgres  # noqa: E402
 
 # Parents before children: hr_streams and the per-activity tables carry a
 # foreign key to activities, so the order here is a correctness requirement,

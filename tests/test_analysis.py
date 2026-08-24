@@ -202,3 +202,148 @@ def test_pace_spread_separates_steady_from_intervals():
     assert lap_pace_spread(steady) < 1.0
     assert lap_pace_spread(intervals) > 15.0
     assert lap_pace_spread([_lap(1), _lap(2)]) is None
+
+
+# --------------------------------------------------------------------------
+# Load ramp, consistency and weather
+# --------------------------------------------------------------------------
+
+
+def _day(offset: int) -> str:
+    return (TODAY - timedelta(days=offset)).isoformat()
+
+
+def test_load_ramp_starts_where_the_data_starts():
+    """Not `days` ago. A three-week-old account drawing two months of empty axis
+    reads as missing data rather than as data that does not exist yet."""
+    from core.analysis import load_ramp
+
+    ramp = load_ramp([act(start_date=_day(3), training_load=100)],
+                     as_of=TODAY, days=90)
+    assert [r["day"] for r in ramp] == [TODAY - timedelta(days=i)
+                                        for i in (3, 2, 1, 0)]
+
+
+def test_load_ramp_averages_and_withholds_the_ratio_until_there_is_history():
+    from core.analysis import load_ramp
+
+    acts = [act(activity_id=str(i), start_date=_day(i), training_load=70)
+            for i in range(0, 10)]
+    ramp = load_ramp(acts, as_of=TODAY, days=90)
+    today_row = ramp[-1]
+    # Seven days of 70 spread over seven days.
+    assert today_row["acute"] == 70.0
+    # Ten days of load averaged over 28 gives a much lower chronic base.
+    assert today_row["chronic"] == 25.0
+    # Ten days of history is not enough for the ratio to mean anything.
+    assert today_row["ratio"] is None
+
+
+def test_load_ramp_ratio_appears_once_there_is_enough_history():
+    from core.analysis import load_ramp, ramp_verdict
+
+    acts = [act(activity_id=str(i), start_date=_day(i), training_load=50)
+            for i in range(0, 30)]
+    ramp = load_ramp(acts, as_of=TODAY, days=90)
+    assert ramp[-1]["ratio"] is not None
+    # Steady daily load: the last week and the last month agree.
+    assert 0.9 <= ramp[-1]["ratio"] <= 1.1
+    assert ramp_verdict(ramp)["verdict"] == "productive"
+
+
+def test_ramp_verdict_calls_out_a_spike():
+    from core.analysis import load_ramp, ramp_verdict
+
+    acts = [act(activity_id=str(i), start_date=_day(i), training_load=20)
+            for i in range(7, 40)]
+    acts += [act(activity_id=f"hard{i}", start_date=_day(i), training_load=200)
+             for i in range(0, 7)]
+    verdict = ramp_verdict(load_ramp(acts, as_of=TODAY))
+    assert verdict["verdict"] == "high"
+    assert verdict["ratio"] > 1.3
+
+
+def test_load_ramp_falls_back_to_minutes_when_garmin_scored_nothing():
+    """Load is missing on a new account, and dropping those sessions would
+    understate the ramp."""
+    from core.analysis import load_ramp
+
+    ramp = load_ramp([act(start_date=_day(0), training_load=None,
+                          duration_s=3600)], as_of=TODAY)
+    assert ramp[-1]["load"] == 60.0
+
+
+def test_weekly_zone_minutes_follow_the_athletes_ceiling():
+    """The whole point of recounting from samples: raising the ceiling has to move
+    minutes from moderate into easy."""
+    from core.analysis import weekly_zone_minutes_from_streams
+
+    acts = [act(activity_id="a", start_date=_day(0), duration_s=3600)]
+    # Half the session at 120 bpm, half at 133.
+    streams = {"a": [{"hr": 120}] * 10 + [{"hr": 133}] * 10}
+    garmin = {1: (90, 111), 2: (112, 125), 3: (126, 140), 4: (141, 160),
+              5: (161, None)}
+    raised = {**garmin, 2: (112, 137), 3: (138, 140)}
+
+    low = weekly_zone_minutes_from_streams(streams, acts, garmin, as_of=TODAY)
+    high = weekly_zone_minutes_from_streams(streams, acts, raised, as_of=TODAY)
+    assert low[0]["z2"] == 30.0 and low[0]["z3"] == 30.0
+    assert high[0]["z2"] == 60.0 and high[0]["z3"] == 0.0
+    assert high[0]["easy_pct"] == 100.0
+    # Duration-scaled, not sample-counted: the week totals the real hour.
+    assert low[0]["total"] == 60.0
+
+
+def test_consistency_marks_every_day_including_the_empty_ones():
+    from core.analysis import consistency, streak
+
+    acts = [act(activity_id="a", start_date=_day(1), duration_s=1800),
+            act(activity_id="b", start_date=_day(0), duration_s=2400)]
+    rows = consistency(acts, as_of=TODAY, weeks=2)
+    assert len(rows) == 10          # two Mondays back to a Wednesday
+    assert rows[-1]["minutes"] == 40.0
+    assert rows[-1]["sports"] == ["run"]
+    assert rows[0]["sessions"] == 0
+    assert streak(rows)["current"] == 2
+    assert streak(rows)["active_days"] == 2
+
+
+def test_streak_survives_a_rest_day_today():
+    """A streak should not read as zero because today's session has not happened
+    yet at nine in the morning."""
+    from core.analysis import consistency, streak
+
+    acts = [act(activity_id=str(i), start_date=_day(i)) for i in (1, 2, 3)]
+    rows = consistency(acts, as_of=TODAY, weeks=2)
+    assert rows[-1]["sessions"] == 0
+    assert streak(rows)["current"] == 3
+
+
+def test_strength_days_count_towards_showing_up():
+    from core.analysis import consistency
+
+    rows = consistency([], as_of=TODAY, weeks=1,
+                       strength_rows=[{"day": _day(0)}])
+    assert rows[-1]["sports"] == ["strength"]
+
+
+def test_weather_effect_pairs_dew_point_with_heart_rate_at_one_pace():
+    from core.analysis import weather_effect
+
+    acts = [act(activity_id="a", start_date=_day(2), avg_hr=150,
+                avg_speed_mps=2.5, ef=2.5 * 100 / 150, ef_metric="speed_per_hr"),
+            act(activity_id="b", start_date=_day(0), avg_hr=140,
+                avg_speed_mps=2.5, ef=2.5 * 100 / 140, ef_metric="speed_per_hr")]
+    weather = {"a": {"dew_point_c": 22.0, "temp_c": 28.0, "condition": "Humid"},
+               "b": {"dew_point_c": 12.0, "temp_c": 20.0, "condition": "Clear"}}
+    out = weather_effect(acts, weather)
+    assert [p["dew_point_c"] for p in out["points"]] == [22.0, 12.0]
+    assert out["hot_sessions"] == 1
+    assert out["hot_share"] == 50
+
+
+def test_weather_effect_skips_sessions_with_no_weather_row():
+    from core.analysis import weather_effect
+
+    acts = [act(activity_id="a", ef=1.7, ef_metric="speed_per_hr")]
+    assert weather_effect(acts, {})["points"] == []

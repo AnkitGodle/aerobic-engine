@@ -19,7 +19,7 @@ import logging
 import os
 import re
 from collections.abc import Callable, Iterable
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -655,8 +655,9 @@ class GarminClient:
                 "sport": dig_str(entry, "activityType") or sport,
                 "label": label,
                 "value": _f(entry.get("value")),
-                "achieved_at": dig_str(entry, "prStartTimeLocal",
-                                       "activityStartDateTimeLocal"),
+                "achieved_at": as_iso_day(
+                    dig_str(entry, "prStartTimeLocal",
+                            "activityStartDateTimeLocal")),
                 "activity_id": dig_str(entry, "activityId"),
                 "fetched_at": datetime.now().isoformat(timespec="seconds"),
             })
@@ -722,6 +723,28 @@ class GarminClient:
             "running_ftp": run_ftp,
             "cycling_ftp": dig(ftp, "functionalThresholdPower"),
         }
+
+
+def as_iso_day(value: Any) -> str | None:
+    """Normalise a Garmin date to an ISO day, whatever shape it arrived in.
+
+    Personal records date themselves with `prStartTimeLocal`, which on this
+    account is a Unix timestamp in milliseconds rather than a date string. Stored
+    raw it displayed as 16 December 1787, because Python's `date.fromisoformat`
+    is lenient enough to read the first eight digits of the epoch as a date
+    instead of rejecting them. Normalising here means the database holds a real
+    day, not just the display fixing it up.
+    """
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if text.isdigit() and len(text) in (10, 13):
+        seconds = int(text) / (1000.0 if len(text) == 13 else 1.0)
+        try:
+            return datetime.fromtimestamp(seconds, tz=timezone.utc).date().isoformat()
+        except (OverflowError, OSError, ValueError):
+            return text
+    return text
 
 
 def flatten_activity(detail: dict[str, Any]) -> dict[str, Any]:

@@ -595,3 +595,120 @@ def narrate(page: str, insight: PageInsight, backend: Any = None) -> str | None:
                             json.dumps(payload, indent=2, default=str))
     text = (text or "").strip()
     return text[:900] or None
+
+
+# --------------------------------------------------------------------------
+# Ask the coach
+#
+# The pages answer the questions I thought of. This answers the one being asked
+# right now — "why was Wednesday so hard", "can I move the long ride to Friday" —
+# from the same deterministic facts the charts are drawn from, and nothing else.
+# --------------------------------------------------------------------------
+
+ASK_SYSTEM = """\
+You answer one question from an endurance athlete about their own training data.
+
+You are given a facts bundle: recovery signals, this week's plan and completed
+sessions, recent sessions with heart rate and pace, efficiency trends, intensity
+distribution and the rules envelope. Rules:
+- Use ONLY those facts. Never invent a number, a session, or a date. If the
+  facts do not contain the answer, say which data is missing and stop.
+- Never override the rules layer. If the athlete asks for something the envelope
+  forbids (more volume than the cap, training through a deload flag), say what
+  the rule is and what you can offer inside it.
+- Two to five sentences, second person, plain language, no bullets, no headings.
+  Quote the specific numbers that support what you say.
+- No medical advice. Persistent pain gets one line pointing at a physio.
+- No cheerleading. If the answer is "you are training too hard", say it.
+Return plain text with no preamble."""
+
+# Bounds the question, not the answer: a long paste of someone else's plan is
+# not a question about this data, and the facts bundle is the expensive half.
+ASK_QUESTION_CHARS = 600
+
+
+def ask_facts(data: dict, today: date) -> dict[str, Any]:
+    """Everything the coach answer is allowed to draw on, and nothing else.
+
+    Deliberately assembled from the same `*_insight` functions the banners use,
+    so a spoken answer and the page it sits on cannot disagree. Raw session rows
+    are trimmed to the fields that carry meaning — a full activity row is mostly
+    identifiers and Garmin bookkeeping.
+    """
+    acts = data.get("activities") or []
+    sig = recovery_signals(data.get("wellness") or [], acts, as_of=today) \
+        if data.get("wellness") else None
+    weeks = week_summaries(acts, weeks=3, as_of=today,
+                           strength_rows=data.get("strength") or [])
+    plan = (data.get("plan") or {}).get("plan") or {}
+
+    recent = []
+    for a in sorted(acts, key=lambda r: str(r.get("start_date") or ""))[-10:]:
+        recent.append({
+            "date": str(a.get("start_date")),
+            "sport": a.get("sport"),
+            "min": round((a.get("duration_s") or 0) / 60.0),
+            "km": round((a.get("distance_m") or 0) / 1000.0, 1) or None,
+            "avg_hr": a.get("avg_hr"),
+            "max_hr": a.get("max_hr"),
+            "steady": bool(a.get("is_steady")),
+            "why_not_steady": (a.get("steady_reason") or "")[:60] or None,
+            "load": a.get("training_load"),
+        })
+
+    facts: dict[str, Any] = {
+        "today": today.isoformat(),
+        "sports_in_view": list(_sports(data)),
+        "aerobic_ceiling_bpm": data.get("aerobic_ceiling"),
+        "recovery": {
+            "resting_hr": sig.rhr_recent if sig else None,
+            "resting_hr_vs_baseline": sig.rhr_delta if sig else None,
+            "hrv_recent": sig.hrv_recent if sig else None,
+            "hrv_pct_vs_baseline": sig.hrv_delta_pct if sig else None,
+            "training_readiness": sig.training_readiness if sig else None,
+            "training_status": sig.training_status if sig else None,
+            "load_ratio_acwr": sig.acwr if sig else None,
+            "vo2max_run": sig.vo2max_run if sig else None,
+        } if sig else None,
+        "weeks": [{"week_start": w.week_start.isoformat(),
+                   "minutes": w.total_minutes, "load": w.total_load,
+                   "rest_days": w.rest_days,
+                   "by_sport": {sp: {"sessions": s.sessions,
+                                     "minutes": s.minutes,
+                                     "longest_min": s.longest_min}
+                                for sp, s in w.by_sport.items()}}
+                  for w in weeks],
+        "this_week_plan": [{k: d.get(k) for k in
+                            ("day", "sport", "duration_min", "target_zone",
+                             "target_hr", "purpose", "why")}
+                           for d in plan.get("week_plan", [])],
+        "plan_flags": plan.get("flags") or [],
+        "recent_sessions": recent,
+        "checkins": [{"day": str(c.get("day")), "sleep": c.get("sleep"),
+                      "soreness": c.get("soreness"),
+                      "motivation": c.get("motivation"),
+                      "note": (c.get("note") or "")[:140]}
+                     for c in (data.get("checkins") or [])[:4]],
+    }
+    for page in ("Fitness", "Intensity", "Volume"):
+        insight = for_page(page, data, today)
+        if insight:
+            facts.setdefault("page_readings", {})[page] = insight.as_facts()
+    return facts
+
+
+def ask(question: str, data: dict, today: date, backend: Any = None) -> str | None:
+    """Answer one question from the facts bundle. None when no AI is configured."""
+    from core import ai
+
+    question = (question or "").strip()[:ASK_QUESTION_CHARS]
+    if not question:
+        return None
+    try:
+        backend = backend or ai.get_backend()
+    except ai.AIUnavailable:
+        return None
+    payload = {"question": question, "facts": ask_facts(data, today)}
+    text = backend.complete(
+        ASK_SYSTEM, json.dumps(payload, separators=(",", ":"), default=str))
+    return (text or "").strip()[:1200] or None

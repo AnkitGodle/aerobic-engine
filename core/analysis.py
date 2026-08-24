@@ -8,7 +8,7 @@ mixing intervals and races into the trend makes it noise.
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, datetime, timedelta
 from statistics import fmean, pstdev
 from typing import Any
@@ -1289,3 +1289,292 @@ def _last_value(rows: Sequence[dict[str, Any]], field: str) -> float | None:
         if r.get(field) is not None:
             return float(r[field])
     return None
+
+
+# --------------------------------------------------------------------------
+# Load, consistency and environment
+#
+# Three questions the per-session charts above cannot answer: is the training
+# ramping too fast, is it happening at all, and is the weather the reason a
+# session felt bad. Each is deterministic and each degrades to an empty list
+# rather than an exception when the history is too short.
+# --------------------------------------------------------------------------
+
+# The band inside which a rising load is usually productive. Below it fitness
+# decays, above it injury risk climbs steeply — the same two numbers the deload
+# trigger in the planner uses.
+ACWR_LOW = 0.8
+ACWR_HIGH = 1.3
+
+
+def session_load(activity: Mapping[str, Any]) -> float:
+    """Garmin's own training load, or minutes as a stand-in.
+
+    Load is missing on a new account and on any activity the watch could not
+    score, and a chart that silently drops those sessions understates a ramp.
+    Minutes are a poor proxy — they ignore intensity entirely — but they are the
+    same proxy `acwr_from_activities` already uses, so the two agree.
+    """
+    return float(activity.get("training_load")
+                 or (activity.get("duration_s") or 0) / 60.0)
+
+
+def load_ramp(
+    activities: Sequence[dict[str, Any]],
+    as_of: date | None = None,
+    days: int = 90,
+    min_history_days: int = MIN_ACWR_HISTORY_DAYS,
+) -> list[dict[str, Any]]:
+    """Daily load with its rolling 7-day acute and 28-day chronic averages.
+
+    The single number on the dashboard (`acwr`) says where the ramp is today.
+    This says how it got there, which is the part that tells you whether to back
+    off: 1.25 on the way down is a different week from 1.25 on the way up.
+
+    Both sides are expressed as load per day so they sit on one axis — the acute
+    line is the 7-day mean, the chronic line the 28-day mean. The ratio is left
+    None until there is enough history for the chronic side to mean anything,
+    for the reason spelled out on `acwr_from_activities`.
+    """
+    as_of = as_of or date.today()
+    per_day: dict[date, float] = {}
+    for a in activities:
+        if not a.get("start_date"):
+            continue
+        day = _as_date(a["start_date"])
+        per_day[day] = per_day.get(day, 0.0) + session_load(a)
+    if not per_day:
+        return []
+
+    # Start where the data starts, never `days` ago: an account three weeks old
+    # should not draw two months of empty axis before its first point.
+    first = max(min(per_day), as_of - timedelta(days=days - 1))
+    history_start = min(per_day)
+    out: list[dict[str, Any]] = []
+    day = first
+    while day <= as_of:
+        acute = sum(per_day.get(day - timedelta(days=i), 0.0) for i in range(7)) / 7.0
+        chronic = sum(per_day.get(day - timedelta(days=i), 0.0)
+                      for i in range(28)) / 28.0
+        ratio = None
+        if chronic > 0 and (day - history_start).days >= min_history_days:
+            ratio = round(acute / chronic, 2)
+        out.append({
+            "day": day,
+            "load": round(per_day.get(day, 0.0), 1),
+            "acute": round(acute, 1),
+            "chronic": round(chronic, 1),
+            "ratio": ratio,
+        })
+        day += timedelta(days=1)
+    return out
+
+
+def ramp_verdict(ramp: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Plain reading of where the ramp sits and which way it is moving."""
+    rated = [r for r in ramp if r.get("ratio") is not None]
+    if not rated:
+        return {"ratio": None, "verdict": "insufficient_data",
+                "note": f"needs {MIN_ACWR_HISTORY_DAYS} days of history"}
+    now = rated[-1]["ratio"]
+    week_ago = rated[-8]["ratio"] if len(rated) >= 8 else None
+    if now > ACWR_HIGH:
+        verdict, note = "high", "ramping faster than the body is absorbing"
+    elif now < ACWR_LOW:
+        verdict, note = "low", "detraining — the chronic base is falling away"
+    else:
+        verdict, note = "productive", "inside the productive band"
+    if week_ago is not None:
+        note += f", {now - week_ago:+.2f} on last week"
+    return {"ratio": now, "verdict": verdict, "note": note,
+            "week_ago": week_ago}
+
+
+def weekly_zone_minutes_from_streams(
+    streams: Mapping[str, Sequence[dict[str, Any]]],
+    activities: Sequence[dict[str, Any]],
+    bounds: dict[int, tuple[int, int | None]],
+    weeks: int = 8,
+    as_of: date | None = None,
+    sport: str | None = None,
+) -> list[dict[str, Any]]:
+    """Minutes per zone per week, against the athlete's own boundaries.
+
+    `zone_distribution_from_streams` answers "where did the last 28 days go".
+    This answers "is the mix drifting", which is the question that catches the
+    slow slide from base training into accidental tempo work — a single 28-day
+    number hides it because the drift and the improvement average out.
+    """
+    as_of = as_of or date.today()
+    this_week = as_of - timedelta(days=as_of.weekday())
+    first_week = this_week - timedelta(weeks=weeks - 1)
+    per_activity = {str(a.get("activity_id")): a for a in activities}
+    buckets: dict[date, dict[int, float]] = {}
+
+    for activity_id, samples in (streams or {}).items():
+        activity = per_activity.get(str(activity_id))
+        if activity is None or not activity.get("start_date"):
+            continue
+        if sport and (activity.get("sport") or "") != sport:
+            continue
+        day = _as_date(activity["start_date"])
+        week = day - timedelta(days=day.weekday())
+        if week < first_week or week > this_week:
+            continue
+        readings = [r["hr"] for r in samples or () if r.get("hr") is not None]
+        if not readings:
+            continue
+        # Duration-scaled, for the same reason as the 28-day version: one sample
+        # stands for a different slice of time in a 20-minute run than in a ride.
+        minutes_each = ((activity.get("duration_s") or 0) / 60.0) / len(readings)
+        bucket = buckets.setdefault(week, {})
+        for hr in readings:
+            zone = zone_of(float(hr), bounds)
+            if zone is not None:
+                bucket[zone] = bucket.get(zone, 0.0) + minutes_each
+
+    out = []
+    for week in sorted(buckets):
+        row = {"week_start": week}
+        total = 0.0
+        for zone in range(1, 6):
+            minutes = round(buckets[week].get(zone, 0.0), 1)
+            row[f"z{zone}"] = minutes
+            total += minutes
+        row["total"] = round(total, 1)
+        row["easy_pct"] = (round((row["z1"] + row["z2"]) / total * 100, 1)
+                           if total > 0 else None)
+        out.append(row)
+    return out
+
+
+def consistency(
+    activities: Sequence[dict[str, Any]],
+    as_of: date | None = None,
+    weeks: int = 16,
+    strength_rows: Sequence[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """One row per day, oldest first, for a calendar view of showing up.
+
+    Endurance is mostly an attendance problem, and attendance is the one thing a
+    line chart of anything else hides: a week of three good sessions and a week
+    of one long one can trend identically.
+    """
+    as_of = as_of or date.today()
+    this_week = as_of - timedelta(days=as_of.weekday())
+    start = this_week - timedelta(weeks=weeks - 1)
+    per_day: dict[date, dict[str, Any]] = {}
+
+    for a in activities:
+        if not a.get("start_date"):
+            continue
+        day = _as_date(a["start_date"])
+        if day < start or day > as_of:
+            continue
+        cell = per_day.setdefault(day, {"minutes": 0.0, "sports": [],
+                                        "load": 0.0, "sessions": 0})
+        cell["minutes"] += (a.get("duration_s") or 0) / 60.0
+        cell["load"] += session_load(a)
+        cell["sessions"] += 1
+        sport = a.get("sport") or "other"
+        if sport not in cell["sports"]:
+            cell["sports"].append(sport)
+
+    for row in strength_rows or []:
+        if not row.get("day"):
+            continue
+        day = _as_date(row["day"])
+        if day < start or day > as_of:
+            continue
+        cell = per_day.setdefault(day, {"minutes": 0.0, "sports": [],
+                                        "load": 0.0, "sessions": 0})
+        if "strength" not in cell["sports"]:
+            cell["sports"].append("strength")
+
+    out = []
+    day = start
+    while day <= as_of:
+        cell = per_day.get(day)
+        out.append({
+            "day": day,
+            "minutes": round(cell["minutes"], 1) if cell else 0.0,
+            "load": round(cell["load"], 1) if cell else 0.0,
+            "sessions": cell["sessions"] if cell else 0,
+            "sports": cell["sports"] if cell else [],
+        })
+        day += timedelta(days=1)
+    return out
+
+
+def streak(rows: Sequence[dict[str, Any]]) -> dict[str, int]:
+    """Current and longest run of days with something logged, plus rest days.
+
+    Takes `consistency()` output. Counts back from the most recent day, and
+    treats today as not yet broken: a streak should not read as zero at 9am.
+    """
+    days = list(rows)
+    current = 0
+    for row in reversed(days[:-1] if days else []):
+        if row["sessions"] or row["sports"]:
+            current += 1
+        else:
+            break
+    if days and (days[-1]["sessions"] or days[-1]["sports"]):
+        current += 1
+
+    longest = run = 0
+    for row in days:
+        run = run + 1 if (row["sessions"] or row["sports"]) else 0
+        longest = max(longest, run)
+    active = sum(1 for r in days if r["sessions"] or r["sports"])
+    return {"current": current, "longest": longest, "active_days": active,
+            "days": len(days)}
+
+
+# Above this, sweat stops evaporating efficiently and heart rate climbs for the
+# same effort. Standard humidity-adjustment territory, not a personal number.
+DEW_POINT_EASY_C = 15.0
+DEW_POINT_HARD_C = 20.0
+
+
+def weather_effect(
+    activities: Sequence[dict[str, Any]],
+    weather: Mapping[str, Mapping[str, Any]],
+    sport: str = "run",
+) -> dict[str, Any]:
+    """Heart rate at a reference pace against dew point, session by session.
+
+    The efficiency charts treat every session as comparable. They are not: at a
+    21°C dew point the same pace costs several beats more, and reading that as
+    lost fitness is the single easiest way to draw a wrong conclusion from this
+    dashboard. This puts the two on one axis so the athlete can see which it is.
+
+    Dew point rather than temperature or humidity, because it is the one number
+    that says how much evaporative cooling is actually available.
+    """
+    points = []
+    for p in hr_points(activities, sport):
+        row = (weather or {}).get(str(p["activity_id"])) or {}
+        dew = _pos(row.get("dew_point_c"))
+        if dew is None or p.get("hr_at_reference") is None:
+            continue
+        points.append({
+            "date": p["date"],
+            "dew_point_c": round(float(dew), 1),
+            "hr_at_reference": p["hr_at_reference"],
+            "avg_hr": p["avg_hr"],
+            "temp_c": _pos(row.get("temp_c")),
+            "condition": row.get("condition") or "",
+            "is_steady": p["is_steady"],
+        })
+    slope = None
+    if len(points) >= MIN_TREND_POINTS:
+        slope = ols_slope([p["dew_point_c"] for p in points],
+                          [p["hr_at_reference"] for p in points])
+    hot = [p for p in points if p["dew_point_c"] >= DEW_POINT_HARD_C]
+    return {
+        "points": points,
+        "bpm_per_deg": _r(slope) if slope is not None else None,
+        "hot_sessions": len(hot),
+        "hot_share": (round(len(hot) / len(points) * 100) if points else None),
+    }

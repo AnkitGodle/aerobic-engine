@@ -12,7 +12,6 @@ import logging
 import os
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import time
 from datetime import date, datetime, timedelta
 from typing import Any, Callable
 
@@ -20,7 +19,7 @@ from core import strength
 from core.analysis import compute_activity_metrics
 from core.garmin_client import GarminClient, date_range
 from core.garmin_guard import GarminGuard
-from core.store import Store, default_db
+from core.store import Store
 
 log = logging.getLogger("aerobic_engine.sync")
 
@@ -125,6 +124,7 @@ def generate_ai_notes(db: str | None = None, today: date | None = None) -> int:
             "strength": store.strength_log(), "sets": store.exercise_sets(),
             "race": store.race_predictions(),
             "records": store.personal_records(),
+            "weather": store.weather(),
         }
         model = getattr(backends[0], "model", "")
         rows: list[dict[str, Any]] = []
@@ -220,7 +220,8 @@ def _one_note(kind: str, key: str, arg: Any, backend: Any,
 def _chart_inputs(data: dict[str, Any], today: date) -> list[tuple[str, str, Any]]:
     """The charts worth a sentence, and the numbers behind each."""
     from core.analysis import (
-        ef_points, hr_points, polarisation, week_summaries, zone_distribution,
+        ef_points, hr_points, load_ramp, polarisation, ramp_verdict, week_summaries,
+        weather_effect, zone_distribution,
     )
     from core.schemas import ENDURANCE_SPORTS
 
@@ -298,6 +299,46 @@ def _chart_inputs(data: dict[str, Any], today: date) -> list[tuple[str, str, Any
             for w in weeks if w.total_minutes > 0]
     if done:
         out.append(("chart:volume", "Weekly training minutes completed", done))
+
+    ramp = load_ramp(acts, as_of=today, days=60)
+    if len(ramp) >= 7:
+        # Weekly samples of the ramp, not sixty daily rows: the question is the
+        # direction of the ratio, and daily rows would spend most of the prompt
+        # on load values the caption never mentions.
+        out.append(("chart:load_ramp",
+                    "Training load ramp: 7-day average against the 28-day base, "
+                    "and the ratio between them (0.8-1.3 is productive, above "
+                    "1.3 is ramping faster than the body absorbs)",
+                    {"weekly": [{"day": str(r["day"]), "acute": r["acute"],
+                                 "chronic": r["chronic"], "ratio": r["ratio"]}
+                                for r in ramp[::7]],
+                     "verdict": ramp_verdict(ramp)}))
+
+    race = [r for r in (data.get("race") or [])
+            if r.get("time_5k") or r.get("time_10k")]
+    if len(race) >= 2:
+        out.append(("chart:race",
+                    "Garmin's own race-time predictions over time, in seconds "
+                    "(falling is faster). Say whether they are improving and by "
+                    "how much, and note that they are an estimate from recent "
+                    "running, not a test",
+                    [{"day": str(r["day"]), "s_5k": r.get("time_5k"),
+                      "s_10k": r.get("time_10k"), "s_half": r.get("time_half"),
+                      "s_marathon": r.get("time_marathon")} for r in race]))
+
+    heat = weather_effect(acts, data.get("weather") or {}, sport="run")
+    if heat["points"]:
+        out.append(("chart:heat",
+                    "Heart rate at the athlete's usual running pace against dew "
+                    "point. Above 20C dew point sweat stops evaporating well and "
+                    "heart rate rises for the same effort. Say whether the "
+                    "weather explains the heart rates or not",
+                    {"points": [{"date": str(p["date"]),
+                                 "dew_point_c": p["dew_point_c"],
+                                 "bpm_at_usual_pace": p["hr_at_reference"]}
+                                for p in heat["points"]],
+                     "bpm_per_degree": heat["bpm_per_deg"],
+                     "share_above_20C": heat["hot_share"]}))
     return out
 
 

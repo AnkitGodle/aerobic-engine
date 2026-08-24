@@ -32,8 +32,17 @@ from dotenv import load_dotenv  # noqa: E402
 import app.ui as ui  # noqa: E402
 from core import ai, insights, planner, strength, sync as sync_mod  # noqa: E402
 from core.analysis import (  # noqa: E402
+    ACWR_HIGH,
+    ACWR_LOW,
+    DEW_POINT_HARD_C,
     ZONE_LABELS,
     aerobic_ceiling_options,
+    consistency,
+    load_ramp,
+    ramp_verdict,
+    streak,
+    weather_effect,
+    weekly_zone_minutes_from_streams,
     zone_bounds,
     zone_bounds_with_ceiling,
     zone_distribution_from_streams,
@@ -381,10 +390,22 @@ def hm(minutes: float) -> str:
 
 
 def day_label(iso: object, year: bool = False) -> str:
+    raw = str(iso)
+    # Garmin dates a personal record with a Unix timestamp in milliseconds, and
+    # Python 3.11's fromisoformat is lenient enough to read "1787121654" as
+    # 16 December 1787 rather than rejecting it — so every personal record was
+    # dated to the eighteenth century. Digits-only values are epochs, not dates.
+    if raw.isdigit() and len(raw) in (10, 13):
+        try:
+            seconds = int(raw) / (1000.0 if len(raw) == 13 else 1.0)
+            d = datetime.fromtimestamp(seconds, LOCAL_TZ).date()
+            return d.strftime("%a %d-%m-%Y") if year else d.strftime("%a %d-%m")
+        except (OverflowError, OSError, ValueError):
+            return raw
     try:
-        d = date.fromisoformat(str(iso)[:10])
+        d = date.fromisoformat(raw[:10])
     except (TypeError, ValueError):
-        return str(iso)
+        return raw
     # Day-month-year and a 12-hour clock throughout, the way this athlete reads
     # dates. The weekday stays in front of it: training is planned by day of the
     # week, so "Mon" is the part that answers the question fastest.
@@ -681,6 +702,7 @@ def page_today(data: dict, today: date) -> None:
         # Sits here rather than at the foot of the page: it fills the column
         # beside the stat cards, and it is the most useful thing on the screen.
         insight_banner("Overview", data, today)
+        ask_block(data, today)
     with right:
         tone = {"deload": "bad", "hold": "neutral", "build": "good"}[verdict["verdict"]]
         ui.section("Right now")
@@ -698,9 +720,29 @@ def page_today(data: dict, today: date) -> None:
                 else "building a baseline",
                 "bad" if sig and sig.rhr_delta and sig.rhr_delta > 3 else "neutral",
                 small=True)
+        # This column used to end here and leave a third of the screen empty
+        # beside the plan. The week's own progress belongs next to the verdict
+        # anyway: "back off" and "you have 20 minutes left of the ceiling" are
+        # the same decision.
+        ui.stat("Load ratio",
+                f"{sig.acwr:.2f}" if sig and sig.acwr else "—",
+                acwr_note(sig), acwr_tone(sig), small=True)
+        wk = week_summaries(acts, weeks=1, as_of=today,
+                            strength_rows=data["strength"])[-1]
+        left_min = max(0.0, env.max_week_minutes - wk.total_minutes)
+        ui.stat("Week so far", hm(wk.total_minutes),
+                f"{hm(left_min)} left of a {hm(env.max_week_minutes)} ceiling",
+                "caution" if left_min <= 0 else "neutral", small=True)
+        ui.proportion_bar([("done", wk.total_minutes, TONE["good"]),
+                           ("still allowed", left_min, "rgba(140,158,176,.35)")])
+        # Days trained rather than rest days: on a Monday morning "7 rest days"
+        # is arithmetically right and reads like a warning.
+        trained = len(facts.trained_days)
+        ui.stat("Days trained", f"{trained}/7",
+                f"{wk.rest_days} rest {'day' if wk.rest_days == 1 else 'days'} "
+                f"left in the week",
+                "bad" if wk.rest_days == 0 else "neutral", small=True)
 
-    wk = week_summaries(acts, weeks=1, as_of=today,
-                        strength_rows=data["strength"])[-1]
     ui.section("This week",
                f"{hm(wk.total_minutes)} done of a {hm(env.max_week_minutes)} ceiling")
     ui.week_strip(week_cells(plan, today))
@@ -708,11 +750,16 @@ def page_today(data: dict, today: date) -> None:
     nxt = next_week_plan(today, data.get("scoped_to"))
     if nxt:
         total = sum(d["duration_min"] for d in nxt.get("week_plan", []))
-        ui.section(f"Next week · {day_label((week_start_of(today) + timedelta(weeks=1)).isoformat())} onwards",
-                   f"{hm(total)} planned — provisional, and re-derived when the week "
-                   f"arrives.")
-        ui.week_strip(week_cells(nxt, week_start_of(today) + timedelta(weeks=1),
-                                 mark_today=False))
+        # Collapsed: it is a preview of a week that has not started, and left open
+        # it cost 340px above the strength instructions for today, which is the
+        # thing actually being done in the next hour.
+        with st.expander(
+                f"Next week · "
+                f"{day_label((week_start_of(today) + timedelta(weeks=1)).isoformat())}"
+                f" onwards · {hm(total)} planned"):
+            st.caption("Provisional, and re-derived when the week arrives.")
+            ui.week_strip(week_cells(nxt, week_start_of(today) + timedelta(weeks=1),
+                                     mark_today=False))
 
     # Today's strength session, spelled out. It is the one sport where knowing
     # what to do is not enough — the exercises are only protective if they are
@@ -960,20 +1007,32 @@ def page_progress(data: dict, today: date) -> None:
                     "Percent change in speed or watts per heartbeat."):
         efficiency_block(acts, today, data.get("notes"), data.get("weather"))
 
-    detail = st.tabs(["Volume", "Daily signals", "Cadence and stride",
-                      "Running form", "Aerobic drift"])
+    detail = st.tabs(["Volume", "Load ramp", "Zone mix by week", "Daily signals",
+                      "Cadence and stride", "Running form", "Aerobic drift",
+                      "Heat and humidity"])
     with detail[0], ui.frame():
         st.caption("At most 10% growth a week, every fourth week easier.")
         volume_chart(data, today, data.get("notes"))
     with detail[1], ui.frame():
+        st.caption("Minutes say how much you did; load says how much it cost. "
+                   "The ratio between the last week and the last month is what "
+                   "predicts an injury.")
+        load_ramp_block(acts, today, data.get("notes"))
+    with detail[2], ui.frame():
+        st.caption("Is the mix drifting? A base block slides into tempo work a "
+                   "few minutes at a time.")
+        zone_trend_block(data, today)
+    with detail[3], ui.frame():
         st.caption("Overnight measurements against your own baseline.")
         trend_chart(wl, today)
-    with detail[2], ui.frame():
-        cadence_block(acts, today)
-    with detail[3], ui.frame():
-        form_block(acts)
     with detail[4], ui.frame():
+        cadence_block(acts, today)
+    with detail[5], ui.frame():
+        form_block(acts)
+    with detail[6], ui.frame():
         drift_block(acts, data.get("laps"))
+    with detail[7], ui.frame():
+        weather_block(data, today, data.get("notes"))
 
 
 def form_block(acts: list[dict]) -> None:
@@ -1255,6 +1314,389 @@ def drift_block(acts: list[dict], laps: list[dict] | None = None) -> None:
 # Dew point above this limits evaporative cooling enough to cost several beats
 # a minute at the same pace. Below it, conditions are not the explanation.
 MUGGY_DEW_C = 18.0
+
+
+def load_ramp_block(acts: list[dict], today: date,
+                    notes: dict | None = None) -> None:
+    """Daily load with its 7-day and 28-day averages, and the ratio between them.
+
+    The dashboard already shows today's load ratio as one number. A number cannot
+    say which way it is moving, and that is the part that decides whether to back
+    off: 1.25 on the way down is a different week from 1.25 climbing.
+    """
+    ramp = load_ramp(acts, as_of=today, days=90)
+    if len(ramp) < 2:
+        st.caption("Not enough logged sessions yet to draw a ramp.")
+        return
+    days = [r["day"] for r in ramp]
+    fig = go.Figure()
+    fig.add_bar(x=days, y=[r["load"] for r in ramp], name="that day",
+                marker=dict(color="rgba(140,158,176,.42)"),
+                # Width in milliseconds, because the axis is dates. Plotly's
+                # default splits the span between however many bars there are,
+                # which drew day-and-a-half-wide bars across six days of data.
+                width=0.8 * 86_400_000,
+                hovertemplate="%{x|%a %d-%m-%Y}<br>%{y:.0f} load<extra></extra>")
+    fig.add_scatter(x=days, y=[r["acute"] for r in ramp], mode="lines",
+                    name="7-day average", line=dict(color=TONE["caution"], width=2.5),
+                    hovertemplate="%{y:.1f}/day<extra>last 7 days</extra>")
+    fig.add_scatter(x=days, y=[r["chronic"] for r in ramp], mode="lines",
+                    name="28-day base", line=dict(color="#7FB6DC", width=2, dash="dot"),
+                    hovertemplate="%{y:.1f}/day<extra>last 28 days</extra>")
+    ratios = [r["ratio"] for r in ramp]
+    live = [x for x in ratios if x is not None]
+    if live:
+        # Second axis, because a ratio around 1 and a load in the hundreds cannot
+        # share a scale without one of them becoming a flat line.
+        fig.add_scatter(x=days, y=ratios, mode="lines", name="load ratio",
+                        yaxis="y2", line=dict(color=TONE["bad"], width=1.8),
+                        hovertemplate="ratio %{y:.2f}<extra></extra>")
+        fig.add_hrect(y0=ACWR_LOW, y1=ACWR_HIGH, yref="y2", line_width=0,
+                      fillcolor=TONE["good"], opacity=.10)
+        fig.update_layout(yaxis2=dict(
+            overlaying="y", side="right", showgrid=False,
+            range=[0, max(2.0, max(live) * 1.2)],
+            tickfont=dict(color=TONE["bad"], size=10)))
+    fig.update_layout(yaxis_title="load per day", hovermode="x unified")
+    ui.chart(fig, 230, date_axis=True)
+    verdict = ramp_verdict(ramp)
+    if verdict["ratio"] is None:
+        st.caption(f"Load ratio not shown yet — {verdict['note']}. The shaded band "
+                   f"is where a ramp is usually productive ({ACWR_LOW}–{ACWR_HIGH}).")
+    else:
+        st.caption(f"Load ratio {verdict['ratio']:.2f} — {verdict['note']}. "
+                   f"Productive band is {ACWR_LOW}–{ACWR_HIGH}.")
+    chart_ai_note("load_ramp", notes)
+
+
+def zone_trend_block(data: dict, today: date, weeks: int = 8) -> None:
+    """Where each week's minutes went, week on week, plus the easy share.
+
+    The 28-day split says what the mix is. This says whether it is drifting —
+    which is the thing that creeps: a base block slides into accidental tempo
+    work a few minutes at a time, and a single four-week average hides it.
+    """
+    ceiling = data.get("aerobic_ceiling")
+    rows = (stream_zone_weeks(db_stamp(), today.isoformat(), int(float(ceiling)),
+                              weeks, tuple(sorted(shown_sports())))
+            if ceiling else [])
+    if not rows:
+        st.caption("Needs stored heart-rate samples and an aerobic ceiling — "
+                   "set one on the Plan page." if not ceiling else
+                   "No heart-rate samples in the last few weeks.")
+        return
+    # Category axis, not dates: a weekly bar has no width in time, and with one
+    # or two weeks on record the date version repeated the same tick label three
+    # times and stretched a single bar across the whole plot.
+    weeks_x = [day_label(r["week_start"]) for r in rows]
+    fig = go.Figure()
+    for z in range(1, 6):
+        fig.add_bar(x=weeks_x, y=[r.get(f"z{z}", 0) for r in rows],
+                    name=ZONE_LABELS[z], marker=dict(color=ZONE_COLOR[z]),
+                    hovertemplate="week of %{x}<br>%{y:.0f} min"
+                                  f"<extra>{ZONE_LABELS[z]}</extra>")
+    easy = [r.get("easy_pct") for r in rows]
+    if any(e is not None for e in easy):
+        fig.add_scatter(x=weeks_x, y=easy, mode="lines+markers", yaxis="y2",
+                        name="easy share", line=dict(color=TONE["good"], width=2),
+                        marker=dict(size=7),
+                        hovertemplate="%{y:.0f}% easy<extra></extra>")
+        fig.add_hline(y=70, yref="y2", line=dict(color=TONE["good"], width=1,
+                                                 dash="dot"))
+        fig.update_layout(yaxis2=dict(overlaying="y", side="right", range=[0, 100],
+                                      showgrid=False, ticksuffix="%",
+                                      tickfont=dict(color=TONE["good"], size=10)))
+    # traceorder normal, so the legend reads Z1 to Z5 the way the stack does.
+    # bargap keeps a single week from becoming a bar the width of the panel.
+    fig.update_layout(barmode="stack", yaxis_title="minutes", bargap=0.55,
+                      legend=dict(traceorder="normal"))
+    # Keep at least three slots on the axis, so a first week does not draw one
+    # bar half the width of the panel.
+    fig.update_xaxes(range=[-0.5, max(2.5, len(rows) - 0.5)])
+    ui.chart(fig, 240)
+    st.caption(f"Counted against your {int(float(ceiling))} bpm ceiling. The dotted "
+               f"line is the 70% easy that base phase wants.")
+
+
+def consistency_block(data: dict, today: date, weeks: int = 16) -> None:
+    """A calendar of showing up. Endurance is mostly an attendance problem.
+
+    A heatmap rather than a chart of minutes on purpose: the failure mode this
+    catches is a gap, and a gap is a hole in a grid — it is invisible in a line
+    that simply carries on from either side of it.
+    """
+    rows = consistency(data["activities"], as_of=today, weeks=weeks,
+                       strength_rows=data.get("strength"))
+    if not rows:
+        st.caption("No sessions logged yet.")
+        return
+    week_cols = sorted({r["day"] - timedelta(days=r["day"].weekday()) for r in rows})
+    at = {w: i for i, w in enumerate(week_cols)}
+    grid = [[None] * len(week_cols) for _ in range(7)]
+    label = [[""] * len(week_cols) for _ in range(7)]
+    for r in rows:
+        col = at[r["day"] - timedelta(days=r["day"].weekday())]
+        row = r["day"].weekday()
+        grid[row][col] = r["minutes"]
+        sports = ", ".join(f"{EMOJI.get(sp, '')} {sp}" for sp in r["sports"])
+        label[row][col] = (f"{day_label(r['day'].isoformat(), year=True)}<br>"
+                           + (f"{sports}<br>{r['minutes']:.0f} min" if r["sports"]
+                              else "rest"))
+    top = max([r["minutes"] for r in rows] or [60]) or 60
+    fig = go.Figure(go.Heatmap(
+        z=grid, x=[w.strftime("%d-%m") for w in week_cols],
+        y=[DAYS[i] for i in range(7)], text=label,
+        hovertemplate="%{text}<extra></extra>",
+        # A rest day has to read as empty, not as the bottom of a green scale,
+        # so zero gets its own near-transparent step.
+        colorscale=[[0, "rgba(140,158,176,.12)"], [0.001, "rgba(63,182,139,.30)"],
+                    [1, TONE["good"]]],
+        zmin=0, zmax=max(60, top), showscale=False, xgap=3, ygap=3))
+    # Explicitly categorical. Left to itself Plotly reads "17-08" as a number and
+    # drew the sixteen weeks along an axis labelled 2005 to 2025.
+    fig.update_xaxes(type="category", tickangle=0)
+    fig.update_yaxes(type="category", autorange="reversed")
+    ui.chart(fig, 210)
+    s = streak(rows)
+    active = s["active_days"]
+    ui.figures([
+        {"label": "Current streak", "value": f"{s['current']} d",
+         "note": "days with something logged",
+         "tone": "good" if s["current"] >= 3 else "neutral"},
+        {"label": "Longest streak", "value": f"{s['longest']} d",
+         "note": f"in the last {weeks} weeks"},
+        {"label": "Active days", "value": f"{active}/{s['days']}",
+         "note": f"{active / max(s['days'], 1) * 100:.0f}% of days",
+         "tone": "good" if active / max(s["days"], 1) >= 0.5 else "caution"},
+        {"label": "Rest days", "value": f"{s['days'] - active}",
+         "note": "recovery is where adaptation happens"},
+    ])
+
+
+def weather_block(data: dict, today: date, notes: dict | None = None) -> None:
+    """Heart rate at a reference pace against dew point.
+
+    Here because the efficiency charts treat every session as comparable and they
+    are not. At a 21°C dew point sweat barely evaporates and the same pace costs
+    several beats more; reading that as lost fitness is the easiest wrong
+    conclusion this dashboard makes available.
+    """
+    eff = weather_effect(data["activities"], data.get("weather") or {}, sport="run")
+    pts = eff["points"]
+    if not pts:
+        st.caption("No outdoor runs yet with both weather and a comparable pace.")
+        return
+    fig = go.Figure()
+    fig.add_scatter(
+        x=[p["dew_point_c"] for p in pts], y=[p["hr_at_reference"] for p in pts],
+        mode="markers+text", name="runs",
+        marker=dict(size=12, opacity=.85,
+                    color=[TONE["bad"] if p["dew_point_c"] >= DEW_POINT_HARD_C
+                           else TONE["caution"] for p in pts]),
+        text=[day_label(p["date"].isoformat()) for p in pts],
+        textposition="middle right", textfont=dict(size=10),
+        customdata=[[p["condition"], p["temp_c"] or 0] for p in pts],
+        hovertemplate="dew point %{x:.1f}°C · %{customdata[1]:.0f}°C air<br>"
+                      "%{y:.0f} bpm at your usual pace<br>%{customdata[0]}"
+                      "<extra></extra>")
+    hottest = max(p["dew_point_c"] for p in pts)
+    if hottest >= DEW_POINT_HARD_C:  # noqa: SIM102
+        fig.add_vrect(x0=DEW_POINT_HARD_C, x1=hottest + 1.5, line_width=0,
+                      fillcolor=TONE["bad"], opacity=.07)
+    fig.update_layout(xaxis_title="dew point °C",
+                      yaxis_title="bpm at your usual pace")
+    lo = min(p["dew_point_c"] for p in pts)
+    fig.update_xaxes(showgrid=False, range=[lo - 0.8, hottest + 2.2])
+    ui.chart(fig, 230)
+    bits = [f"{eff['hot_share']}% of these runs were above {DEW_POINT_HARD_C:.0f}°C "
+            f"dew point, where evaporative cooling stops keeping up"]
+    if eff["bpm_per_deg"] is not None:
+        bits.append(f"and each degree costs about {eff['bpm_per_deg']:+.1f} bpm at "
+                    f"the same pace")
+    st.caption(". ".join(bits) + ". Read a bad session against this before "
+               "reading it as lost fitness.")
+    chart_ai_note("heat", notes)
+
+
+@st.cache_data(show_spinner=False, ttl=1800)
+def _ask_answer(stamp: float, iso_today: str, question: str) -> str:  # noqa: ARG001
+    """Cached on the question and the data, so a rerun costs nothing."""
+    try:
+        def read(s: Store) -> str:
+            payload = {
+                "activities": s.activities(), "wellness": s.wellness(),
+                "zones": s.zones(), "strength": s.strength_log(),
+                "checkins": s.checkins(limit=8), "race": s.race_predictions(),
+                "records": s.personal_records(), "targets": s.targets(),
+                "aerobic_ceiling": s.get_state("aerobic_ceiling_bpm"),
+                "plan": s.latest_plan(week_start_of(date.fromisoformat(iso_today))),
+            }
+            return insights.ask(question, payload,
+                                date.fromisoformat(iso_today)) or ""
+        return with_store(read)
+    except Exception as exc:  # noqa: BLE001 - a failed answer is not a broken page
+        log.warning("Coach answer failed: %s", exc)
+        return ""
+
+
+SUGGESTED_QUESTIONS = (
+    "Why were my runs so hard?",
+    "Am I actually getting fitter?",
+    "Is my easy pace easy enough?",
+    "Can I add a session this week?",
+)
+
+
+def ask_block(data: dict, today: date) -> None:
+    """Free-text questions answered from the same facts the charts are drawn from.
+
+    Deliberately read-only: it cannot change the plan. The planner is the only
+    thing allowed to do that, because the planner is the layer the rules are
+    enforced in — an answer that could quietly edit the week would route around
+    every guardrail in the app.
+    """
+    if not ai.available():
+        return
+    with st.expander("Ask the coach", expanded=False):
+        picked = st.pills("Common questions", SUGGESTED_QUESTIONS,
+                          selection_mode="single", key="ask_pick",
+                          label_visibility="collapsed")
+        typed = st.text_input(
+            "Your question", key="ask_q", label_visibility="collapsed",
+            placeholder="Ask about your own numbers — “why was Wednesday so hard?”")
+        question = (typed or picked or "").strip()
+        go_ask = st.button("Ask", key="ask_go", disabled=not question)
+        if go_ask and question:
+            with st.spinner("Reading your data…"):
+                answer = _ask_answer(db_stamp(), today.isoformat(), question)
+            st.session_state["ask_answer"] = (question, answer)
+        held = st.session_state.get("ask_answer")
+        if held and held[1]:
+            st.markdown(f"**{held[0]}**")
+            st.markdown(held[1])
+        elif held:
+            st.caption("The AI backend did not answer. The charts below are "
+                       "unaffected — they are computed locally.")
+        st.caption("Answered from your stored sessions, recovery signals and this "
+                   "week's plan. It cannot change the plan or override a rule.")
+
+
+RACE_DISTANCES = (("time_5k", "5K", 5.0), ("time_10k", "10K", 10.0),
+                  ("time_half", "Half", 21.0975), ("time_marathon", "Marathon",
+                                                    42.195))
+
+
+def clock(seconds: float | None) -> str:
+    """h:mm:ss, or m:ss under an hour. Race times, not durations."""
+    if not seconds:
+        return "—"
+    total = int(round(float(seconds)))
+    h, rest = divmod(total, 3600)
+    m, s = divmod(rest, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def race_block(race: list[dict], notes: dict | None = None) -> None:
+    """Garmin's race predictions, plotted as pace so the four are comparable.
+
+    Stored since the first sync and never shown until now. Plotting the raw
+    seconds would put a 29-minute 5K and a six-hour marathon on one axis, where
+    the 5K becomes a flat line at the bottom — so each is divided by its own
+    distance. Predicted pace per kilometre falling across all four distances is
+    the same claim as "the engine is getting bigger", in a unit that can be run.
+    """
+    rows = [r for r in (race or [])
+            if any(r.get(field) for field, _, _ in RACE_DISTANCES)]
+    if not rows:
+        st.caption("No race predictions stored yet — Garmin needs a few more runs.")
+        return
+    rows.sort(key=lambda r: str(r["day"]))
+    fig = go.Figure()
+    colours = {"5K": TONE["good"], "10K": "#7FB6DC", "Half": TONE["caution"],
+               "Marathon": "#A98BD9"}
+    for field, label, km in RACE_DISTANCES:
+        xs = [r["day"] for r in rows if r.get(field)]
+        ys = [float(r[field]) / 60.0 / km for r in rows if r.get(field)]
+        if not xs:
+            continue
+        fig.add_scatter(x=xs, y=ys, mode="lines+markers", name=label,
+                        line=dict(color=colours[label], width=2.2),
+                        marker=dict(size=7),
+                        hovertemplate="%{x|%a %d-%m-%Y}<br>%{y:.2f} min/km"
+                                      f"<extra>{label}</extra>")
+    fig.update_layout(yaxis_title="predicted pace (min/km)")
+    ui.chart(fig, 220, date_axis=True)
+    latest = rows[-1]
+    first = rows[0]
+    cells = []
+    for field, label, _ in RACE_DISTANCES:
+        if not latest.get(field):
+            continue
+        note, tone = "Garmin estimate", "neutral"
+        if first.get(field) and first is not latest:
+            delta = float(latest[field]) - float(first[field])
+            # Faster is a negative delta, so the sign is flipped for reading.
+            note = f"{'-' if delta < 0 else '+'}{clock(abs(delta))} since " \
+                   f"{day_label(str(first['day']))}"
+            tone = "good" if delta < 0 else "caution" if delta > 0 else "neutral"
+        cells.append({"label": label, "value": clock(latest[field]),
+                      "note": note, "tone": tone})
+    ui.figures(cells)
+    chart_ai_note("race", notes)
+
+
+def lap_block(activity_id: str, laps: list[dict], sport: str) -> None:
+    """Per-lap pace with heart rate over it, for one session.
+
+    The single most useful chart for the problem this athlete actually has: the
+    session summary says the average heart rate was 158, and this says whether
+    that was 158 all the way or 140 climbing to 172 while the pace held. Auto-lap
+    on the watch makes it a free kilometre-by-kilometre split.
+    """
+    rows = sorted((l for l in (laps or [])
+                   if str(l.get("activity_id")) == str(activity_id)),
+                  key=lambda l: l.get("lap_index") or 0)
+    if len(rows) < 2:
+        return
+    ui.section("Splits", f"{len(rows)} laps, as the watch recorded them.")
+    x = [f"{int(l.get('lap_index') or i + 1)}" for i, l in enumerate(rows)]
+    fig = go.Figure()
+    speeds = [float(l["avg_speed_mps"]) for l in rows if l.get("avg_speed_mps")]
+    if len(speeds) == len(rows) and all(s > 0 for s in speeds):
+        if sport == "swim":
+            pace = [100.0 / s / 60.0 for s in speeds]      # min per 100 m
+            unit = "min/100m"
+        else:
+            pace = [1000.0 / s / 60.0 for s in speeds]      # min per km
+            unit = "min/km"
+        fig.add_bar(x=x, y=pace, name=f"pace ({unit})",
+                    marker=dict(color="rgba(127,182,220,.55)"),
+                    hovertemplate="lap %{x}<br>%{y:.2f} " + unit + "<extra></extra>")
+        # Reversed, so a taller bar is a faster lap rather than a slower one.
+        fig.update_yaxes(autorange="reversed", title=unit)
+    hrs = [l.get("avg_hr") for l in rows]
+    if any(h for h in hrs):
+        fig.add_scatter(x=x, y=hrs, mode="lines+markers", name="heart rate",
+                        yaxis="y2", line=dict(color=TONE["bad"], width=2.2),
+                        marker=dict(size=8),
+                        hovertemplate="lap %{x}<br>%{y:.0f} bpm<extra></extra>")
+        fig.update_layout(yaxis2=dict(overlaying="y", side="right", showgrid=False,
+                                      title="bpm",
+                                      tickfont=dict(color=TONE["bad"], size=10)))
+    fig.update_layout(xaxis_title="lap", hovermode="x unified", barmode="overlay")
+    with ui.frame():
+        ui.chart(fig, 240)
+    drift = lap_drift(rows)
+    spread = lap_pace_spread(rows)
+    bits = []
+    if drift.get("hr_drift_bpm") is not None:
+        bits.append(f"Heart rate rose {drift['hr_drift_bpm']:+.0f} bpm from the "
+                    f"first comparable lap to the last")
+    if spread is not None:
+        bits.append(f"pace varied {spread * 100:.1f}% across them")
+    if bits:
+        st.caption(". ".join(bits) + ". Heart rate climbing while the pace holds "
+                   "is either a start that was too quick or the heat.")
 
 
 def humid_days(acts: list[dict], weather: dict | None) -> dict[date, str]:
@@ -1629,136 +2071,137 @@ def page_plan(data: dict, today: date) -> None:
     # Settings last, and deliberately. The week is what this page is for;
     # zones, the easy ceiling and weekly volume get set once and then left,
     # and having them first pushed the plan itself halfway down the page.
-    ui.section("Settings", "Set these once. They shape every week that follows.")
+    with st.expander("Settings — heart-rate zones, easy ceiling and weekly targets"):
+        st.caption("Set these once. They shape every week that follows.")
 
-    with Store(db_path()) as _s:
-        bounds = zone_bounds(_s.zones())
-    if bounds:
         with Store(db_path()) as _s:
-            lthr = _s.get_state("threshold_hr")
-            saved_ceiling = _s.get_state("aerobic_ceiling_bpm")
-        lthr_f = float(lthr) if lthr else None
-        opts = aerobic_ceiling_options(bounds, lthr_f)
-        ceiling = int(float(saved_ceiling)) if saved_ceiling else opts["garmin_z2_top"]
+            bounds = zone_bounds(_s.zones())
+        if bounds:
+            with Store(db_path()) as _s:
+                lthr = _s.get_state("threshold_hr")
+                saved_ceiling = _s.get_state("aerobic_ceiling_bpm")
+            lthr_f = float(lthr) if lthr else None
+            opts = aerobic_ceiling_options(bounds, lthr_f)
+            ceiling = int(float(saved_ceiling)) if saved_ceiling else opts["garmin_z2_top"]
 
-        ui.section("Your heart-rate zones",
-                   "From Garmin, so they match the watch. Note Z5 starts exactly "
-                   "at your threshold heart rate — these zones are anchored to "
-                   "threshold, not to an estimated maximum.")
-        ui.stats_row([
-            {"label": f"Z{z}", "value": (f"{lo}–{hi}" if hi else f"{lo}+"),
-             "note": {1: "recovery", 2: "aerobic base", 3: "tempo",
-                      4: "threshold", 5: "VO2max"}.get(z, ""),
-             "tone": "good" if z == 2 else ("bad" if z >= 4 else "neutral")}
-            for z, (lo, hi) in sorted(bounds.items())
-        ])
-
-        if opts["candidates"]:
-            ui.section("What counts as easy for you",
-                       f"Garmin's Z2 ceiling is {opts['garmin_z2_top']} bpm — "
-                       f"{opts['garmin_z2_top'] / lthr_f * 100:.0f}% of your "
-                       f"{int(lthr_f)} bpm threshold, which is conservative next to "
-                       f"the common threshold-anchored schemes below. If Z2 feels "
-                       f"absurdly slow, you are probably right; set your own "
-                       f"ceiling and every Z2 target follows it.")
+            ui.section("Your heart-rate zones",
+                       "From Garmin, so they match the watch. Note Z5 starts exactly "
+                       "at your threshold heart rate — these zones are anchored to "
+                       "threshold, not to an estimated maximum.")
             ui.stats_row([
-                {"label": c["label"], "value": f"{c['bpm']} bpm", "note": c["note"],
-                 "tone": "good" if c["bpm"] == ceiling else "neutral"}
-                for c in opts["candidates"]
+                {"label": f"Z{z}", "value": (f"{lo}–{hi}" if hi else f"{lo}+"),
+                 "note": {1: "recovery", 2: "aerobic base", 3: "tempo",
+                          4: "threshold", 5: "VO2max"}.get(z, ""),
+                 "tone": "good" if z == 2 else ("bad" if z >= 4 else "neutral")}
+                for z, (lo, hi) in sorted(bounds.items())
             ])
-            with st.form("ceiling"):
-                cc = st.columns([2, 1], vertical_alignment="bottom")
-                new_ceiling = cc[0].slider(
-                    "Your aerobic-base ceiling (bpm)",
-                    int(bounds[2][0]) + 5, int(lthr_f) - 5, int(ceiling),
-                    help="The real test is speech: the highest heart rate at which "
-                         "you can still talk in full sentences. Nothing in the "
-                         "data can tell you that, so this is your call.")
-                if cc[1].form_submit_button("Save ceiling", type="primary",
-                                           width="stretch",
-                                           disabled=not unlocked) and writes_allowed():
-                    with Store(db_path()) as _s:
-                        _s.set_state("aerobic_ceiling_bpm", str(int(new_ceiling)))
-                        # Every Z2 target is derived from this, so a saved ceiling
-                        # that leaves the plan untouched looks like it did nothing.
-                        with st.spinner("Restamping your targets…"):
-                            rebuilt = planner.plan_week(
-                                _s, today=today, use_ai=False,
-                                only_sports=data.get("scoped_to"))
-                    st.session_state["plan"] = rebuilt.model_dump(mode="json")
-                    st.session_state.pop("plan_editor", None)
-                    refresh()
-                    st.rerun()
-            if ceiling and ceiling > (bounds[2][1] or 0):
-                st.caption(
-                    f"At {ceiling} bpm you are above Garmin's Z2, so Garmin itself "
-                    f"will call that time 'moderate'. The Intensity page measures "
-                    f"against this ceiling instead, from your stored heart-rate "
-                    f"samples, and shows both numbers side by side."
-                )
 
-    ui.section("Your weekly targets",
-               "How much of each sport you want. The scheduler builds around this; "
-               "the safety rules still cap the total.")
-    existing = data["targets"]
-    suggestions = suggested_targets(today, data.get("scoped_to"))
-    with st.form("targets"):
-        st.caption("Pre-filled from your own recent weeks — edit anything you "
-                   "disagree with. Use the header toggle to drop a sport "
-                   "entirely; it then gets no sessions and no long-session "
-                   "requirement, and its share of the week goes to the rest.")
-        rows = []
-        for sport in shown_sports():
-            cur = existing.get(sport) or {}
-            hint = suggestions.get(sport) or {}
-            # An empty box asks the athlete to guess a number the app already has
-            # the evidence for, so a saved value wins and a suggestion fills the
-            # gap. The reasoning is shown either way.
-            default_sessions = int(cur.get("sessions") or hint.get("sessions") or 0)
-            default_minutes = int(cur.get("minutes") or hint.get("minutes") or 0)
-            c = st.columns([1.35, 1, 1], vertical_alignment="center")
-            c[0].markdown(f"{EMOJI[sport]} **{sport.title()}**")
-            if hint.get("basis"):
-                c[0].caption(("saved" if cur.get("sessions") else "suggested")
-                             + f" · {hint['basis']}")
-            rows.append({
-                "sport": sport,
-                # Preserved, not re-decided here: the header toggle is the one
-                # place that answers "is this sport on?".
-                "enabled": int(bool(cur.get("enabled", 1))),
-                "sessions": c[1].number_input("sessions", 0, 7, default_sessions,
-                                              key=f"ts_{sport}"),
-                "minutes": c[2].number_input("minutes", 0, 900, default_minutes,
-                                             step=15, key=f"tm_{sport}"),
-            })
-        b = st.columns(2)
-        save = b[0].form_submit_button("Save targets", type="primary",
-                                       width="stretch", disabled=not unlocked)
-        clear = b[1].form_submit_button("Clear", width="stretch",
-                                        disabled=not unlocked)
-    if (save or clear) and writes_allowed():
-        # Changing which sports are on IS a planning decision, so rebuild
-        # immediately rather than making the athlete find a second button.
-        with Store(db_path()) as s:
-            if clear:
-                s.clear_targets()
-            else:
-                s.set_targets(rows)
-            last = s.latest_checkin()
-            ci = Checkin(
-                date=today, sleep=(last or {}).get("sleep") or 3,
-                soreness=(last or {}).get("soreness") or 3,
-                motivation=(last or {}).get("motivation") or 3,
-                time_available_min=(last or {}).get("time_available_min") or 90,
-                notes=(last or {}).get("notes") or "") if last else None
-            with st.spinner("Rebuilding your week around that…"):
-                plan = planner.plan_week(s, checkin=ci, today=today,
-                                         use_ai=ai.available(),
-                                         only_sports=data.get("scoped_to"))
-        st.session_state["plan"] = plan.model_dump(mode="json")
-        st.session_state.pop("plan_editor", None)
-        refresh()
-        st.rerun()
+            if opts["candidates"]:
+                ui.section("What counts as easy for you",
+                           f"Garmin's Z2 ceiling is {opts['garmin_z2_top']} bpm — "
+                           f"{opts['garmin_z2_top'] / lthr_f * 100:.0f}% of your "
+                           f"{int(lthr_f)} bpm threshold, which is conservative next to "
+                           f"the common threshold-anchored schemes below. If Z2 feels "
+                           f"absurdly slow, you are probably right; set your own "
+                           f"ceiling and every Z2 target follows it.")
+                ui.stats_row([
+                    {"label": c["label"], "value": f"{c['bpm']} bpm", "note": c["note"],
+                     "tone": "good" if c["bpm"] == ceiling else "neutral"}
+                    for c in opts["candidates"]
+                ])
+                with st.form("ceiling"):
+                    cc = st.columns([2, 1], vertical_alignment="bottom")
+                    new_ceiling = cc[0].slider(
+                        "Your aerobic-base ceiling (bpm)",
+                        int(bounds[2][0]) + 5, int(lthr_f) - 5, int(ceiling),
+                        help="The real test is speech: the highest heart rate at which "
+                             "you can still talk in full sentences. Nothing in the "
+                             "data can tell you that, so this is your call.")
+                    if cc[1].form_submit_button("Save ceiling", type="primary",
+                                               width="stretch",
+                                               disabled=not unlocked) and writes_allowed():
+                        with Store(db_path()) as _s:
+                            _s.set_state("aerobic_ceiling_bpm", str(int(new_ceiling)))
+                            # Every Z2 target is derived from this, so a saved ceiling
+                            # that leaves the plan untouched looks like it did nothing.
+                            with st.spinner("Restamping your targets…"):
+                                rebuilt = planner.plan_week(
+                                    _s, today=today, use_ai=False,
+                                    only_sports=data.get("scoped_to"))
+                        st.session_state["plan"] = rebuilt.model_dump(mode="json")
+                        st.session_state.pop("plan_editor", None)
+                        refresh()
+                        st.rerun()
+                if ceiling and ceiling > (bounds[2][1] or 0):
+                    st.caption(
+                        f"At {ceiling} bpm you are above Garmin's Z2, so Garmin itself "
+                        f"will call that time 'moderate'. The Intensity page measures "
+                        f"against this ceiling instead, from your stored heart-rate "
+                        f"samples, and shows both numbers side by side."
+                    )
+
+        ui.section("Your weekly targets",
+                   "How much of each sport you want. The scheduler builds around this; "
+                   "the safety rules still cap the total.")
+        existing = data["targets"]
+        suggestions = suggested_targets(today, data.get("scoped_to"))
+        with st.form("targets"):
+            st.caption("Pre-filled from your own recent weeks — edit anything you "
+                       "disagree with. Use the header toggle to drop a sport "
+                       "entirely; it then gets no sessions and no long-session "
+                       "requirement, and its share of the week goes to the rest.")
+            rows = []
+            for sport in shown_sports():
+                cur = existing.get(sport) or {}
+                hint = suggestions.get(sport) or {}
+                # An empty box asks the athlete to guess a number the app already has
+                # the evidence for, so a saved value wins and a suggestion fills the
+                # gap. The reasoning is shown either way.
+                default_sessions = int(cur.get("sessions") or hint.get("sessions") or 0)
+                default_minutes = int(cur.get("minutes") or hint.get("minutes") or 0)
+                c = st.columns([1.35, 1, 1], vertical_alignment="center")
+                c[0].markdown(f"{EMOJI[sport]} **{sport.title()}**")
+                if hint.get("basis"):
+                    c[0].caption(("saved" if cur.get("sessions") else "suggested")
+                                 + f" · {hint['basis']}")
+                rows.append({
+                    "sport": sport,
+                    # Preserved, not re-decided here: the header toggle is the one
+                    # place that answers "is this sport on?".
+                    "enabled": int(bool(cur.get("enabled", 1))),
+                    "sessions": c[1].number_input("sessions", 0, 7, default_sessions,
+                                                  key=f"ts_{sport}"),
+                    "minutes": c[2].number_input("minutes", 0, 900, default_minutes,
+                                                 step=15, key=f"tm_{sport}"),
+                })
+            b = st.columns(2)
+            save = b[0].form_submit_button("Save targets", type="primary",
+                                           width="stretch", disabled=not unlocked)
+            clear = b[1].form_submit_button("Clear", width="stretch",
+                                            disabled=not unlocked)
+        if (save or clear) and writes_allowed():
+            # Changing which sports are on IS a planning decision, so rebuild
+            # immediately rather than making the athlete find a second button.
+            with Store(db_path()) as s:
+                if clear:
+                    s.clear_targets()
+                else:
+                    s.set_targets(rows)
+                last = s.latest_checkin()
+                ci = Checkin(
+                    date=today, sleep=(last or {}).get("sleep") or 3,
+                    soreness=(last or {}).get("soreness") or 3,
+                    motivation=(last or {}).get("motivation") or 3,
+                    time_available_min=(last or {}).get("time_available_min") or 90,
+                    notes=(last or {}).get("notes") or "") if last else None
+                with st.spinner("Rebuilding your week around that…"):
+                    plan = planner.plan_week(s, checkin=ci, today=today,
+                                             use_ai=ai.available(),
+                                             only_sports=data.get("scoped_to"))
+            st.session_state["plan"] = plan.model_dump(mode="json")
+            st.session_state.pop("plan_editor", None)
+            refresh()
+            st.rerun()
 
 
 
@@ -1858,6 +2301,28 @@ def stream_zone_minutes(stamp: float, iso_today: str, ceiling: int,
     except Exception as exc:  # noqa: BLE001 - fall back to Garmin's own buckets
         log.warning("Stream zone minutes failed: %s", exc)
         return {}
+
+
+@st.cache_data(show_spinner=False, ttl=900)
+def stream_zone_weeks(stamp: float, iso_today: str, ceiling: int, weeks: int = 8,
+                      sports: tuple[str, ...] = ()) -> list:  # noqa: ARG001
+    """Minutes per zone per week, against the athlete's ceiling. Cached: it reads
+    every stored heart-rate stream, the same heavy query as the 28-day version."""
+    try:
+        def read(s: Store) -> list:
+            acts = [a for a in s.activities()
+                    if not sports or a.get("sport") in set(sports)]
+            streams = {a["activity_id"]: s.stream(a["activity_id"]) for a in acts}
+            bounds = zone_bounds_with_ceiling(zone_bounds(s.zones()), ceiling)
+            rows = weekly_zone_minutes_from_streams(
+                streams, acts, bounds, weeks=weeks,
+                as_of=date.fromisoformat(iso_today))
+            # Dates out, ISO strings back: the cache stores what this returns.
+            return [{**r, "week_start": r["week_start"].isoformat()} for r in rows]
+        return with_store(read) or []
+    except Exception as exc:  # noqa: BLE001 - an empty panel beats a broken page
+        log.warning("Weekly zone minutes failed: %s", exc)
+        return []
 
 
 @st.cache_data(show_spinner=False, ttl=900)
@@ -1973,6 +2438,12 @@ def page_lifetime(data: dict, today: date) -> None:
              if body.get("threshold_hr") else "—", "lactate threshold"),
         ])
 
+    ui.section("What Garmin thinks you could race",
+               "Its own predictions, plotted as pace so all four distances share "
+               "one axis. Down is faster.")
+    with ui.frame():
+        race_block(data.get("race") or [], data.get("notes"))
+
     records = data.get("records") or []
     if records:
         ui.section("Personal records", "Garmin's own, not recomputed here.")
@@ -1985,6 +2456,12 @@ def page_lifetime(data: dict, today: date) -> None:
             ui.rows(pr_rows[:half])
         with cols[1]:
             ui.rows(pr_rows[half:])
+
+    ui.section("Showing up",
+               "Every day of the last sixteen weeks. Colour is minutes trained; "
+               "the gaps are the part worth looking at.")
+    with ui.frame():
+        consistency_block(data, today)
 
     ui.section("Heart rate at your usual pace",
                "The headline trend: the same pace costing fewer beats is fitness. "
@@ -2040,6 +2517,23 @@ def page_about(data: dict, today: date) -> None:
          "it buzzes if you drift out of the range"),
         ("4. It reads what happened", "on Refresh",
          "and rebuilds the rest of the week"),
+        ("5. You ask it anything", "Ask the coach",
+         "answered from your own numbers, on the Today page"),
+    ])
+
+    ui.section("What the AI is allowed to do",
+               "Worth being precise about, because the limits are the product.")
+    ui.rows([
+        ("Adjust the week", "yes",
+         "volume, intensity and which day — inside the envelope"),
+        ("Write the reasons", "yes", "one line per session, in plain language"),
+        ("Read a chart for you", "yes",
+         "a sentence under each one, so charts are optional"),
+        ("Answer a question", "yes",
+         "from your stored sessions, signals and plan — nothing else"),
+        ("Exceed the volume cap", "no", "re-checked in code after it answers"),
+        ("Overrule a deload", "no", "recovery data decides that, not mood"),
+        ("Invent an exercise", "no", "the strength library is fixed"),
     ])
 
     ui.section("What goes to the watch")
@@ -2265,7 +2759,6 @@ def log_sessions(data: dict, today: date) -> None:
         # was flat.
         fig = go.Figure()
         if has_alt:
-            base = float(sdf["altitude_m"].min())
             fig.add_scatter(
                 x=sdf["minutes"], y=sdf["altitude_m"], name="Elevation (m)",
                 mode="lines", line=dict(width=0.8, color="rgba(140,158,176,.55)"),
@@ -2278,6 +2771,20 @@ def log_sessions(data: dict, today: date) -> None:
                 fig.add_scatter(x=sdf["minutes"], y=sdf[col], mode="lines", name=nm,
                                 line=dict(width=1.6, color=colr),
                                 yaxis="y" if col == "hr" else "y2")
+        # Zone bands behind the trace, against this athlete's own ceiling. The
+        # zone bar above says how long was spent in each; this says *when*, which
+        # is the difference between a steady session and a fast start.
+        if "hr" in sdf and sdf["hr"].notna().any():
+            bands = zone_bounds_with_ceiling(
+                zone_bounds(data["zones"]),
+                float(ceiling) if ceiling else None)
+            top = float(sdf["hr"].max())
+            for number, (low, high) in sorted(bands.items()):
+                if low > top:
+                    continue
+                fig.add_hrect(y0=low, y1=min(high or top + 5, top + 5),
+                              line_width=0, fillcolor=ZONE_COLOR[number],
+                              opacity=.09, layer="below")
         layout = dict(xaxis_title="minutes into the session",
                       yaxis=dict(title="heart rate"),
                       yaxis2=dict(overlaying="y", side="right", showgrid=False),
@@ -2309,6 +2816,7 @@ def log_sessions(data: dict, today: date) -> None:
     if act.get("decoupling_pct") is not None:
         st.caption(f"Aerobic drift across this session: {act['decoupling_pct']:.1f}% "
                    f"(under 5% is good durability).")
+    lap_block(aid, data.get("laps") or [], act["sport"])
 
 
 def log_strength(data: dict, today: date) -> None:

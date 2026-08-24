@@ -24,7 +24,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dotenv import load_dotenv  # noqa: E402
 
 from core.garmin_guard import GarminBlocked  # noqa: E402
-from core.store import default_db  # noqa: E402
 from core.sync import guard_status, sync  # noqa: E402
 
 log = logging.getLogger("aerobic_engine.fetch")
