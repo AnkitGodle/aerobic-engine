@@ -1011,9 +1011,9 @@ def page_progress(data: dict, today: date) -> None:
 
     # The one chart the whole page exists for.
     ui.section("Heart rate at your usual pace",
-               "Each point is what this session's efficiency implies at your "
-               "median pace, so sessions of different speeds are comparable. "
-               "Down is progress.")
+               "Every session is shown as the heart rate it would have taken at "
+               "your normal pace, so a fast day and a slow day can be compared. "
+               "A line going down means you are getting fitter.")
     with ui.frame():
         training_hr_block(acts, today, data.get("notes"), data.get("weather"),
                           ceiling=data.get("aerobic_ceiling"))
@@ -1110,30 +1110,34 @@ def page_progress(data: dict, today: date) -> None:
     # panels down the page was 2354px of scrolling; three visible with the rest
     # one click away is the same information in a third of the height.
     a, b = st.columns(2, gap="medium")
-    with a, ui.card("Where your effort goes",
-                    "Base phase wants most time easy."):
+    with a, ui.card("How hard your training has been",
+                    "At this stage most of it should feel easy."):
         intensity_block(zones, today, data.get("notes"), data)
-    with b, ui.card("Efficiency against your own baseline",
-                    "Percent change in speed or watts per heartbeat."):
+    with b, ui.card("Speed you get per heartbeat",
+                    "How much further each beat carries you, compared with your "
+                    "first session."):
         efficiency_block(acts, today, data.get("notes"), data.get("weather"))
 
-    detail = st.tabs(["Volume", "Load ramp", "Zone mix by week", "Daily signals",
-                      "Cadence and stride", "Running form", "Aerobic drift",
-                      "Heat and humidity"])
+    detail = st.tabs(["Hours a week", "How fast you are building",
+                      "Easy vs hard, week by week", "Overnight numbers",
+                      "Steps and stride", "Running form",
+                      "Heart rate creep", "Heat"])
     with detail[0], ui.frame():
-        st.caption("At most 10% growth a week, every fourth week easier.")
+        st.caption("Never more than 10% more than last week, and every "
+                   "fourth week is an easy one.")
         volume_chart(data, today, data.get("notes"))
     with detail[1], ui.frame():
-        st.caption("Minutes say how much you did; load says how much it cost. "
-                   "The ratio between the last week and the last month is what "
-                   "predicts an injury.")
+        st.caption("Minutes say how much you did. Load says how much it took "
+                   "out of you. Comparing the last week with the last month is "
+                   "the best warning sign there is for getting hurt.")
         load_ramp_block(acts, today, data.get("notes"))
     with detail[2], ui.frame():
-        st.caption("Is the mix drifting? A base block slides into tempo work a "
-                   "few minutes at a time.")
+        st.caption("Easy training turns into hard training a few minutes at "
+                   "a time, and this is where you would see it happening.")
         zone_trend_block(data, today)
     with detail[3], ui.frame():
-        st.caption("Overnight measurements against your own baseline.")
+        st.caption("What your watch measured while you slept, against your "
+                   "own normal.")
         trend_chart(wl, today)
     with detail[4], ui.frame():
         cadence_block(acts, today)
@@ -1155,9 +1159,13 @@ def form_block(acts: list[dict]) -> None:
     runs = [a for a in acts if a.get("sport") == "run"
             and (a.get("ground_contact_ms") or a.get("vertical_ratio"))]
     if not runs:
+        # Accurate about why, now that the sync fetches these deliberately: they
+        # are not in the activity list, so each run costs one extra request and
+        # they are filled in a few at a time.
         st.caption(
-            "Ground contact and bounce are not in the activity list Garmin "
-            "returns — they arrive with the next full sync of each run.")
+            "No numbers yet. Your watch measures these, but Garmin only hands "
+            "them over one run at a time, so the sync collects a few on each "
+            "run — they will appear here shortly.")
         return
 
     def mean(field: str) -> float | None:
@@ -1167,12 +1175,12 @@ def form_block(acts: list[dict]) -> None:
     gct, osc, ratio = (mean("ground_contact_ms"), mean("vertical_osc_cm"),
                        mean("vertical_ratio"))
     ui.rows([
-        ("Ground contact", f"{gct:.0f} ms" if gct else "—",
-         "under 250 ms is quick, 300+ is long"),
-        ("Vertical bounce", f"{osc:.1f} cm" if osc else "—",
-         "how far the body rises each step"),
-        ("Bounce as % of stride", f"{ratio:.1f}%" if ratio else "—",
-         "under 8% is efficient"),
+        ("Time each foot is on the ground", f"{gct:.0f} ms" if gct else "—",
+         "under 250 is quick, over 300 is slow"),
+        ("How far you bounce each step", f"{osc:.1f} cm" if osc else "—",
+         "up and down, not forwards"),
+        ("Bounce compared with stride", f"{ratio:.1f}%" if ratio else "—",
+         "under 8% is good"),
     ])
     if ratio and ratio > 9:
         st.caption(
@@ -1391,26 +1399,27 @@ def drift_block(acts: list[dict], laps: list[dict] | None = None) -> None:
                      "spread": lap_pace_spread(session_laps)})
 
     if rows:
-        st.caption("Measured across laps run at the same pace, so a rise here is "
-                   "the session getting harder rather than faster.")
+        st.caption("Only kilometres you ran at the same pace are compared, so a "
+                   "rise here means the session got harder, not faster.")
         table(pd.DataFrame([{
             "start_date": r["act"]["start_date"],
             "sport": r["act"]["sport"],
-            "Drift": f"+{r['drift']['drift_bpm']:.0f} bpm",
+            "Heart rate rise": f"+{r['drift']['drift_bpm']:.0f} bpm",
             "From": f"{r['drift']['first_hr']} → {r['drift']['last_hr']}",
-            "Laps": r["drift"]["laps_compared"],
-            "Pace spread": f"{r['spread']:.1f}%" if r["spread"] else "—",
+            "Kilometres compared": r["drift"]["laps_compared"],
+            "How even the pace was": (f"{r['spread']:.1f}% apart"
+                                      if r["spread"] else "—"),
         } for r in rows]))
         worst = max(rows, key=lambda r: r["drift"]["drift_bpm"])
         tone = {"flat": "good", "mild": "caution", "steep": "bad"}[
             worst["drift"]["verdict"]]
-        ui.banner("Aerobic drift", worst["drift"]["message"], tone)
+        ui.banner("Heart rate creep", worst["drift"]["message"], tone)
 
     drift = [a for a in acts if a.get("decoupling_pct") is not None]
     if not drift:
         if not rows:
-            st.caption("Needs three laps of three minutes or more in one session, "
-                       "or a 60-minute session for the stream-based version.")
+            st.caption("Needs one session with at least three kilometres of "
+                       "three minutes or more, or a session of an hour.")
         return
     df = pd.DataFrame([{"Date": a["start_date"], "Sport": a["sport"],
                         "Drift": round(a["decoupling_pct"], 2)} for a in drift])
@@ -2046,7 +2055,7 @@ def page_plan(data: dict, today: date) -> None:
     ])
 
 
-    ui.section("How do you feel?", "This shapes the week inside what the rules allow. "
+    ui.section("How do you feel?", "This shapes the week, within what the rules allow. "
                                    "Deload triggers come from data, not mood.")
     with st.form("checkin"):
         c = st.columns(4, wrap=True)
@@ -2231,8 +2240,8 @@ def page_rules(data: dict, today: date) -> None:
                   "Three endurance sessions a week spaced a day apart, two leg "
                   "sessions, 10% growth, every fourth week easier.", "neutral")
 
-    ui.section("This week, as the rules resolve it",
-               "What the numbers below actually produced.")
+    ui.section("What this week works out to",
+               "The settings below, applied to where you are now.")
     ui.figures([
         {"label": "Week ceiling", "value": hm(env.max_week_minutes),
          "note": f"{env.progression_cap_pct:.0f}% over "
@@ -2251,8 +2260,8 @@ def page_rules(data: dict, today: date) -> None:
          "tone": "caution" if env.max_quality_sessions == 0 else "neutral"},
     ])
 
-    ui.section("Your rules", "Change one and the next plan follows it. Every "
-                            "value is clamped to a sane range on the way in.")
+    ui.section("Your settings", "Change one and the next plan follows it. "
+                                "Each has a sensible range you cannot go past.")
     with st.form("rules"):
         entered: dict[str, object] = {}
         rows = rules_mod.describe(current)
@@ -2296,10 +2305,10 @@ def page_rules(data: dict, today: date) -> None:
                  f"{saved.progression_cap_pct:.0f}% growth cap.")
         st.rerun()
 
-    ui.section("The deload triggers, and where you are against them",
-               "Fixed on purpose. Any one of these forces a deload whatever the "
-               "check-in says, which is what stops a good mood becoming a bad "
-               "week.")
+    ui.section("When it makes you take an easy week",
+               "Any one of these forces an easy week, whatever you tell it that "
+               "morning. That is the point: feeling good is not evidence that "
+               "you have recovered.")
     sig = recovery_signals(data["wellness"], data["activities"], as_of=today) \
         if data.get("wellness") else None
     live = []
@@ -2325,11 +2334,13 @@ def page_rules(data: dict, today: date) -> None:
     if env.deload_reasons:
         st.caption("Firing right now: " + "; ".join(env.deload_reasons))
 
-    ui.section("Also fixed", "Not numbers, but not yours to move either.")
+    ui.section("Other things you cannot change",
+               "Not numbers, but not yours to move either.")
     ui.rows([(what, "fixed", why) for what, why in rules_mod.FIXED])
 
-    ui.section("Settings", "Your zones, what counts as easy, and how much of "
-                          "each sport you want.")
+    ui.section("Your heart rate and your targets",
+               "What counts as easy for you, and how much of each sport you "
+               "want in a week.")
 
     with st.expander("Heart-rate zones and what counts as easy for you"):
         with Store(db_path()) as _s:
@@ -2721,8 +2732,8 @@ def page_lifetime(data: dict, today: date) -> None:
         ])
 
     ui.section("What Garmin thinks you could race",
-               "Its own predictions, plotted as pace so all four distances share "
-               "one axis. Down is faster.")
+               "Garmin's own guesses, shown as pace per kilometre so all four "
+               "distances fit one chart. Lower is faster.")
     with ui.frame():
         race_block(data.get("race") or [], data.get("notes"))
 
@@ -2740,21 +2751,24 @@ def page_lifetime(data: dict, today: date) -> None:
             ui.rows(pr_rows[half:])
 
     ui.section("Showing up",
-               "Every day of the last sixteen weeks. Colour is minutes trained; "
-               "the gaps are the part worth looking at.")
+               "Every day of the last four months. The darker the square, the "
+               "longer you trained. The empty ones are the part worth looking "
+               "at.")
     with ui.frame():
         consistency_block({**data, "activities": history}, today)
 
     ui.section("Heart rate at your usual pace",
-               "The headline trend: the same pace costing fewer beats is fitness. "
-               "Every session on record.")
+               "The one that matters most. The same pace needing fewer beats "
+               "means you are fitter. Every session on record.")
     with ui.frame():
         training_hr_block(acts, today, data.get("notes"), data.get("weather"),
                           ceiling=data.get("aerobic_ceiling"))
         chart_ai_note("lifetime_hr", data.get("notes"))
 
-    ui.section("Resting heart rate, HRV and sleep",
-               "All time, not a rolling window.")
+    ui.section("Resting heart rate, recovery and sleep",
+               "Everything on record, not just the last few weeks. HRV is how "
+               "much your heartbeat varies overnight — higher usually means "
+               "better recovered.")
     with ui.frame():
         trend_chart(data["wellness"], today)
         chart_ai_note("lifetime_recovery", data.get("notes"))
@@ -2851,7 +2865,7 @@ def page_about(data: dict, today: date) -> None:  # noqa: ARG001
     )
 
     ui.section("What the AI may and may not do",
-               "Worth being precise about, because the limits are the product.")
+               "Worth spelling out, because the limits are the whole point.")
     ui.rows([
         ("Adjust volume, intensity and which day", "yes",
          "inside the envelope the rules set"),
@@ -2868,11 +2882,11 @@ def page_about(data: dict, today: date) -> None:  # noqa: ARG001
         ("Decide how much weight", "no", "one rep, then one step, when clean"),
     ])
     st.caption(
-        "A model asked how your training should go will agree with you — say you "
-        "feel strong and it offers a bigger week, say you are tired and it "
-        "cancels one. So every limit is re-checked in code after it answers, and "
-        "the plan is marked ai_repaired when that changed something. Your own "
-        "edits outrank both: a week you save by hand is kept exactly as entered."
+        "Ask a chatbot how your training should go and it will agree with you. "
+        "Say you feel strong and it offers a bigger week; say you are tired and "
+        "it cancels everything. So every limit is checked again in code after it "
+        "answers, and the week says so when that changed something. Your own "
+        "edits beat both: a week you save by hand is kept exactly as you typed it."
     )
 
     ui.section("Logging your leg sessions",
@@ -3208,8 +3222,10 @@ def log_sessions(data: dict, today: date) -> None:
                 f"The per-second elevation trace needs a re-fetch of this "
                 f"session's stream.")
     if act.get("decoupling_pct") is not None:
-        st.caption(f"Aerobic drift across this session: {act['decoupling_pct']:.1f}% "
-                   f"(under 5% is good durability).")
+        st.caption(
+            f"Your heart rate crept up {act['decoupling_pct']:.1f}% between the "
+            f"first half of this session and the second, at the same effort. "
+            f"Under 5% means you held it together well.")
     lap_block(aid, data.get("laps") or [], act["sport"])
 
 

@@ -176,12 +176,15 @@ def test_short_laps_are_ignored():
     assert result["drift_bpm"] == 0
 
 
-def test_flat_heart_rate_reads_as_good_durability():
+def test_flat_heart_rate_reads_as_holding_together():
+    """The message is read on the page, so it says what happened in plain words
+    rather than naming the physiology."""
     from core.analysis import lap_drift
 
     result = lap_drift([_lap(i, hr=148 + (i % 2)) for i in range(1, 6)])
     assert result["verdict"] == "flat"
-    assert "durability" in result["message"]
+    assert "holding it together" in result["message"]
+    assert "durability" not in result["message"]
 
 
 def test_too_few_usable_laps_says_so_rather_than_guessing():

@@ -669,6 +669,17 @@ def _sync_locked(
         lap_rows += store.upsert_laps(client.fetch_laps(a["activity_id"]))
     stats["laps"] = lap_rows
 
+    # Running form. One request per run and only for runs that have none, so the
+    # cost is a handful once and nothing thereafter.
+    if progress:
+        progress("Fetching running form…")
+    form_rows = 0
+    for a in store.activities_missing_form(limit=max(1, stream_limit)):
+        row = client.fetch_running_form(a["activity_id"])
+        if row:
+            form_rows += store.update_running_form([row])
+    stats["running_form"] = form_rows
+
     # Clear finished sessions off the watch. After the activity fetch on purpose:
     # "was it done" is answered by what was just pulled in.
     if progress:

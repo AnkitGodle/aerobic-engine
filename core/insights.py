@@ -121,7 +121,8 @@ def overview_insight(data: dict, today: date) -> PageInsight:
         bullets.append(
             "Efficiency trends are not measurable yet for "
             + ", ".join(missing)
-            + " — they need three steady aerobic sessions each."
+            + " — each needs three steady easy sessions before the trend "
+              "means anything."
         )
 
     if not data["strength"]:
@@ -153,7 +154,8 @@ def fitness_insight(data: dict, today: date) -> PageInsight:
                         "  Excluded: "
                         + "; ".join(f"{n}× {why}" for why, n in st["rejected_reasons"].items())
                     )
-        headline = "Not enough steady sessions to measure efficiency yet."
+        headline = ("Not enough steady easy sessions yet to tell if you are "
+                    "getting fitter.")
         if any("Z4-Z5" in b for b in bullets):
             headline = ("Efficiency cannot be measured yet — the sessions are too "
                         "hard, not too few.")
@@ -179,7 +181,7 @@ def fitness_insight(data: dict, today: date) -> PageInsight:
                     + " — usually fatigue, heat, or too much intensity.")
         tone = "warning"
     else:
-        headline = "Efficiency is holding steady."
+        headline = "You are holding steady — same pace, same heart rate."
     drift = [a["decoupling_pct"] for a in acts if a.get("decoupling_pct") is not None]
     if drift:
         worst = max(drift)
@@ -266,7 +268,8 @@ def recovery_insight(data: dict, today: date) -> PageInsight:
         )
     if sig.acwr is None:
         bullets.append(
-            "Acute-to-chronic load needs roughly three weeks of history before it "
+            "Comparing your last week with your last month needs about three "
+            "weeks of training on record before it "
             "means anything, so it is deliberately blank rather than misleading."
         )
     elif sig.acwr > 1.3:
@@ -344,7 +347,8 @@ def activities_insight(data: dict, today: date) -> PageInsight:
     bullets = [f"{tot['sessions']} sessions stored, {tot['km']:.0f} km, "
                f"{_fmt_hm(tot['minutes'])}."]
     steady = sum(1 for a in acts if a.get("is_steady"))
-    bullets.append(f"{steady} of {len(acts)} count as steady aerobic work — those are "
+    bullets.append(f"{steady} of {len(acts)} were steady and easy enough to count — "
+                   f"those are "
                    f"the ones that feed the efficiency trend.")
     reasons: dict[str, int] = {}
     for a in acts:
@@ -493,8 +497,17 @@ You explain what a training-dashboard page is telling the athlete looking at it.
 You are given facts already computed from their data. Rules:
 - Use ONLY those facts. Never add a number, a cause, or a recommendation that is
   not in them. If the facts say data is missing, say what is missing.
-- Two or three sentences. Second person, plain language, no bullets, no headings,
-  and do not restate the headline you were given.
+- Two or three sentences. Second person, no bullets, no headings, and do not
+  restate the headline you were given.
+- Write the way you would explain it out loud to a friend who runs but has never
+  used a training app. Short sentences. Everyday words.
+- No jargon. Not "aerobic decoupling", "acute:chronic ratio", "polarised",
+  "zone 2 adherence", "envelope", "load management". If a training term is the
+  only accurate word, put what it means straight after it in three or four words.
+- No stock AI phrasing: no "it's worth noting", "delve", "leverage", "robust",
+  "in terms of", "that said", "overall", em-dash asides, or a summary sentence
+  that repeats what you just said.
+- Say the number, then what to do about it.
 - Lead with the thing that would change a training decision this week. Where one
   fact explains another, join them: a flat efficiency trend caused by sessions
   being too hard is one sentence, not two.
@@ -511,6 +524,8 @@ Rules:
   is flat across three runs" — never "this chart shows heart rate over time".
 - Use ONLY the numbers given. If there are too few points to see a pattern, say
   exactly that instead of guessing at a trend.
+- Plain words a beginner would understand. No jargon, no stock AI phrasing
+  ("it's worth noting", "delve", "leverage", "overall"), no hedging.
 - No preamble, no markdown, no quotes. One sentence of plain text."""
 
 
@@ -608,16 +623,25 @@ def narrate(page: str, insight: PageInsight, backend: Any = None) -> str | None:
 ASK_SYSTEM = """\
 You answer one question from an endurance athlete about their own training data.
 
-You are given a facts bundle: recovery signals, this week's plan and completed
-sessions, recent sessions with heart rate and pace, efficiency trends, intensity
-distribution and the rules envelope. Rules:
+You are given the facts: recovery numbers, this week's plan, sessions already
+done, recent sessions with heart rate and pace, efficiency trends, how much of
+the training was easy or hard, and the limits the plan has to stay inside. Rules:
 - Use ONLY those facts. Never invent a number, a session, or a date. If the
   facts do not contain the answer, say which data is missing and stop.
-- Never override the rules layer. If the athlete asks for something the envelope
-  forbids (more volume than the cap, training through a deload flag), say what
-  the rule is and what you can offer inside it.
-- Two to five sentences, second person, plain language, no bullets, no headings.
-  Quote the specific numbers that support what you say.
+- Never override the rules. If they ask for something the limits forbid — more
+  than the weekly cap, training hard through an easy week — say what the rule is
+  and what you can offer instead.
+- Two to five sentences, second person, no bullets, no headings. Quote the
+  numbers that back up what you say.
+- Write the way you would explain it out loud to a friend who runs but has never
+  used a training app. Short sentences. Everyday words.
+- No jargon. Not "aerobic decoupling", "acute:chronic ratio", "polarised",
+  "zone 2 adherence", "envelope", "load management". If a training term is the
+  only accurate word, put what it means straight after it in three or four words.
+- No stock AI phrasing: no "it's worth noting", "delve", "leverage", "robust",
+  "in terms of", "that said", "overall", em-dash asides, or a summary sentence
+  that repeats what you just said.
+- Say the number, then what to do about it.
 - No medical advice. Persistent pain gets one line pointing at a physio.
 - No cheerleading. If the answer is "you are training too hard", say it.
 Return plain text with no preamble."""

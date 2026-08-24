@@ -723,21 +723,24 @@ def lap_drift(laps: Sequence[dict[str, Any]]) -> dict[str, Any]:
     if covered > 0:
         per_km = drift / covered
 
+    # Plain wording: this is read on the page, so it says what happened and what
+    # it means without a training term in it.
     if drift <= 3:
         verdict = "flat"
-        message = (f"Heart rate held within {abs(drift):.0f} bpm across "
-                   f"{len(matched)} laps at the same pace. That is good aerobic "
-                   f"durability.")
+        message = (f"Your heart rate stayed within {abs(drift):.0f} beats across "
+                   f"{len(matched)} kilometres at the same pace. That is what "
+                   f"holding it together looks like.")
     elif drift <= 10:
         verdict = "mild"
-        message = (f"Heart rate rose {drift:.0f} bpm across {len(matched)} laps "
-                   f"at unchanged pace — normal for a longer session, and worth "
-                   f"watching if it grows.")
+        message = (f"Your heart rate rose {drift:.0f} beats across "
+                   f"{len(matched)} kilometres at the same pace. Normal on a "
+                   f"longer run, worth watching if it grows.")
     else:
         verdict = "steep"
-        message = (f"Heart rate rose {drift:.0f} bpm across {len(matched)} laps "
-                   f"while pace held. That is the session getting harder without "
-                   f"getting faster, which usually means it started too quick.")
+        message = (f"Your heart rate rose {drift:.0f} beats across "
+                   f"{len(matched)} kilometres without running any faster. The "
+                   f"run got harder but not quicker, which usually means it "
+                   f"started too fast.")
     return {
         "drift_bpm": round(drift, 1),
         "drift_per_km": round(per_km, 1) if per_km is not None else None,

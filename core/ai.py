@@ -108,9 +108,11 @@ the long ride, the long run, then one strength session, then swims.
 - Reading the recent check-in history for repeated complaints and responding to \
 the pattern, not just today.
 
-Tone: terse and concrete. "why" is one clause, e.g. "sleep 2/5 and RHR +6, so \
-easy spin instead of intervals". Do not lecture, do not cite studies, do not \
-invent training science, do not give medical advice.
+Tone: plain English, the way a coach speaks. "why" is one short clause, e.g. \
+"slept badly and resting heart rate is up 6, so an easy spin instead of \
+intervals". Everyday words only — no jargon, no stock AI phrasing ("it's worth \
+noting", "leverage", "overall"), no lecturing, no studies, no invented training \
+science, no medical advice.
 
 Return ONE JSON object and no other text:
 {"week_plan":[{"day":"Mon","sport":"bike","duration_min":90,\

@@ -1184,6 +1184,39 @@ class Store:
                 " ORDER BY lap_index", (activity_id,))
         return self.query("SELECT * FROM activity_laps ORDER BY activity_id, lap_index")
 
+    def update_running_form(self, rows: Iterable[dict[str, Any]]) -> int:
+        """Fill in ground contact, bounce, vertical ratio and stride.
+
+        An UPDATE rather than an upsert: `upsert_activities` writes every column,
+        so handing it a four-field row nulled out sport, start_time and the rest
+        and the database rejected it. A partial row needs a partial write.
+        """
+        rows = [r for r in rows if r and r.get("activity_id")]
+        if not rows:
+            return 0
+        with self.tx():
+            self.executemany(
+                "UPDATE activities SET ground_contact_ms = ?, vertical_osc_cm = ?,"
+                " vertical_ratio = ?, stride_length_cm = COALESCE(?, stride_length_cm)"
+                " WHERE activity_id = ?",
+                [[r.get("ground_contact_ms"), r.get("vertical_osc_cm"),
+                  r.get("vertical_ratio"), r.get("stride_length_cm"),
+                  str(r["activity_id"])] for r in rows])
+        return len(rows)
+
+    def activities_missing_form(self, limit: int = 25) -> list[dict[str, Any]]:
+        """Runs with no ground-contact figure yet, newest first.
+
+        Only runs: these are the fields a running watch measures, and asking for
+        a ride would spend a request to store four nulls.
+        """
+        return self.query(
+            "SELECT activity_id, start_date FROM activities"
+            " WHERE sport = 'run' AND COALESCE(is_multisport_parent, 0) = 0"
+            " AND ground_contact_ms IS NULL"
+            + GARMIN_ONLY +
+            " ORDER BY start_date DESC LIMIT ?", [int(limit)])
+
     def activities_missing_laps(self, sports: Sequence[str]) -> list[dict[str, Any]]:
         """Sessions with no laps stored. Long enough to have more than one."""
         if not sports:

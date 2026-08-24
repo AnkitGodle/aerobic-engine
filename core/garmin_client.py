@@ -612,6 +612,36 @@ class GarminClient:
             log.warning("Could not delete workout %s: %s", workout_id, exc)
             return False
 
+    def fetch_running_form(self, activity_id: str) -> dict[str, Any] | None:
+        """Ground contact, bounce and stride for one run.
+
+        These are not in the activity list Garmin returns, only in the detail
+        payload for a single activity — which is why the Running form panel sat
+        empty for weeks saying they would "arrive with the next sync". They will
+        not: they cost one request each, so they are fetched deliberately and
+        capped per sync.
+
+        Verified on this account: summaryDTO carries groundContactTime 309.7 ms,
+        verticalOscillation 8.28 cm, verticalRatio 10.9% and strideLength 76 cm.
+        """
+        detail = self._call(self.connect().get_activity, str(activity_id),
+                            label="get_activity")
+        if not detail:
+            return None
+        row = {
+            "activity_id": str(activity_id),
+            "ground_contact_ms": dig(detail, "groundContactTime",
+                                     "avgGroundContactTime"),
+            "vertical_osc_cm": dig(detail, "verticalOscillation",
+                                   "avgVerticalOscillation"),
+            "vertical_ratio": dig(detail, "verticalRatio", "avgVerticalRatio"),
+            "stride_length_cm": dig(detail, "strideLength", "avgStrideLength"),
+        }
+        # Nothing useful came back — don't write a row of Nones and call it done.
+        if not any(v is not None for k, v in row.items() if k != "activity_id"):
+            return None
+        return row
+
     def fetch_laps(self, activity_id: str) -> list[dict[str, Any]]:
         """Per-lap heart rate and pace.
 
