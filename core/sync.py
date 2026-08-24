@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 from datetime import date, datetime, timedelta
 from typing import Any, Callable
@@ -86,6 +88,20 @@ def import_exercise_sets(store: Store, client: GarminClient) -> tuple[int, int]:
     return sets_stored, logged
 
 
+def _notes_chain() -> str:
+    """The planning chain with subprocess-backed providers dropped.
+
+    Falls back to the configured chain untouched if that would leave nothing —
+    a slow summary beats no summary.
+    """
+    from core import ai
+
+    configured = [n.strip() for n in
+                  (os.getenv("AI_BACKEND") or "gemini").split(",") if n.strip()]
+    fast = [n for n in configured if n.lower() not in ai.SLOW_BULK_BACKENDS]
+    return ",".join(fast or configured)
+
+
 def generate_ai_notes(db: str | None = None, today: date | None = None) -> int:
     """Write every page summary and chart reading into the database.
 
@@ -106,7 +122,16 @@ def generate_ai_notes(db: str | None = None, today: date | None = None) -> int:
     # trip that every time. This runs after a Garmin sync, not in front of a
     # waiting user, so it can simply go slowly. A rate limit pauses and retries
     # once rather than losing the summary.
-    gap = float(os.getenv("AI_NOTE_GAP_SECONDS", "6"))
+    # Summaries use their own backend chain, and the reason is measured rather
+    # than assumed: the Claude CLI spawns a whole agent session per call and
+    # takes 31.6s, against 1.7s for a Gemini HTTP call. That trade is fine for
+    # one planning call where the answer matters; across fourteen summaries it is
+    # seven minutes instead of half a one. So planning can prefer the CLI while
+    # this prefers whatever is fastest, and AI_NOTES_BACKEND overrides.
+    backends = _note_backends()
+    if not backends:
+        log.info("No usable summary backend; skipping")
+        return 0
     store = Store(db)
     try:
         data = {
@@ -117,7 +142,7 @@ def generate_ai_notes(db: str | None = None, today: date | None = None) -> int:
             "race": store.race_predictions(),
             "records": store.personal_records(),
         }
-        model = getattr(ai.get_backend(), "model", "")
+        model = getattr(backends[0], "model", "")
         rows: list[dict[str, Any]] = []
 
         jobs: list[tuple[str, str, Any]] = [
@@ -128,16 +153,27 @@ def generate_ai_notes(db: str | None = None, today: date | None = None) -> int:
                  for key, title, payload in _chart_inputs(data, today)]
 
         failed = 0
-        for i, (kind, key, arg) in enumerate(jobs):
-            if arg is None:
-                continue
-            if i:
-                time.sleep(gap)
-            text = _one_note(kind, key, arg, gap)
-            if text:
-                rows.append({"key": key, "kind": kind, "text": text, "model": model})
-            else:
-                failed += 1
+        # Round-robin across providers, run concurrently. Two providers at
+        # roughly 20 requests a minute each comfortably absorb fourteen calls, so
+        # no spacing is needed — spreading the load is what the spacing was
+        # approximating, badly.
+        live = [(i, k, key, a) for i, (k, key, a) in enumerate(jobs) if a is not None]
+        workers = max(1, min(len(backends) * 3, len(live)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {}
+            for n, (_, kind, key, arg) in enumerate(live):
+                primary = backends[n % len(backends)]
+                others = [b for b in backends if b is not primary]
+                futures[pool.submit(_one_note, kind, key, arg, primary, others)] = (
+                    kind, key)
+            for future in as_completed(futures):
+                kind, key = futures[future]
+                text = future.result()
+                if text:
+                    rows.append({"key": key, "kind": kind, "text": text,
+                                 "model": model})
+                else:
+                    failed += 1
         if failed:
             log.info("%d of %d summaries could not be generated this run",
                      failed, len(jobs))
@@ -150,25 +186,49 @@ def generate_ai_notes(db: str | None = None, today: date | None = None) -> int:
         store.close()
 
 
-def _one_note(kind: str, key: str, arg: Any, gap: float) -> str | None:
-    """Generate one summary, pausing once if the provider rate-limits us."""
+def _note_backends() -> list[Any]:
+    """One backend object per fast provider, not a single fallback chain.
+
+    Separate objects on purpose: the summaries are independent calls, so they can
+    run at the same time and be spread across providers. That keeps each one
+    under its own per-minute cap, which is what the spacing was for, and the
+    wall-clock becomes the slowest single call rather than the sum of all of
+    them plus the waiting.
+    """
+    from core import ai
+
+    names = [n.strip().lower() for n in
+             (os.getenv("AI_NOTES_BACKEND") or _notes_chain()).split(",")
+             if n.strip()]
+    out = []
+    for name in names:
+        try:
+            out.append(ai._one_backend(name))
+        except ai.AIUnavailable as exc:
+            log.info("Notes backend %s unavailable (%s)", name, exc)
+    return out
+
+
+def _one_note(kind: str, key: str, arg: Any, backend: Any,
+              alternates: Sequence[Any] = ()) -> str | None:
+    """Generate one summary. A rate limit moves it to another provider.
+
+    Moving beats waiting: with two providers configured, the second one's budget
+    is untouched at the moment the first refuses.
+    """
     from core import ai, insights
 
-    for attempt in (1, 2):
+    for candidate in [backend, *alternates]:
         try:
             if kind == "page":
-                return insights.narrate(key, arg)
+                return insights.narrate(key, arg, backend=candidate)
             title, payload = arg
-            return insights.chart_note(title, payload)
+            return insights.chart_note(title, payload, backend=candidate)
         except ai.AIUnavailable as exc:
-            wait = getattr(exc, "retry_after", None)
-            if attempt == 1 and (wait or "rate limit" in str(exc).lower()):
-                wait = (wait or gap * 4) + 1.0   # a second of headroom
-                log.info("Rate limited on %s; waiting %.0fs as asked", key, wait)
-                time.sleep(wait)
-                continue
-            return None
-        except Exception:  # noqa: BLE001
+            log.info("%s on %s (%s); trying another provider", key,
+                     getattr(candidate, "name", "?"), str(exc)[:70])
+            continue
+        except Exception:  # noqa: BLE001 - one bad summary is not a failed sync
             return None
     return None
 

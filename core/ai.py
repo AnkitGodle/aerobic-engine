@@ -32,6 +32,18 @@ USER_AGENT = os.getenv("AI_USER_AGENT", "aerobic-engine/1.0")
 # truncates the plan JSON mid-object, which fails to parse and silently costs the
 # athlete the AI layer.
 MAX_TOKENS = int(os.getenv("AI_MAX_TOKENS", "6000"))
+
+# Per provider, the model that answered most recently. Process-local and
+# deliberately not persisted: it is a cache of what is up right now, and a stale
+# entry from yesterday would send the first call of a run to a model that has
+# since gone busy.
+_WORKING_MODEL: dict[str, str] = {}
+
+# Backends that pay a large fixed cost per call and so are wrong for bulk work.
+# The Claude CLI starts a full agent session each time: measured at 31.6s per
+# call against 1.7s for a Gemini HTTP request. Worth it for one planning call,
+# not for fourteen chart summaries.
+SLOW_BULK_BACKENDS = frozenset({"claude_cli", "claude-cli", "cli", "subscription"})
 RETRY_ATTEMPTS = int(os.getenv("AI_RETRY_ATTEMPTS", "3"))
 RETRY_BACKOFF_S = float(os.getenv("AI_RETRY_BACKOFF", "1.5"))
 
@@ -139,6 +151,7 @@ class AIUnavailable(RuntimeError):
 
 class AnthropicBackend:
     name = "anthropic"
+    note_gap_s = 0.0
 
     def __init__(self, api_key: str | None = None, model: str = DEFAULT_MODEL) -> None:
         self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
@@ -235,6 +248,9 @@ class ClaudeCLIBackend:
     """
 
     name = "claude_cli"
+    # A subscription has no per-minute request cap, so back-to-back calls need
+    # no spacing. The free HTTP tiers do, which is what note_gap_s exists for.
+    note_gap_s = 0.0
 
     def __init__(self, binary: str | None = None, model: str | None = None) -> None:
         self.binary = binary or os.getenv("CLAUDE_CLI_BIN", "claude")
@@ -315,6 +331,10 @@ OPENAI_COMPAT: dict[str, dict[str, Any]] = {
         "free": "~1500 requests/day, 1M context, no card — most generous for "
                 "chunky calls like ours",
         "json": "json_object",
+        # The free tier caps requests per minute per model, so bulk summaries
+        # need spacing. 3s keeps fourteen of them under the cap; the old 6s was
+        # twice what the limit asks for and spent 78 seconds asleep.
+        "note_gap_s": 3.0,
     },
     "cerebras": {
         "base": "https://api.cerebras.ai/v1",
@@ -357,6 +377,9 @@ class OpenAICompatBackend:
         spec = OPENAI_COMPAT.get(provider, {})
         self.name = provider
         self.spec = spec
+        # Free tiers cap requests per minute; a dozen summaries fired back to
+        # back trips that every time.
+        self.note_gap_s = float(spec.get("note_gap_s", 6.0))
         self.base = (base_url or os.getenv("AI_BASE_URL") or spec.get("base", "")).rstrip("/")
         self.model = model or os.getenv("AI_MODEL_OVERRIDE") or os.getenv(
             f"{provider.upper()}_MODEL", spec.get("model", "")
@@ -393,10 +416,18 @@ class OpenAICompatBackend:
         next minute's budget, and a bad key will not improve.
         """
         last: Exception | None = None
-        for model in self.models:
+        # Whichever model answered last time goes first. Without this, a sync
+        # that writes fourteen summaries rediscovers the same outage fourteen
+        # times: the last real run logged 28 "unavailable" lines, exactly two
+        # wasted round trips per summary, because every call restarted at the
+        # head of the chain and worked down to the same survivor.
+        order = self._model_order()
+        for model in order:
             for attempt in range(RETRY_ATTEMPTS):
                 try:
-                    return self._post(system, user, json_mode, model=model)
+                    reply = self._post(system, user, json_mode, model=model)
+                    _WORKING_MODEL[self.name] = model
+                    return reply
                 except AIUnavailable as exc:
                     last = exc
                     if getattr(exc, "advance_model", False):
@@ -405,9 +436,20 @@ class OpenAICompatBackend:
                         raise
                     if attempt < RETRY_ATTEMPTS - 1:
                         time.sleep(RETRY_BACKOFF_S * (attempt + 1))
-            if model != self.models[-1]:
+            # A model that just failed stops being the preferred one, or the next
+            # call would go straight back to it.
+            if _WORKING_MODEL.get(self.name) == model:
+                _WORKING_MODEL.pop(self.name, None)
+            if model != order[-1]:
                 log.info("%s: %s unavailable, trying the next model", self.name, model)
         raise last if last else AIUnavailable(f"{self.name} failed")
+
+    def _model_order(self) -> list[str]:
+        """Configured chain, with the last known-good model moved to the front."""
+        good = _WORKING_MODEL.get(self.name)
+        if good and good in self.models:
+            return [good] + [m for m in self.models if m != good]
+        return list(self.models)
 
     def _post(self, system: str, user: str, json_mode: bool = False,
               model: str | None = None) -> str:
@@ -537,6 +579,11 @@ class ChainBackend:
     @property
     def model(self) -> str:
         return getattr(self.backends[0], "model", "")
+
+    @property
+    def note_gap_s(self) -> float:
+        """The preferred backend's spacing: it is the one that usually answers."""
+        return float(getattr(self.backends[0], "note_gap_s", 6.0))
 
     def complete(self, system: str, user: str, json_mode: bool = False) -> str:
         failures: list[str] = []
