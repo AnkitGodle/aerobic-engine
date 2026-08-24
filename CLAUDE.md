@@ -232,9 +232,16 @@ heavy/low-rep; tendons want slow, heavy or isometric loading and adapt slowly.
 - Strength exercises are a fixed library; the AI cannot add exercises. Strength
   progression is deterministic.
 - Deload is rule-triggered by recovery signals regardless of user mood.
-- **No Strava in v1.** If added later, Strava data must never reach the AI layer
-  (their API bans AI use), and Strava stays an optional connector, never the
-  backbone.
+- **No Strava as a data source.** What exists is a one-off importer for the
+  athlete's own bulk export (`core/strava_import.py`, run from
+  `scripts/import_strava.py`), for the history that predates the watch. It is not
+  a connector: nothing polls Strava, nothing authenticates against it. Imported
+  rows carry `source="strava"`, and `Store.activities()` excludes them unless a
+  caller asks — so they reach the lifetime totals and the log, and never the
+  planner, the insights or any AI prompt. Their terms forbid their data being
+  used with a language model, and every planning decision here goes through one.
+  The sync's own "what still needs fetching" queries carry the same filter, or
+  they would ask Garmin about activities it has never heard of.
 - Not medical advice. Persistent tendon pain → see a physio; the app surfaces a
   gentle note and does not try to treat it.
 

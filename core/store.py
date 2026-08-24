@@ -51,6 +51,12 @@ def is_postgres(target: str) -> bool:
     return str(target).startswith(PG_PREFIXES)
 
 
+# Appended to every query whose subject is Garmin's own data: the sync
+# watermark, the block anchor, and each "what still needs fetching" queue.
+# Without it an imported Strava row joins the queue and the next sync spends a
+# request asking Garmin for the weather at an activity Garmin has never heard of.
+GARMIN_ONLY = " AND COALESCE(source, 'garmin') = 'garmin'"
+
 _FINGERPRINT_KEY = "schema_fingerprint"
 # Which targets this process has already migrated, so repeated short-lived
 # connections in one Streamlit run do not each re-check.
@@ -345,6 +351,13 @@ COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     # Set when the athlete names a set the watch could not. Nothing derived is
     # allowed to overwrite it: they were there, the mapping table was not.
     ("exercise_sets", "assigned_by_hand", "INTEGER DEFAULT 0"),
+    # Where an activity came from. Everything Garmin syncs is "garmin"; a
+    # one-off history import from a Strava export is "strava". The distinction is
+    # not bookkeeping: Strava's terms forbid their data reaching a language
+    # model, and this app's planner is one — so `activities()` reads Garmin only
+    # unless a caller explicitly asks for more, and the callers that ask are the
+    # lifetime totals and the log, neither of which talks to the AI.
+    ("activities", "source", "TEXT DEFAULT 'garmin'"),
     # Daily context that was being left on the table. Stress and respiration are
     # recovery signals in their own right; steps and intensity minutes are the
     # load that happens outside a logged session and still has to be recovered
@@ -630,7 +643,9 @@ class Store:
         return self._upsert("activities", rows, "activity_id")
 
     def latest_activity_start(self) -> datetime | None:
-        row = self.execute("SELECT MAX(start_time) AS m FROM activities").fetchone()
+        row = self.execute(
+            "SELECT MAX(start_time) AS m FROM activities WHERE 1=1" + GARMIN_ONLY
+        ).fetchone()
         if not row or not row["m"]:
             return None
         return datetime.fromisoformat(row["m"])
@@ -638,6 +653,7 @@ class Store:
     def earliest_activity_date(self) -> date | None:
         row = self.execute(
             "SELECT MIN(start_date) AS m FROM activities WHERE duration_s > 0"
+            + GARMIN_ONLY
         ).fetchone()
         if not row or not row["m"]:
             return None
@@ -654,12 +670,20 @@ class Store:
         since: date | None = None,
         sport: str | None = None,
         include_parents: bool = False,
+        include_imported: bool = False,
     ) -> list[dict[str, Any]]:
         """Stored activities, newest last.
 
         Multisport parents are excluded by default: their legs are stored as
         separate activities, so counting both would double the volume and hand
         the analysis a session with no heart rate.
+
+        Imported history — a Strava export, say — is excluded by default too, and
+        that default is a boundary rather than a preference. Strava's terms forbid
+        their data being used with a language model and every planning decision
+        here passes through one, so the only callers that pass
+        `include_imported=True` are the ones that just count: lifetime totals and
+        the log.
         """
         sql = (
             "SELECT a.*, m.ef, m.ef_metric, m.decoupling_pct, m.is_steady, "
@@ -669,6 +693,8 @@ class Store:
         params: list[Any] = []
         if not include_parents:
             sql += " AND COALESCE(a.is_multisport_parent, 0) = 0"
+        if not include_imported:
+            sql += " AND COALESCE(a.source, 'garmin') = 'garmin'"
         if since:
             sql += " AND a.start_date >= ?"
             params.append(since.isoformat())
@@ -698,6 +724,7 @@ class Store:
             for r in self.execute(
                 "SELECT activity_id FROM activities "
                 "WHERE activity_id NOT IN (SELECT activity_id FROM activity_metrics)"
+                + GARMIN_ONLY
             )
         ]
 
@@ -757,6 +784,7 @@ class Store:
         return self.query(
             f"SELECT activity_id, sport, start_date FROM activities "
             f"WHERE sport IN ({marks}) AND avg_hr IS NOT NULL AND duration_s > 0 "
+            f"{GARMIN_ONLY} "
             f"AND (activity_id NOT IN (SELECT DISTINCT activity_id FROM hr_streams)"
             # Streams stored before elevation was parsed have no altitude. The
             # condition is deliberately narrow — the activity must report climbing
@@ -824,6 +852,7 @@ class Store:
         return self.query(
             f"SELECT activity_id FROM activities WHERE sport IN ({marks}) "
             f"AND avg_hr IS NOT NULL AND COALESCE(is_multisport_parent, 0) = 0 "
+            f"{GARMIN_ONLY} "
             f"AND activity_id NOT IN (SELECT DISTINCT activity_id FROM activity_zones) "
             f"ORDER BY start_date DESC",
             list(sports),
@@ -917,6 +946,7 @@ class Store:
     def strength_activities_missing_sets(self) -> list[dict[str, Any]]:
         return self.query(
             "SELECT activity_id, start_date FROM activities WHERE sport = 'strength' "
+            + GARMIN_ONLY + " "
             "AND activity_id NOT IN (SELECT DISTINCT activity_id FROM exercise_sets) "
             "ORDER BY start_date DESC"
         )
@@ -1137,6 +1167,7 @@ class Store:
             f"SELECT activity_id, sport, start_date FROM activities"
             f" WHERE sport IN ({marks})"
             f" AND COALESCE(is_multisport_parent, 0) = 0"
+            f"{GARMIN_ONLY}"
             f" AND activity_id NOT IN (SELECT activity_id FROM activity_weather)"
             f" ORDER BY start_time DESC", list(sports))
 
@@ -1163,6 +1194,7 @@ class Store:
             f" WHERE sport IN ({marks})"
             f" AND COALESCE(is_multisport_parent, 0) = 0"
             f" AND COALESCE(duration_s, 0) > 600"
+            f"{GARMIN_ONLY}"
             f" AND activity_id NOT IN (SELECT DISTINCT activity_id FROM activity_laps)"
             f" ORDER BY start_time DESC", list(sports))
 

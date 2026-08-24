@@ -214,6 +214,10 @@ def load(stamp: float) -> dict:  # noqa: ARG001 - stamp is the cache key
         return {
             "activities": s.activities(),
             "all_activities": s.activities(include_parents=True),
+            # Garmin plus anything imported from a Strava export. Used by the
+            # lifetime totals and the log, and by nothing that talks to the AI —
+            # see core/strava_import.py for why that line exists.
+            "history": s.activities(include_imported=True),
             "wellness": s.wellness(), "race": s.race_predictions(),
             "zones": s.zones(), "strength": s.strength_log(),
             "sets": s.exercise_sets(), "checkins": s.checkins(limit=60),
@@ -2628,10 +2632,15 @@ def page_lifetime(data: dict, today: date) -> None:
     vertical space and adds nothing a hairline rule does not.
     """
     acts = data["activities"]
-    if not acts:
+    # The whole record here, imported history included: this is the page that
+    # answers "how far have I come", and answering it with only the months since
+    # the watch arrived is answering a different question.
+    history = data.get("history") or acts
+    if not history:
         st.caption("No activities yet — sync from the sidebar.")
         return
-    tot = totals(acts)
+    tot = totals(history)
+    imported = [a for a in history if (a.get("source") or "garmin") != "garmin"]
     body = data.get("profile") or {}
 
     span = "no dated sessions"
@@ -2640,6 +2649,13 @@ def page_lifetime(data: dict, today: date) -> None:
                 f"{day_label(tot['last_day'].isoformat(), year=True)}")
     ui.page_title("Lifetime", span)
     insight_banner("Lifetime", data, today)
+    if imported:
+        st.caption(
+            f"The totals and calendar below include {len(imported)} session(s) "
+            f"imported from a Strava export — the record from before the watch. "
+            f"The written summary above and every chart on this page are Garmin "
+            f"only: imported sessions carry no heart rate, and Strava's terms "
+            f"keep their data out of anything an AI reads.")
 
     ui.figures([
         {"label": "Sessions", "value": f"{tot['sessions']:,}"},
@@ -2654,7 +2670,7 @@ def page_lifetime(data: dict, today: date) -> None:
         ui.section("By sport")
         sport_rows = []
         for sp in shown_sports():
-            row = tot["by_sport"].get(sp) or {}
+            row = tot["by_sport"].get(sp) or {}  # from the full record
             n = int(row.get("sessions") or 0)
             if not n:
                 sport_rows.append((f"{EMOJI.get(sp, '')} {sp.title()}", "—",
@@ -2714,7 +2730,7 @@ def page_lifetime(data: dict, today: date) -> None:
                "Every day of the last sixteen weeks. Colour is minutes trained; "
                "the gaps are the part worth looking at.")
     with ui.frame():
-        consistency_block(data, today)
+        consistency_block({**data, "activities": history}, today)
 
     ui.section("Heart rate at your usual pace",
                "The headline trend: the same pace costing fewer beats is fitness. "
@@ -2946,7 +2962,9 @@ def log_app(data: dict) -> None:  # noqa: ARG001 - symmetry with the other tabs
 
 
 def log_sessions(data: dict, today: date) -> None:
-    acts = data["activities"]
+    # The log is a record, so it shows the whole record — imported sessions
+    # included, with a column saying which is which.
+    acts = data.get("history") or data["activities"]
     if not acts:
         st.caption("No activities yet — sync from the sidebar.")
         return
@@ -2964,6 +2982,7 @@ def log_sessions(data: dict, today: date) -> None:
         "ef": round(a["ef"], 3) if a.get("ef") else None,
         "is_steady": "yes" if a.get("is_steady") else "no",
         "steady_reason": "" if a.get("is_steady") else (a.get("steady_reason") or ""),
+        "source": a.get("source") or "garmin",
     } for a in view]).iloc[::-1])
 
     if not view:

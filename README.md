@@ -271,6 +271,60 @@ Also behind the same interface: `anthropic` (API key), `cerebras`,
 `gemini,groq`, and the chart summaries fan out across every provider in it,
 so one that rate-limits hands its summary to another instead of pausing.
 
+## Importing history from a Strava export
+
+Garmin is the sensor layer and stays that way, but a watch has a start date and
+your running does not. If you were on Strava first, that history is otherwise
+simply missing from every lifetime total.
+
+```bash
+# Strava → Settings → My Account → Download or Delete Your Account →
+# Request your archive. It arrives by email as a zip.
+
+python scripts/import_strava.py --zip export_12345678.zip --dry-run
+python scripts/import_strava.py --zip export_12345678.zip
+```
+
+The dry run prints exactly what would happen and writes nothing:
+
+```
+  import         48
+  duplicates      6
+  other sports   24
+  2025-02-13 to 2026-08-16
+  bike        5 sessions ·    32.2 km ·   1.9 h
+  run        43 sessions ·   192.1 km ·  24.5 h
+```
+
+Four things it gets right, each of which is a way the import can quietly corrupt
+the data it is adding:
+
+- **The export's clock is UTC** while Strava's own titles are local, which is how
+  a 12:40 row is called "Evening Run". Timestamps are converted with `--tz`
+  (default `Asia/Kolkata`), because without it every session after 18:30 lands on
+  the wrong day and every weekly total moves with it.
+- **The recent weeks are already in Garmin.** Anything that synced from the watch
+  appears in both services; matching is on sport and start time within ten
+  minutes. Ten because in a real export every genuine overlap matched the stored
+  Garmin activity *to the second*, while a wider window started merging two short
+  runs on the same evening into one.
+- **Walks are left out** by default. They map to a `walk` sport and adding two
+  dozen of them to a lifetime aerobic total makes the number mean less, not more.
+  `--sports run,bike,swim,strength,walk` includes them.
+- **Imported rows never reach the AI layer.** Strava's terms forbid their data
+  being used with a language model and every planning decision here goes through
+  one, so each row carries `source="strava"` and `Store.activities()` excludes
+  them unless a caller explicitly asks. The only callers that ask are the
+  lifetime totals and the log.
+
+That boundary is also why the sync's own queries carry the same filter. Without
+it, 48 imported activities joined the "needs weather" and "needs laps" queues and
+the next sync would have spent 92 requests asking Garmin about sessions it has
+never heard of.
+
+Safe to run twice: rows are keyed on the Strava activity id, so a second run
+reports everything as a duplicate and changes nothing.
+
 ## Being a good citizen with an unofficial API
 
 Garmin publishes no rate limits, is stricter with datacenter IPs than home ones,

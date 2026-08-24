@@ -17,3 +17,6 @@ tokens.txt
 
 # Local tooling config, not project code
 .claude/settings.local.json
+
+# Personal data exports (Strava archives carry GPS traces and media)
+export_*.zip
