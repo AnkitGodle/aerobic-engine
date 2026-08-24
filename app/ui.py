@@ -168,12 +168,10 @@ CSS = """
       background: var(--ic-page);
       padding: .35rem 0 .4rem;
       border-bottom: 1px solid var(--ic-line);
-      margin-bottom: .35rem; }
-  /* The first heading after the bar does not need its own top padding: the bar
-     already provides the separation, and the two stacked into a visible gap. */
-  .st-key-topbar + div .ic-section:first-child,
-  [data-testid="stLayoutWrapper"]:has(> .st-key-topbar) + div .ic-section {
-      padding-top: .1rem; }
+      /* Enough to clear the bar, and no more. Trimming this to .35rem put the
+         first heading 7px *above* the bar's bottom edge — the bar is sticky, so
+         anything that close is drawn underneath it. */
+      margin-bottom: 1.35rem; }
   /* The popover panel has to clear the bar it hangs from. */
   .stMain .st-key-topbar [data-testid="stPopoverBody"] { z-index: 95; }
 
@@ -195,7 +193,7 @@ CSS = """
        start below Streamlit's 60px header, which floats over the top. */
     .block-container { padding-top: 3.6rem; }
     .stMain [data-testid="stLayoutWrapper"]:has(> .st-key-topbar) {
-        position: static; padding: .1rem 0 .3rem; margin-bottom: .45rem; }
+        position: static; padding: .1rem 0 .3rem; margin-bottom: .7rem; }
     .ic-brand-sub { display: none; }
     .ic-brand { gap: .5rem; margin-bottom: .25rem; }
     .ic-brand svg { width: 26px; height: 26px; }
