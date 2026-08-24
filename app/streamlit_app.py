@@ -36,7 +36,11 @@ from dotenv import load_dotenv  # noqa: E402
 # app/freshness.py.
 from app.freshness import purge_stale_modules, stamp_modules  # noqa: E402
 
-purge_stale_modules(log=logging.getLogger("aerobic_engine.ui").warning)
+# INFO, not WARNING: a successful self-heal is not a problem, and at WARNING it
+# was stored in the database — which during a session of edits meant 47 rows of
+# "reloading" burying everything else in the App log. The one row worth keeping
+# is written as an event below, once the imports it needed have happened.
+_reloaded = purge_stale_modules(log=logging.getLogger("aerobic_engine.ui").info)
 
 import app.ui as ui  # noqa: E402
 from core import (  # noqa: E402
@@ -99,6 +103,10 @@ log = logging.getLogger("aerobic_engine.ui")
 # login, so without this a failure on the phone is unreadable exactly when it
 # matters. Idempotent, and it fails quietly if the table is unreachable.
 applog.install(default_db())
+if _reloaded:
+    # One row per deploy that actually needed the guard, with what moved.
+    applog.event(default_db(), "Reloaded app modules after a deploy",
+                 modules=", ".join(_reloaded))
 st.set_page_config(page_title="Aerobic Engine", page_icon="📈", layout="wide",
                    initial_sidebar_state="collapsed")
 
