@@ -35,6 +35,8 @@ from core.analysis import (  # noqa: E402
     ZONE_LABELS,
     aerobic_ceiling_options,
     zone_bounds,
+    zone_bounds_with_ceiling,
+    zone_distribution_from_streams,
     baseline_trend,
     hr_points,
     hr_trend,
@@ -99,8 +101,20 @@ DROP_COLS = {
 }
 
 
+# Columns that hold a date and should be shown day-first rather than as the ISO
+# string the database stores.
+DATE_COLUMNS = {"start_date", "day", "date", "achieved_at", "start_time"}
+
+
 def table(df: pd.DataFrame, **kw) -> None:
     out = df.drop(columns=[c for c in df.columns if c in DROP_COLS])
+    # Formatted here, once, rather than at each call site: every table that
+    # shows a date was showing 2026-08-24, and the ISO form is the storage
+    # format, not the reading format.
+    for column in out.columns:
+        if column in DATE_COLUMNS:
+            out[column] = out[column].map(
+                lambda v: day_label(v) if v is not None and str(v).strip() else "")
     out = out.rename(columns={c: COLUMN_NAMES.get(c, c.replace("_", " ").capitalize())
                               for c in out.columns})
     st.dataframe(out, width="stretch", hide_index=True, **kw)
@@ -368,7 +382,27 @@ def day_label(iso: object, year: bool = False) -> str:
         d = date.fromisoformat(str(iso)[:10])
     except (TypeError, ValueError):
         return str(iso)
-    return d.strftime("%a %d %b %Y") if year else d.strftime("%a %d %b")
+    # Day-month-year and a 12-hour clock throughout, the way this athlete reads
+    # dates. The weekday stays in front of it: training is planned by day of the
+    # week, so "Mon" is the part that answers the question fastest.
+    return d.strftime("%a %d-%m-%Y") if year else d.strftime("%a %d-%m")
+
+
+def fmt_stamp(raw: object) -> str:
+    """An ISO timestamp as "24-08-2026, 9:05 am". Falls back to the raw text."""
+    text = str(raw or "").strip()
+    if not text:
+        return "never"
+    try:
+        when = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text[:16].replace("T", " ")
+    # The year is dropped in the current year. On a sync timestamp it is almost
+    # always noise — you know what year it is — and it only earns its space when
+    # the reading is genuinely old.
+    pattern = "%d-%m, %I:%M %p" if when.year == date.today().year else \
+              "%d-%m-%Y, %I:%M %p"
+    return when.strftime(pattern).replace(" 0", " ").lower()
 
 
 def pace_str(sport: str, dist_m: float | None, dur_s: float | None) -> str:
@@ -732,7 +766,7 @@ def week_cells(plan: dict | None, today: date,
              "done": e.get("purpose") == "completed"}
             for e in entries if e["day"] == name and e["sport"] != "rest"
         ]
-        cells.append({"name": name, "date": d.strftime("%d %b"),
+        cells.append({"name": name, "date": d.strftime("%d-%m"),
                       "today": mark_today and d == real_today, "items": items})
     return cells
 
@@ -821,7 +855,8 @@ def page_progress(data: dict, today: date) -> None:
                "median pace, so sessions of different speeds are comparable. "
                "Down is progress.")
     with ui.frame():
-        training_hr_block(acts, today, data.get("notes"), data.get("weather"))
+        training_hr_block(acts, today, data.get("notes"), data.get("weather"),
+                          ceiling=data.get("aerobic_ceiling"))
 
     rhr = baseline_trend(wl, "resting_hr", as_of=today, lower_is_better=True)
     hrv = baseline_trend(wl, "hrv_last_night", as_of=today, lower_is_better=False)
@@ -1018,14 +1053,23 @@ def intensity_block(zones: list[dict], today: date,
         st.caption(f"28 days, on Garmin's zones. {verdict}")
     chart_ai_note("intensity", notes)
     with st.expander("Zone breakdown by sport"):
+        if live:
+            st.caption(
+                f"Recounted from your stored heart-rate samples with zone 2 "
+                f"topping out at {custom['ceiling']} bpm. Totals differ a little "
+                f"from Garmin's own: those are computed on the watch from every "
+                f"beat, and the samples stored here are thinned to 600 a session.")
         for sport in shown_sports():
-            sp = zone_distribution(zones, sport=sport, since=since)
+            sp = (stream_zone_minutes(db_stamp(), today.isoformat(),
+                                      int(float(ceiling)), sport) if live
+                  else zone_distribution(zones, sport=sport, since=since))
+            sp = {int(k): v for k, v in (sp or {}).items()}
             if sum(sp.values()) <= 0:
                 continue
             st.markdown(f"<span style='font-size:.82rem;opacity:.8'>{EMOJI[sport]} "
                         f"{sport.title()} · {hm(sum(sp.values()))}</span>",
                         unsafe_allow_html=True)
-            ui.proportion_bar([(ZONE_LABELS[z], sp[z], ZONE_COLOR[z])
+            ui.proportion_bar([(ZONE_LABELS[z], sp.get(z, 0), ZONE_COLOR[z])
                                for z in range(1, 6)])
 
 
@@ -1053,7 +1097,7 @@ def efficiency_block(acts: list[dict], today: date,
             x=[p.date for p in pts], y=[(p.ef / base - 1) * 100 for p in pts],
             mode="lines+markers", name=sport,
             line=dict(color=SPORT_COLOR[sport], width=2), marker=dict(size=8),
-            hovertemplate="%{x|%a %d %b}<br>%{y:+.1f}% vs first session"
+            hovertemplate="%{x|%a %d-%m-%Y}<br>%{y:+.1f}% vs first session"
                           f"<extra>{sport}</extra>")
     if not drawn:
         st.caption("Needs at least two sessions with heart rate in a sport. "
@@ -1108,7 +1152,7 @@ def cadence_block(acts: list[dict], today: date) -> None:
                     name="cadence", line=dict(color=SPORT_COLOR["run"], width=2),
                     marker=dict(size=9),
                     customdata=[p["stride_cm"] for p in pts],
-                    hovertemplate="%{x|%a %d %b}<br>%{y:.0f} spm<br>"
+                    hovertemplate="%{x|%a %d-%m-%Y}<br>%{y:.0f} spm<br>"
                                   "stride %{customdata:.0f} cm<extra>run</extra>")
     fig.add_hline(y=stats["target"], line_dash="dot",
                   line_color="rgba(140,158,176,.6)",
@@ -1200,7 +1244,8 @@ def humid_days(acts: list[dict], weather: dict | None) -> dict[date, str]:
 
 def training_hr_block(acts: list[dict], today: date,
                       notes: dict | None = None,
-                      weather: dict | None = None) -> None:
+                      weather: dict | None = None,
+                      ceiling: float | None = None) -> None:
     """All sports on one axis, so this is one chart rather than three."""
     # Right-aligned beside the heading rather than on a row of its own: a
     # two-option control does not deserve 40px of full-width page.
@@ -1237,12 +1282,23 @@ def training_hr_block(acts: list[dict], today: date,
             line=dict(color=SPORT_COLOR[sport], width=2),
             marker=dict(size=10, color=SPORT_COLOR[sport]),
             customdata=list(zip(mins, raws)),
-            hovertemplate="%{x|%a %d %b}<br>%{y:.0f} bpm<br>"
+            hovertemplate="%{x|%a %d-%m-%Y}<br>%{y:.0f} bpm<br>"
                           "%{customdata[0]:.0f} min · raw %{customdata[1]:.0f}"
                           f"<extra>{sport}</extra>")
         t = hr_trend(acts, sport, as_of=today, steady_only=False)
         if t["normalised_change_bpm"] is not None:
             notes.append(f"{sport} {t['normalised_change_bpm']:+.1f} bpm")
+    # The ceiling drawn on the chart, because it is the line the whole page is
+    # asking about: below it was an easy session, above it was not, and without
+    # the line the reader has to hold the number in their head.
+    if ceiling and drawn:
+        fig.add_hline(
+            y=float(ceiling), line_dash="dash", line_color=TONE["good"],
+            line_width=1.4,
+            annotation_text=f"your easy ceiling · {float(ceiling):.0f} bpm",
+            annotation_position="top left",
+            annotation_font=dict(size=10, color=TONE["good"]))
+
     muggy = humid_days(acts, weather)
     if muggy and drawn:
         # Marked, not corrected. There is no defensible constant to subtract for
@@ -1309,7 +1365,7 @@ def trend_chart(wl: list[dict], today: date) -> None:
     fig = go.Figure()
     fig.add_scatter(x=df["day"], y=y, mode="markers", name="daily",
                     marker=dict(size=6, color=color, opacity=.35),
-                    hovertemplate="%{x|%a %d %b}<br>%{y:.1f}<extra></extra>")
+                    hovertemplate="%{x|%a %d-%m-%Y}<br>%{y:.1f}<extra></extra>")
     fig.add_scatter(x=df["day"], y=y.rolling(7, min_periods=2).mean(), mode="lines",
                     name="7-day average", line=dict(color=color, width=2.5))
     if y.notna().sum() >= 20:
@@ -1337,7 +1393,7 @@ def volume_chart(data: dict, today: date,
                         mode="lines+markers", name="completed",
                         line=dict(color=TONE["good"], width=3),
                         marker=dict(size=8),
-                        hovertemplate="week of %{x|%a %d %b}<br>%{y:.0f} min"
+                        hovertemplate="week of %{x|%a %d-%m-%Y}<br>%{y:.0f} min"
                                       "<extra>completed</extra>")
     bridge = [done[-1]] if done else []
     pts = [(week_start_of(today) + timedelta(weeks=f["week_offset"]), f["minutes"],
@@ -1347,14 +1403,14 @@ def volume_chart(data: dict, today: date,
                     mode="lines+markers", name="ceiling the rules allow",
                     line=dict(color="#7FB6DC", width=2.5, dash="dash"),
                     marker=dict(size=8),
-                    hovertemplate="week of %{x|%a %d %b}<br>%{y:.0f} min"
+                    hovertemplate="week of %{x|%a %d-%m-%Y}<br>%{y:.0f} min"
                                   "<extra>planned</extra>")
     dl = [(d, m) for d, m, is_dl in pts if is_dl]
     if dl:
         fig.add_scatter(x=[d for d, _ in dl], y=[m for _, m in dl], mode="markers",
                         name="deload week",
                         marker=dict(size=14, symbol="diamond", color=TONE["caution"]),
-                        hovertemplate="week of %{x|%a %d %b}<br>%{y:.0f} min"
+                        hovertemplate="week of %{x|%a %d-%m-%Y}<br>%{y:.0f} min"
                                       "<extra>deload</extra>")
     fig.update_layout(yaxis_title="minutes per week", hovermode="x unified")
     ui.chart(fig, 200, date_axis=True)
@@ -1719,6 +1775,44 @@ def conformed_plan(plan: dict | None, today: date,
 
 
 @st.cache_data(show_spinner=False, ttl=900)
+def session_zone_minutes(stamp: float, activity_id: str,
+                         ceiling: int) -> dict:  # noqa: ARG001
+    """One session's minutes per zone, against the athlete's own zone 2 top."""
+    try:
+        def read(s: Store) -> dict:
+            acts = [a for a in s.activities(include_parents=True)
+                    if str(a.get("activity_id")) == str(activity_id)]
+            bounds = zone_bounds_with_ceiling(zone_bounds(s.zones()), ceiling)
+            return zone_distribution_from_streams(
+                {str(activity_id): s.stream(activity_id)}, acts, bounds)
+        return {int(k): v for k, v in (with_store(read) or {}).items()}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Session zone minutes failed: %s", exc)
+        return {}
+
+
+@st.cache_data(show_spinner=False, ttl=900)
+def stream_zone_minutes(stamp: float, iso_today: str, ceiling: int,
+                        sport: str = "", days: int = 28) -> dict:  # noqa: ARG001
+    """Minutes per zone from the stored samples, against the athlete's ceiling.
+
+    Cached: it reads every stream, which is the heaviest query on the page.
+    """
+    try:
+        def read(s: Store) -> dict:
+            acts = s.activities()
+            streams = {a["activity_id"]: s.stream(a["activity_id"]) for a in acts}
+            bounds = zone_bounds_with_ceiling(zone_bounds(s.zones()), ceiling)
+            return zone_distribution_from_streams(
+                streams, acts, bounds, sport=sport or None,
+                since=date.fromisoformat(iso_today) - timedelta(days=days))
+        return with_store(read)
+    except Exception as exc:  # noqa: BLE001 - fall back to Garmin's own buckets
+        log.warning("Stream zone minutes failed: %s", exc)
+        return {}
+
+
+@st.cache_data(show_spinner=False, ttl=900)
 def stream_polarisation(stamp: float, iso_today: str, ceiling: int,
                         hard_floor: int,
                         sports: tuple[str, ...] = ()) -> dict:  # noqa: ARG001
@@ -1848,8 +1942,8 @@ def page_lifetime(data: dict, today: date) -> None:
                "The headline trend: the same pace costing fewer beats is fitness. "
                "Every session on record.")
     with ui.frame():
-        training_hr_block(acts, today, data.get("notes"),
-                          data.get("weather"))
+        training_hr_block(acts, today, data.get("notes"), data.get("weather"),
+                          ceiling=data.get("aerobic_ceiling"))
         chart_ai_note("lifetime_hr", data.get("notes"))
 
     ui.section("Resting heart rate, HRV and sleep",
@@ -2093,8 +2187,19 @@ def log_sessions(data: dict, today: date) -> None:
                            "comparable with other sessions.")
 
     zrows = [z for z in data["zones"] if z["activity_id"] == aid]
+    ceiling = data.get("aerobic_ceiling")
+    if ceiling:
+        # Recounted against this athlete's zone 2 top rather than Garmin's, so
+        # this bar agrees with the rest of the dashboard.
+        bands = session_zone_minutes(db_stamp(), str(aid), int(float(ceiling)))
+        if sum(bands.values()) > 0:
+            st.markdown(f"**Time in each zone** — easy up to "
+                        f"{int(float(ceiling))} bpm")
+            ui.proportion_bar([(ZONE_LABELS[z], bands.get(z, 0), ZONE_COLOR[z])
+                               for z in range(1, 6)])
+            zrows = []
     if zrows:
-        st.markdown("**Time in each heart-rate zone**")
+        st.markdown("**Time in each heart-rate zone** — Garmin's own bands")
         ui.proportion_bar([(ZONE_LABELS[int(z["zone_number"])],
                             float(z["secs_in_zone"] or 0) / 60,
                             ZONE_COLOR[int(z["zone_number"])])
@@ -2310,7 +2415,7 @@ def sidebar(data: dict) -> None:
             ("Watch", "Forerunner 265"),
             ("Phase", "Base"),
             ("Last synced",
-             (data["last_sync"] or "never")[:16].replace("T", " ")),
+             fmt_stamp(data["last_sync"])),
             ("On record", f"{data['counts']['activities']} activities",
              f"{data['counts']['daily_wellness']} days"),
         ])
@@ -2366,7 +2471,7 @@ def filter_summary(today: date, sports: list[str]) -> str:
     elif monday == week_start_of(date.today()) + timedelta(weeks=1):
         span = "Next week"
     else:
-        span = f"{monday.strftime('%-d %b')}"
+        span = monday.strftime("%d-%m")
     if set(sports) >= set(FILTER_SPORTS):
         return span
     return f"{span} · " + ", ".join(sp[:4].title() for sp in sports)
@@ -2550,7 +2655,7 @@ def week_picker(today: date) -> date:
     labels = {}
     for mon in options:
         sun = mon + timedelta(days=6)
-        span = f"{mon.strftime('%d %b')} – {sun.strftime('%d %b')}"
+        span = f"{mon.strftime('%d-%m')} – {sun.strftime('%d-%m')}"
         if mon == this_monday:
             span += "  (this week)"
         elif mon > this_monday:

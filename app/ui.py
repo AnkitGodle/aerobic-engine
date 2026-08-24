@@ -607,7 +607,9 @@ def chart(fig, height: int = 260, date_axis: bool = False) -> None:
             if days[-1] not in picked:
                 picked.append(days[-1])
             fig.update_xaxes(tickmode="array", tickvals=picked)
-        fig.update_xaxes(tickformat="%a %-d %b", hoverformat="%a %-d %b %Y")
+        # Day-month on the ticks, with the weekday kept in front: training is
+        # planned by day of the week, and the full year on every tick is noise.
+        fig.update_xaxes(tickformat="%a %d-%m", hoverformat="%a %d-%m-%Y")
         # Clamp the axis to the data. Several charts ask for a fixed window —
         # twelve weeks of volume, ninety days of sessions — so an account with
         # three weeks of history drew two months of blank axis before the first

@@ -674,6 +674,82 @@ def polarisation(zone_rows: Sequence[dict[str, Any]], **kw: Any) -> dict[str, fl
     }
 
 
+def zone_bounds_with_ceiling(
+    bounds: dict[int, tuple[int, int | None]], ceiling: float | None,
+) -> dict[int, tuple[int, int | None]]:
+    """Garmin's zones with zone 2's top moved to the athlete's own ceiling.
+
+    Only that one boundary moves. Zone 1's floor, and the thresholds above zone
+    3, are physiological and come from the watch; where "easy" stops is the
+    judgement the athlete has actually made, and it is the boundary the whole
+    dashboard is arguing about.
+    """
+    if not bounds or not ceiling:
+        return dict(bounds)
+    top = int(ceiling)
+    out = dict(bounds)
+    z2 = out.get(2)
+    z3 = out.get(3)
+    if z2 and top > z2[0]:
+        out[2] = (z2[0], top)
+        if z3:
+            out[3] = (top + 1, z3[1])
+    return out
+
+
+def zone_of(hr: float, bounds: dict[int, tuple[int, int | None]]) -> int | None:
+    """Which zone a single heart-rate reading falls in."""
+    for number in sorted(bounds):
+        low, high = bounds[number]
+        if hr >= low and (high is None or hr <= high):
+            return number
+    return None
+
+
+def zone_distribution_from_streams(
+    streams: dict[str, Sequence[dict[str, Any]]],
+    activities: Sequence[dict[str, Any]],
+    bounds: dict[int, tuple[int, int | None]],
+    sport: str | None = None,
+    since: date | None = None,
+) -> dict[int, float]:
+    """Minutes per zone, from the stored samples and the given boundaries.
+
+    Exists so the zone charts follow the athlete's ceiling rather than Garmin's.
+    Garmin's own time-in-zone rows are computed on the watch against its fixed
+    bands, so no amount of relabelling makes them reflect a raised zone 2 — the
+    minutes have to be recounted.
+
+    Scaled by each activity's duration rather than counted raw: streams are
+    downsampled to at most 600 points, so one sample stands for a different
+    slice of time in a 20-minute run than in a two-hour ride.
+    """
+    per_activity = {str(a.get("activity_id")): a for a in activities}
+    out: dict[int, float] = {z: 0.0 for z in (bounds or {1: 0, 2: 0, 3: 0, 4: 0, 5: 0})}
+    if not bounds:
+        return out
+
+    for activity_id, samples in (streams or {}).items():
+        activity = per_activity.get(activity_id)
+        if activity is None:
+            continue
+        if sport and (activity.get("sport") or "") != sport:
+            continue
+        if since is not None:
+            day = _as_date(activity.get("start_date")) if activity.get("start_date") else None
+            if day is None or day < since:
+                continue
+        readings = [r["hr"] for r in samples or () if r.get("hr") is not None]
+        if not readings:
+            continue
+        minutes_each = ((activity.get("duration_s") or 0) / 60.0) / len(readings)
+        for hr in readings:
+            zone = zone_of(float(hr), bounds)
+            if zone is not None:
+                out[zone] = out.get(zone, 0.0) + minutes_each
+    return {z: round(v, 1) for z, v in out.items()}
+
+
 # Common coaching target for running cadence. Not a law — taller runners sit
 # lower, and cadence rises with pace — but below this the stride is usually long
 # enough that the foot lands well in front of the body, which brakes and loads
