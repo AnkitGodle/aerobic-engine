@@ -45,40 +45,74 @@ KG = {"unitId": 8, "unitKey": "kilogram", "factor": 1000.0}
 
 # library id -> (Garmin category, Garmin exercise name or None)
 #
-# A None name means "category only": the category enums are stable and widely
-# used, the per-exercise names are not, and a wrong name shows as blank on the
-# watch. The exercise's real name still reaches the watch through the step
-# description.
+# Both columns are verified against the live account, because Garmin fails the
+# two differently and neither failure is visible from the code:
+#
+#   * An invalid *category* returns HTTP 400 "Invalid category". STEP_UP and
+#     BALANCE are not categories, which would have rejected a whole session —
+#     step-ups belong under SQUAT.
+#   * An invalid *name* is accepted and then silently dropped, so the upload
+#     succeeds and the watch shows a bare category. Of thirty plausible names
+#     probed, nineteen were discarded this way: SPLIT_SQUAT, WALL_SIT,
+#     REVERSE_LUNGE, GLUTE_BRIDGE, HIP_THRUST, SINGLE_LEG_DEADLIFT and
+#     SINGLE_LEG_CALF_RAISE among them.
+#
+# So a name appears below only if Garmin kept it. Everything else is
+# category-only and carries its real name in the step description, which the
+# watch displays. Nothing here is a near-miss substitution: labelling a reverse
+# lunge as WALKING_LUNGE would be a name Garmin accepts and a lie about what to
+# do.
+VERIFIED_NAMES = frozenset({
+    "STANDING_CALF_RAISE", "SEATED_CALF_RAISE", "WEIGHTED_STANDING_CALF_RAISE",
+    "GOBLET_SQUAT", "STEP_UP", "WALKING_LUNGE", "ROMANIAN_DEADLIFT",
+    "STRAIGHT_LEG_DEADLIFT", "SIDE_PLANK", "LEG_CURL", "SIDE_LYING_LEG_RAISE",
+})
+
 GARMIN_TARGET: dict[str, tuple[str, str | None]] = {
     "calf_raise_straight": ("CALF_RAISE", "STANDING_CALF_RAISE"),
     "calf_raise_bent": ("CALF_RAISE", "SEATED_CALF_RAISE"),
-    "calf_raise_single_leg": ("CALF_RAISE", "SINGLE_LEG_CALF_RAISE"),
+    "calf_raise_single_leg": ("CALF_RAISE", None),
     "single_leg_calf_hold": ("CALF_RAISE", None),
-    "split_squat": ("SQUAT", "SPLIT_SQUAT"),
-    "reverse_lunge": ("LUNGE", "REVERSE_LUNGE"),
-    "step_up": ("STEP_UP", "STEP_UP"),
+    "tib_raise": ("CALF_RAISE", None),
+    "split_squat": ("SQUAT", None),
+    "reverse_lunge": ("LUNGE", None),
+    "step_up": ("SQUAT", "STEP_UP"),
     "step_down": ("SQUAT", None),
     "goblet_squat": ("SQUAT", "GOBLET_SQUAT"),
-    "wall_sit": ("SQUAT", "WALL_SIT"),
+    "wall_sit": ("SQUAT", None),
     "spanish_squat": ("SQUAT", None),
     "terminal_knee_extension": ("SQUAT", None),
     "rdl": ("DEADLIFT", "ROMANIAN_DEADLIFT"),
-    "single_leg_rdl": ("DEADLIFT", "SINGLE_LEG_DEADLIFT"),
-    "nordic_curl_assisted": ("CURL", None),
+    "single_leg_rdl": ("DEADLIFT", None),
+    "nordic_curl_assisted": ("LEG_CURL", "LEG_CURL"),
     "glute_bridge": ("HIP_RAISE", None),
     "hip_thrust": ("HIP_RAISE", None),
-    "side_lying_abduction": ("HIP_RAISE", None),
-    "band_monster_walk": ("HIP_RAISE", None),
+    "side_lying_abduction": ("HIP_STABILITY", "SIDE_LYING_LEG_RAISE"),
+    "band_monster_walk": ("HIP_STABILITY", None),
     "side_plank_hip_lift": ("PLANK", "SIDE_PLANK"),
-    "copenhagen_plank": ("PLANK", "SIDE_PLANK"),
-    "tib_raise": ("CALF_RAISE", None),
+    "copenhagen_plank": ("PLANK", None),
 }
+
+# Categories the account accepted. An unlisted one is an HTTP 400, not a
+# cosmetic problem, so this is asserted before anything is sent.
+VALID_CATEGORIES = frozenset({
+    "SQUAT", "DEADLIFT", "CALF_RAISE", "LUNGE", "HIP_RAISE", "PLANK", "CURL",
+    "LEG_CURL", "HIP_STABILITY", "CORE", "TOTAL_BODY", "OLYMPIC_LIFT",
+    "BENCH_PRESS", "ROW", "CARRY",
+})
 
 REST_SECONDS = 60
 
 
 def _step(order: int, prescription: Any, exercise: Any) -> dict[str, Any]:
     category, name = GARMIN_TARGET.get(exercise.id, ("SQUAT", None))
+    # Fail here rather than at the API: an unknown category is a 400 that
+    # rejects the whole session, and an unverified name is accepted and then
+    # dropped, leaving the watch showing a bare category with no explanation.
+    if category not in VALID_CATEGORIES:
+        raise ValueError(f"{exercise.id}: {category!r} is not a Garmin category")
+    if name and name not in VERIFIED_NAMES:
+        raise ValueError(f"{exercise.id}: {name!r} was not kept by Garmin")
     # Per side is doubled here rather than left to the athlete to remember: the
     # watch counts what it sees, and a unilateral set is two sets of work.
     hold = prescription.hold_s

@@ -626,3 +626,34 @@ def test_an_empty_session_is_refused_rather_than_uploaded():
 
     with pytest.raises(ValueError):
         garmin_workout.push(object(), [], "Legs A")
+
+
+def test_every_mapped_category_is_one_garmin_accepts():
+    """An unknown category is HTTP 400 and rejects the entire session. STEP_UP
+    looked obvious and is not a category; step-ups live under SQUAT."""
+    from core import garmin_workout
+
+    for eid, (category, _) in garmin_workout.GARMIN_TARGET.items():
+        assert category in garmin_workout.VALID_CATEGORIES, (eid, category)
+
+
+def test_only_names_garmin_actually_keeps_are_sent():
+    """An invalid name is accepted and silently dropped, so the upload looks
+    fine and the watch shows a bare category. Of thirty probed, nineteen went
+    that way."""
+    from core import garmin_workout
+
+    for eid, (_, name) in garmin_workout.GARMIN_TARGET.items():
+        if name is not None:
+            assert name in garmin_workout.VERIFIED_NAMES, (eid, name)
+
+
+def test_all_three_sessions_build_without_raising():
+    """The guard in _step turns a bad mapping into a test failure rather than a
+    400 at upload time or a blank label on the watch."""
+    from core import garmin_workout
+
+    for index in range(3):
+        presc = strength.build_session([], session_index=index)
+        steps = garmin_workout.build(presc, f"Legs {index}")
+        assert steps["workoutSegments"][0]["workoutSteps"]
