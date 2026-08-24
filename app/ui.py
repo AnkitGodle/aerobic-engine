@@ -70,8 +70,8 @@ CSS = """
   h1 { font-size: 1.75rem !important; font-weight: 680; letter-spacing: -.02em;
        margin: 0 0 .2rem !important; }
   .ic-sub { font-size: .86rem; opacity: .6; margin: 0 0 .6rem; }
-  .ic-section { font-size: 1.02rem; font-weight: 620; letter-spacing: -.01em;
-                padding-top: .9rem; margin: 0 0 .2rem; }
+  .ic-section { font-size: .95rem; font-weight: 620; letter-spacing: -.005em;
+                padding-top: .55rem; margin: 0 0 .15rem; }
   .ic-section-note { font-size: .81rem; opacity: .55; margin: 0 0 .7rem;
                      line-height: 1.45; }
 
@@ -96,19 +96,27 @@ CSS = """
 
   /* Figures band: no cards. Used where the numbers are the content and a grid
      of bordered boxes reads as decoration rather than information. */
+  /* Figures band: a strip of numbers, not a grid of cards. Twelve bordered
+     boxes cost about 330px of height before the first chart and read as
+     decoration; the same twelve numbers fit in one band a fifth of that. */
   .ic-figs { display: flex; flex-wrap: wrap; gap: 0;
              border-top: 1px solid var(--ic-line);
              border-bottom: 1px solid var(--ic-line);
-             margin: .1rem 0 1.1rem; }
-  .ic-fig { flex: 1 1 8.5rem; padding: .7rem 1.1rem .75rem 0; min-width: 7rem; }
-  .ic-fig + .ic-fig { padding-left: 1.1rem;
+             margin: .1rem 0 1.2rem; }
+  .ic-fig { flex: 1 1 7rem; padding: .5rem .9rem .55rem 0; min-width: 6rem; }
+  .ic-fig + .ic-fig { padding-left: .9rem;
                       border-left: 1px solid var(--ic-line); }
-  .ic-fig-label { font-size: .66rem; letter-spacing: .09em; text-transform: uppercase;
-                  opacity: .55; margin-bottom: .2rem; }
-  .ic-fig-value { font-size: 1.5rem; font-weight: 640; line-height: 1.15;
-                  font-variant-numeric: tabular-nums; }
-  .ic-fig-note { font-size: .74rem; opacity: .55; margin-top: .1rem;
-                 font-variant-numeric: tabular-nums; }
+  .ic-fig-label { font-size: .63rem; letter-spacing: .085em;
+                  text-transform: uppercase; opacity: .5;
+                  margin-bottom: .12rem; white-space: nowrap;
+                  overflow: hidden; text-overflow: ellipsis; }
+  .ic-fig-value { font-size: 1.24rem; font-weight: 640; line-height: 1.2;
+                  font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+  .ic-fig-value.good { color: var(--ic-good); }
+  .ic-fig-value.caution { color: var(--ic-caution); }
+  .ic-fig-value.bad { color: var(--ic-bad); }
+  .ic-fig-note { font-size: .69rem; opacity: .5; margin-top: .05rem;
+                 line-height: 1.3; }
 
   /* A hairline frame for a chart. Deliberately not the rounded, filled card
      used for stats: a chart needs a boundary so it reads as one object, but a
@@ -365,7 +373,9 @@ def figures(items: list[dict]) -> None:
     cells = "".join(
         f'<div class="ic-fig">'
         f'<div class="ic-fig-label">{esc(i.get("label", ""))}</div>'
-        f'<div class="ic-fig-value">{esc(i.get("value", "—"))}</div>'
+        f'<div class="ic-fig-value'
+        + (f' {i["tone"]}' if i.get("tone") in ("good", "caution", "bad") else "")
+        + f'">{esc(i.get("value", "—"))}</div>'
         + (f'<div class="ic-fig-note">{esc(i["note"])}</div>' if i.get("note") else "")
         + "</div>"
         for i in items
@@ -485,7 +495,9 @@ def chart(fig, height: int = 260, date_axis: bool = False) -> None:
     a calendar lookup to answer the question they actually have.
     """
     fig.update_layout(
-        height=height, margin=dict(t=8, b=4, l=4, r=4),
+        # Tight margins: Plotly's defaults reserve room for a title and axis
+        # labels this app draws in HTML above the chart instead.
+        height=height, margin=dict(t=6, b=2, l=2, r=2),
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         font=dict(size=12),
         legend=dict(orientation="h", y=-0.2, x=0, font=dict(size=11)),
@@ -493,6 +505,28 @@ def chart(fig, height: int = 260, date_axis: bool = False) -> None:
     )
     fig.update_xaxes(showgrid=False, zeroline=False, title=None)
     if date_axis:
+        # Explicit ticks, one per day, evenly sampled. Plotly's automatic ticks
+        # land on sub-day intervals when the span is short, and formatting those
+        # to day precision printed "Wed 19 Aug" twice in a row — which reads as a
+        # rendering bug rather than as two sessions.
+        # `is not None` rather than truthiness: a trace's x can be a numpy
+        # array or a pandas Series, and those raise on bool() rather than
+        # answering it.
+        days = set()
+        for trace in fig.data:
+            xs = getattr(trace, "x", None)
+            if xs is None:
+                continue
+            for x in xs:
+                if x is not None:
+                    days.add(str(x)[:10])
+        days = sorted(days)
+        if 1 < len(days) <= 400:
+            step = max(1, (len(days) + 7) // 8)
+            picked = days[::step]
+            if days[-1] not in picked:
+                picked.append(days[-1])
+            fig.update_xaxes(tickmode="array", tickvals=picked)
         fig.update_xaxes(tickformat="%a %-d %b", hoverformat="%a %-d %b %Y")
     fig.update_yaxes(gridcolor="rgba(140,158,176,.15)", zeroline=False)
     st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})

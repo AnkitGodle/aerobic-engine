@@ -365,10 +365,15 @@ def insight_banner(page: str, data: dict, today: date) -> None:
     tone = {"success": "good", "warning": "caution", "error": "bad",
             "info": "neutral"}[ins.tone]
     prose = (data.get("notes") or {}).get(page, {}).get("text")
-    body = prose or " ".join(b.replace("**", "") for b in ins.bullets[:2])
-    ui.banner(ins.headline, body, tone)
-    if len(ins.bullets) > (0 if prose else 2):
-        with st.expander("The numbers behind that"):
+    # Headline only, with the prose and the numbers folded into one expander.
+    # Printing the headline and then a paragraph restating it, followed by a
+    # separate collapsed row, cost about 130px at the top of every page to say
+    # one sentence twice.
+    ui.banner(ins.headline, "", tone)
+    if prose or ins.bullets:
+        with st.expander("Why, and the numbers behind it"):
+            if prose:
+                st.markdown(prose)
             for b in ins.bullets:
                 st.markdown(f"- {b}")
 
@@ -596,23 +601,27 @@ def week_cells(plan: dict | None, today: date,
 
 
 def page_progress(data: dict, today: date) -> None:
+    """Trend first, numbers second.
+
+    The previous order was twelve bordered stat cards — about 330px of height —
+    before the first chart. Numbers in boxes are the slowest possible way to
+    answer "is it working": the answer is a direction, and a direction is a
+    shape. So the headline chart leads at full width, and everything that used
+    to be a card is now one dense strip beneath it.
+    """
     acts, wl, zones = data["activities"], data["wellness"], data["zones"]
     tot = totals(acts)
     sig = recovery_signals(wl, acts, as_of=today) if wl else None
 
     insight_banner("Fitness", data, today)
 
-    ui.stats_row([
-        {"label": "Activities", "value": tot["sessions"],
-         "note": f"{tot['km']:.0f} km · {hm(tot['minutes'])}"},
-        *[{"label": s.title(),
-           "value": f"{int(tot['by_sport'].get(s, {}).get('sessions', 0))}",
-           "note": f"{tot['by_sport'].get(s, {}).get('km', 0):.0f} km · "
-                   f"{hm(tot['by_sport'].get(s, {}).get('minutes', 0))}"}
-          for s in shown_sports()],
-    ])
+    # The one chart the whole page exists for.
+    ui.section("Heart rate at your usual pace",
+               "Each point is what this session's efficiency implies at your "
+               "median pace, so sessions of different speeds are comparable. "
+               "Down is progress.")
+    training_hr_block(acts, today, data.get("notes"), data.get("weather"))
 
-    # --- the engine, in four numbers ----------------------------------
     rhr = baseline_trend(wl, "resting_hr", as_of=today, lower_is_better=True)
     hrv = baseline_trend(wl, "hrv_last_night", as_of=today, lower_is_better=False)
     tones = {"improving": "good", "worsening": "bad", "steady": "neutral",
@@ -620,28 +629,11 @@ def page_progress(data: dict, today: date) -> None:
 
     def trend_note(t: dict, unit: str) -> str:
         if t["verdict"] == "insufficient_data":
-            return f"needs {t.get('needed', 'more data')}"
+            return t.get("needed", "more data")
         if t["per_week"] is None:
-            return "holding steady"
-        arrow = "improving" if t["verdict"] == "improving" else (
-            "worsening" if t["verdict"] == "worsening" else "holding steady")
-        return f"{t['per_week']:+.2f} {unit}/week — {arrow}"
-    ui.stats_row([
-        {"label": "Resting HR",
-         "value": f"{rhr['recent']:.0f} bpm" if rhr["recent"] else "—",
-         "note": trend_note(rhr, "bpm"), "tone": tones[rhr["verdict"]]},
-        {"label": "HRV", "value": f"{hrv['recent']:.0f} ms" if hrv["recent"] else "—",
-         "note": trend_note(hrv, "ms"), "tone": tones[hrv["verdict"]]},
-        {"label": "VO2max",
-         "value": f"{sig.vo2max_run:.1f}" if sig and sig.vo2max_run else "—",
-         "note": "Garmin running estimate"},
-        {"label": "Load ratio", "value": f"{sig.acwr:.2f}" if sig and sig.acwr else "—",
-         "note": "needs ~3 weeks of history"},
-    ])
+            return "steady"
+        return f"{t['per_week']:+.2f} {unit}/wk"
 
-    # Load Garmin already measures that the app was storing without using.
-    # Steps and intensity minutes are training that happens outside a logged
-    # session and still has to be recovered from; stress is its own signal.
     recent = [r for r in wl if r.get("day")
               and date.fromisoformat(str(r["day"])[:10]) >= today - timedelta(days=7)]
 
@@ -649,65 +641,81 @@ def page_progress(data: dict, today: date) -> None:
         vals = [float(r[field]) for r in recent if r.get(field) is not None]
         return sum(vals) / len(vals) if vals else None
 
-    # Garmin doubles vigorous minutes against a 150-a-week goal.
     weekly_im = sum(float(r.get("intensity_moderate_min") or 0)
                     + 2 * float(r.get("intensity_vigorous_min") or 0)
                     for r in recent)
-    steps, stress, resp = avg("steps"), avg("stress_avg"), avg("respiration_avg")
-    if any(v is not None for v in (steps, stress, resp)) or weekly_im:
-        ui.stats_row([
-            {"label": "Steps / day", "value": f"{steps:,.0f}" if steps else "—",
-             "note": "7-day average"},
-            {"label": "Intensity minutes",
-             "value": f"{weekly_im:.0f}" if weekly_im else "—",
-             "note": "last 7 days, against a 150 goal" if weekly_im
-                     else "nothing recorded",
-             "tone": "good" if weekly_im >= 150 else "neutral"},
-            {"label": "Stress", "value": f"{stress:.0f}" if stress else "—",
-             "note": "7-day average, 0-100",
-             "tone": "bad" if stress and stress >= 50 else "neutral"},
-            {"label": "Respiration", "value": f"{resp:.0f}" if resp else "—",
-             "note": "breaths per minute"},
-        ])
+    steps, stress = avg("steps"), avg("stress_avg")
+    cad = cadence_stats(acts)
 
-    # --- two panels per row -------------------------------------------
+    # One strip, and only entries that carry a number. A card reading "Swim 0"
+    # spends a twelfth of the row saying nothing.
+    figures = [
+        {"label": "Resting HR",
+         "value": f"{rhr['recent']:.0f}" if rhr["recent"] else "—",
+         "note": trend_note(rhr, "bpm"), "tone": tones[rhr["verdict"]]},
+        {"label": "HRV", "value": f"{hrv['recent']:.0f}" if hrv["recent"] else "—",
+         "note": trend_note(hrv, "ms"), "tone": tones[hrv["verdict"]]},
+        {"label": "VO2max",
+         "value": f"{sig.vo2max_run:.1f}" if sig and sig.vo2max_run else "—",
+         "note": "Garmin estimate"},
+        {"label": "Load ratio",
+         "value": f"{sig.acwr:.2f}" if sig and sig.acwr else "—",
+         "note": "needs 3 weeks" if not (sig and sig.acwr) else "acute vs chronic"},
+    ]
+    if cad.get("avg"):
+        figures.append({
+            "label": "Cadence", "value": f"{cad['avg']:.0f}",
+            "note": f"stride {cad['avg_stride_cm']:.0f} cm"
+                    if cad.get("avg_stride_cm") else "steps/min",
+            "tone": {"low": "bad", "fair": "caution",
+                     "good": "good"}.get(cad["verdict"], "neutral")})
+    for sport in shown_sports():
+        row = tot["by_sport"].get(sport) or {}
+        if not row.get("sessions"):
+            continue
+        figures.append({
+            "label": sport.title(), "value": f"{int(row['sessions'])}",
+            "note": f"{row.get('km', 0):.0f} km · {hm(row.get('minutes') or 0)}"})
+    if steps:
+        figures.append({"label": "Steps / day", "value": f"{steps:,.0f}",
+                        "note": "7-day average"})
+    if weekly_im:
+        figures.append({"label": "Intensity min", "value": f"{weekly_im:.0f}",
+                        "note": "7 days, goal 150",
+                        "tone": "good" if weekly_im >= 150 else "neutral"})
+    if stress:
+        figures.append({"label": "Stress", "value": f"{stress:.0f}",
+                        "note": "7-day average",
+                        "tone": "bad" if stress >= 50 else "neutral"})
+    ui.figures(figures)
+
+    # Two per row, and the secondary work behind tabs rather than stacked. Six
+    # panels down the page was 2354px of scrolling; three visible with the rest
+    # one click away is the same information in a third of the height.
     a, b = st.columns(2, gap="medium")
-    with a, ui.card("Heart rate during training",
-                    "Each point is the heart rate this session's efficiency implies "
-                    "at your usual pace. Down is progress."):
-        training_hr_block(acts, today, data.get("notes"),
-                          data.get("weather"))
-    with b, ui.card("Where your effort goes",
-                    "Base phase wants most time easy. Hard work costs recovery "
-                    "without adding much base."):
+    with a, ui.card("Where your effort goes",
+                    "Base phase wants most time easy."):
         intensity_block(zones, today, data.get("notes"), data)
+    with b, ui.card("Efficiency against your own baseline",
+                    "Percent change in speed or watts per heartbeat."):
+        efficiency_block(acts, today, data.get("notes"), data.get("weather"))
 
-    c, d = st.columns(2, gap="medium")
-    with c, ui.card("Efficiency against your own baseline",
-                    "Percent change in speed or watts per heartbeat, so all three "
-                    "sports share one axis."):
-        efficiency_block(acts, today, data.get("notes"),
-                         data.get("weather"))
-    with d, ui.card("Volume, and the ceiling ahead",
-                    "At most 10% growth a week, every fourth week a deload."):
+    detail = st.tabs(["Volume", "Daily signals", "Cadence and stride",
+                      "Running form", "Aerobic drift"])
+    with detail[0]:
+        st.caption("At most 10% growth a week, every fourth week easier.")
         volume_chart(data, today, data.get("notes"))
-
-    e, f = st.columns(2, gap="medium")
-    with e, ui.card("Daily signals", "Overnight measurements, against baseline."):
+    with detail[1]:
+        st.caption("Overnight measurements against your own baseline.")
         trend_chart(wl, today)
-    with f, ui.card("Aerobic drift on long sessions",
-                    "Efficiency in the second half versus the first. Under 5% is "
-                    "good durability."):
-        drift_block(acts)
-
-    g, h = st.columns(2, gap="medium")
-    with g, ui.card("Cadence and stride",
-                    "How the distance was covered, not how fast. A quicker "
-                    "turnover at the same pace means a shorter stride and a "
-                    "softer landing."):
+    with detail[2]:
         cadence_block(acts, today)
-    with h, ui.card("Running dynamics", "What the watch measures about your form."):
+    with detail[3]:
         form_block(acts)
+    with detail[4]:
+        st.caption("Efficiency in the second half versus the first. Under 5% is "
+                   "good durability.")
+        drift_block(acts)
 
 
 def form_block(acts: list[dict]) -> None:
@@ -775,16 +783,17 @@ def intensity_block(zones: list[dict], today: date,
                else "Inverted: base phase wants roughly the reverse of this."
                if shown["hard"] >= 35 else "Drifting harder than base phase wants.")
     if live:
-        st.caption(f"Last 28 days, counting anything at or below your "
-                   f"{custom['ceiling']} bpm ceiling as easy. {verdict}")
-        st.caption(
-            f"Garmin's own zones stop easy at {bounds.get(2, (0, 0))[1]} bpm and "
-            f"read {pol['easy']:.0f}% easy / {pol['moderate']:.0f}% moderate / "
-            f"{pol['hard']:.0f}% hard for the same period. Hard starts at the same "
-            f"{custom['hard_floor']} bpm either way, so the difference is entirely "
-            f"your raised ceiling.")
+        st.caption(f"28 days, against your {custom['ceiling']} bpm ceiling. "
+                   f"{verdict}")
+        with st.expander("How this compares with Garmin's own zones"):
+            st.markdown(
+                f"Garmin stops easy at **{bounds.get(2, (0, 0))[1]} bpm** and "
+                f"reads {pol['easy']:.0f}% easy / {pol['moderate']:.0f}% "
+                f"moderate / {pol['hard']:.0f}% hard for the same period.\n\n"
+                f"Hard starts at the same {custom['hard_floor']} bpm either way, "
+                f"so the whole difference is your raised ceiling.")
     else:
-        st.caption(f"Last 28 days, on Garmin's zones. {verdict}")
+        st.caption(f"28 days, on Garmin's zones. {verdict}")
     chart_ai_note("intensity", notes)
     with st.expander("Zone breakdown by sport"):
         for sport in shown_sports():
@@ -971,9 +980,16 @@ def training_hr_block(acts: list[dict], today: date,
                       notes: dict | None = None,
                       weather: dict | None = None) -> None:
     """All sports on one axis, so this is one chart rather than three."""
-    view = st.radio("View", ["At your usual pace", "Raw average"], horizontal=True,
-                    index=0, label_visibility="collapsed", key="hr_view")
-    normalised = view.startswith("At")
+    # Right-aligned beside the heading rather than on a row of its own: a
+    # two-option control does not deserve 40px of full-width page.
+    _, ctrl = st.columns([3, 1.15], vertical_alignment="center")
+    with ctrl:
+        view = st.segmented_control(
+            "View", ["Usual pace", "Raw"], default="Usual pace",
+            key="hr_view", label_visibility="collapsed",
+            help="Usual pace normalises each session to your median pace, so "
+                 "a fast day and a slow day are comparable.")
+    normalised = (view or "Usual pace").startswith("Usual")
     field = "hr_at_reference" if normalised else "avg_hr"
 
     fig = go.Figure()
@@ -1648,6 +1664,42 @@ def page_about(data: dict, today: date) -> None:
         "**One habit matters:** record leg sessions on the watch in strength "
         "mode. They come back on their own, count towards your training load, "
         "and the weights only go up from a session the app can see."
+    )
+
+    ui.section("How to log a leg session",
+               "Two ways. The first is better, and the difference matters.")
+    st.markdown(
+        "**On the watch, as you train — do this one.**\n\n"
+        "1. Press the top-right button to open the activity list.\n"
+        "2. Choose **Strength**. Start it before your first set.\n"
+        "3. Lift. The watch counts reps and rest on its own — you do not need "
+        "to press anything between sets.\n"
+        "4. If it miscounts, press **lap** at the end of a set to close it "
+        "manually.\n"
+        "5. Stop and save when you finish. It syncs with your phone as usual.\n\n"
+        "Next time you press Refresh here, the session comes in by itself: the "
+        "exercises are matched to the ones in the plan, the sets and reps are "
+        "read off the watch, and the weights for next time move up from what you "
+        "actually did.\n\n"
+        "**Why it is worth the extra taps:** a strength session logged on the "
+        "watch counts towards your training load, which is what Training "
+        "Readiness is built from. Do the work without recording it and the watch "
+        "thinks you rested, so the next day's readiness — and this app's plan — "
+        "are both built on a week that did not happen."
+    )
+    st.markdown(
+        "**By hand, on the Log page — for when you forgot.**\n\n"
+        "Open **Log**, unlock with your PIN, and the session is already filled "
+        "in with the weights and reps you are due. Change anything that differed, "
+        "tick the exercises you completed, mark anything that hurt, and save.\n\n"
+        "Marking pain is not a detail: the same exercise flagged twice stops "
+        "being prescribed and the app says to see a physio instead of working "
+        "around it."
+    )
+    st.caption(
+        "Either way the rule for adding weight is the same — one more rep, then "
+        "one step heavier, and only after a session you finished cleanly and "
+        "pain-free. Nothing jumps."
     )
 
     ui.section("What Garmin already gives you",
