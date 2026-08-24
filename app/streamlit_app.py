@@ -1846,6 +1846,39 @@ def page_about(data: dict, today: date) -> None:
         "too. The plan says `ai_repaired` when that happened."
     )
 
+    ui.section("What the AI actually does",
+               "Four jobs. All of them are writing or judgement, none of them "
+               "are maths.")
+    ui.rows([
+        ("Shapes the remaining week", "planner",
+         "which day, how long, how hard — inside the rules"),
+        ("Explains each session", "planner", "the one-line reason on every day"),
+        ("Reads your charts", "each sync", "the plain-English line under each one"),
+        ("Answers your push-back", "on request",
+         "tell it the week is wrong and say why"),
+    ])
+    st.markdown(
+        "It is given your finished sessions, your recovery signals, the limits "
+        "it must stay inside, and your last two weeks of check-ins. It answers "
+        "in a fixed format, and every number it returns is checked again in code "
+        "before you see it.\n\n"
+        "**What it is deliberately not doing:** the arithmetic. Your heart-rate "
+        "targets come from your zones, the weights come from your logged "
+        "progression, the easy-week trigger comes from your recovery data, and "
+        "the exercises come from a fixed list. Sending a session to your watch "
+        "is plain code too — it builds a Garmin workout from the same "
+        "prescription and uploads it. No model is involved in any of that, "
+        "which is why those parts cannot drift."
+    )
+    st.markdown(
+        "**Why it is arranged this way.** A model asked how your training "
+        "should go will agree with you, because agreeing is what it was trained "
+        "to do. Say you feel strong and it offers a bigger week; say you are "
+        "tired and it cancels the week. Both answers are confident and neither "
+        "is coaching. Handing it the writing and the placement, and keeping the "
+        "limits in code, is what makes its answer worth reading."
+    )
+
     ui.section("What the AI is never allowed to do")
     ui.rows([
         ("Make up an exercise", "blocked", "it can only pick from the 22"),
