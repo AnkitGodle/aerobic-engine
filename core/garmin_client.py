@@ -756,6 +756,21 @@ def normalize_activity(raw: dict[str, Any]) -> dict[str, Any] | None:
         "avg_speed_mps": _f(raw.get("averageSpeed")),
         "avg_power_w": _f(raw.get("avgPower") or raw.get("averagePower")),
         "norm_power_w": _f(raw.get("normPower")),
+        # Running dynamics. Cadence and stride length are the two halves of
+        # pace, and the interesting one is cadence: a low cadence means a long
+        # stride, which means landing further in front of the body, which is the
+        # knee and shin load the strength work exists to protect against.
+        "avg_cadence": _f(raw.get("averageRunCadence")
+                          or raw.get("averageRunningCadenceInStepsPerMinute")
+                          or raw.get("averageBikingCadenceInRevPerMinute")),
+        "max_cadence": _f(raw.get("maxRunCadence")
+                          or raw.get("maxRunningCadenceInStepsPerMinute")
+                          or raw.get("maxBikingCadenceInRevPerMinute")),
+        "stride_length_cm": _f(raw.get("strideLength")),
+        "ground_contact_ms": _f(raw.get("groundContactTime")),
+        "vertical_osc_cm": _f(raw.get("verticalOscillation")),
+        "vertical_ratio": _f(raw.get("verticalRatio")),
+        "steps": _f(raw.get("steps")),
         "elevation_gain_m": _f(raw.get("elevationGain")),
         "calories": _f(raw.get("calories")),
         "training_load": _f(
@@ -826,6 +841,12 @@ def parse_stream(details: Any, max_points: int = 600) -> list[dict[str, Any]]:
                 "power_w": pick(row, "directPower", "directBikePower"),
                 "altitude_m": pick(row, "directElevation", "directAltitude",
                                    "directCorrectedElevation"),
+                # directRunCadence is steps for one leg on some firmware and
+                # both on others; directDoubleCadence is always both. Prefer the
+                # unambiguous one so a 75 never gets read as a 150.
+                "cadence": pick(row, "directDoubleCadence", "directRunCadence",
+                                "directBikeCadence"),
+                "stride_length_cm": pick(row, "directStrideLength"),
             }
         )
     # directTimestamp is epoch-ms; rebase to seconds from the start.

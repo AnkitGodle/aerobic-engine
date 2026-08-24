@@ -554,6 +554,10 @@ EXERCISES.update({e.id: e for e in [
 # impact, and raising cadence is done by taking quicker, shorter steps rather
 # than by hopping.
 DRILLS: dict[str, dict[str, Any]] = {
+    # How to raise cadence, in the order that works. Deliberately not "just run
+    # faster": cadence rises with pace on its own, so a faster session shows a
+    # higher number without the stride having changed at all. The point is a
+    # quicker turnover at the *same* pace.
     "run_cadence_strides": {
         "name": "Cadence strides",
         "focus": "cadence",
@@ -571,6 +575,44 @@ DRILLS: dict[str, dict[str, Any]] = {
         "why": "Most runners land with the foot too far in front, which brakes and "
                "loads the knee. Raising cadence by 5-10% shortens the stride and "
                "reduces load per step without any loss of speed.",
+    },
+    "metronome_easy_run": {
+        "name": "Metronome easy run",
+        "focus": "cadence",
+        "where": "A whole easy run, once a week",
+        "dose": "10-20 minutes of the run, at 5% above your usual cadence",
+        "setup": "Find your normal cadence from a recent easy run, add 5%, and "
+                 "set a metronome app or your watch alert to that.",
+        "steps": (
+            "Run at your usual easy effort, not your usual pace — the pace will "
+            "drop at first and that is correct.",
+            "Take shorter, quicker steps in time with the beat. Let the foot land "
+            "under your hip rather than out in front.",
+            "Do it for 10 minutes at first. Stop matching the beat if your "
+            "breathing rises: this is a technique change, not a workout.",
+        ),
+        "mistakes": "Jumping straight to 180. A 5% step is what the body adapts "
+                    "to; a 20% jump just makes you bounce.",
+        "why": "Cadence is a habit held by the nervous system, so it changes with "
+               "repetition rather than with effort. One deliberate run a week "
+               "moves it in a few weeks, and it holds.",
+    },
+    "hill_walk_backs": {
+        "name": "Short hill repeats, walk down",
+        "focus": "cadence",
+        "where": "Instead of one easy run, every other week",
+        "dose": "6-8 x 30 seconds uphill, walking all the way back down",
+        "setup": "A gentle hill, 30 seconds of running long. Warm up first.",
+        "steps": (
+            "Run up at a strong but controlled effort, taking short quick steps.",
+            "Walk back down. The walk is not optional — it is what keeps this out "
+            "of interval territory.",
+        ),
+        "mistakes": "Running the descent. Downhill running is the highest-impact "
+                    "thing a runner can do and has no place in base phase.",
+        "why": "A hill forces a short stride and a quick turnover without you "
+               "having to think about it, and the incline removes most of the "
+               "landing impact.",
     },
     "bike_spin_ups": {
         "name": "Spin-ups",

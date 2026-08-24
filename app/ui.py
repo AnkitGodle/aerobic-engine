@@ -42,6 +42,11 @@ SPORT_EMOJI = {"swim": "🏊", "bike": "🚲", "run": "🏃", "strength": "🦵"
 CSS = """
 <style>
   :root {
+    /* The page background, needed explicitly: a sticky bar has to paint over
+       what scrolls under it, and transparent inherits nothing useful. Streamlit
+       exposes no CSS variable for its own theme background, so these are its
+       documented light and dark defaults, matched below by media query. */
+    --ic-page: #ffffff;
     --ic-good: #3FB68B; --ic-caution: #E0A33E; --ic-bad: #DB5F5A;
     --ic-line: rgba(140,158,176,.28);
     --ic-surface: rgba(140,158,176,.09);
@@ -52,7 +57,8 @@ CSS = """
   /* No max-width. layout="wide" already spans the window; capping it here was
      throwing away most of a wide screen and forcing the header controls to wrap
      into a column that had plenty of room beside it. */
-  .block-container { padding-top: 2.4rem; padding-bottom: 3rem;
+  /* Room for the toolbar the sticky bar now sits below. */
+  .block-container { padding-top: 1rem; padding-bottom: 3rem;
                      max-width: none; padding-left: 2.2rem; padding-right: 2.2rem; }
 
   /* Every injected block owns its own vertical space. Streamlit's container gap
@@ -113,6 +119,36 @@ CSS = """
   /* No negative top margin here. The wordmark is the tallest text on the page,
      and pulling it up past the container's padding clipped its ascenders — the
      top of "Aerobic Engine" was sliced off. */
+  /* Header bar pinned to the top: title, page tabs and filters — the three
+     things you reach for from anywhere on a long page, and the only ones worth
+     permanent screen space.
+
+     Targeted by the container's `key`, which Streamlit renders as .st-key-*.
+     That is the only stable handle it offers; the emotion class names change
+     between releases. The background is opaque rather than blurred, because
+     charts sliding under a translucent bar read as a rendering fault. */
+  /* Pinned on the container's *wrapper*, not the container. A sticky element
+     can only travel inside its own parent's box, and the keyed container's
+     wrapper is only as tall as the header — so sticking the inner block held it
+     for 131px and then let it scroll away with its parent. The wrapper's parent
+     is the full-page block, which is what gives it the whole scroll to stick
+     through. */
+  .stMain [data-testid="stLayoutWrapper"]:has(> .st-key-topbar) {
+      /* Offset by Streamlit's own toolbar, which is absolutely positioned at
+         z-index 999990 over the top 60px of the page. At top:0 the app title
+         sat underneath it and was invisible once scrolled. */
+      position: sticky; top: 3.75rem; z-index: 90;
+      background: var(--ic-page);
+      padding: .35rem 0 .45rem;
+      border-bottom: 1px solid var(--ic-line);
+      margin-bottom: 1rem; }
+  /* The popover panel has to clear the bar it hangs from. */
+  .stMain .st-key-topbar [data-testid="stPopoverBody"] { z-index: 95; }
+
+  @media (prefers-color-scheme: dark) {
+    :root { --ic-page: #0e1117; }
+  }
+
   .ic-brand { display: flex; align-items: center; gap: .7rem;
               margin: 0 0 .35rem; padding-top: .1rem; }
   .ic-brand svg { flex: 0 0 auto; opacity: .95; }

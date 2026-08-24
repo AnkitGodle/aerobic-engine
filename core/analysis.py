@@ -674,6 +674,90 @@ def polarisation(zone_rows: Sequence[dict[str, Any]], **kw: Any) -> dict[str, fl
     }
 
 
+# Common coaching target for running cadence. Not a law — taller runners sit
+# lower, and cadence rises with pace — but below this the stride is usually long
+# enough that the foot lands well in front of the body, which brakes and loads
+# the knee and shin.
+CADENCE_TARGET_SPM = 170.0
+CADENCE_LOW_SPM = 160.0
+
+
+def cadence_stats(
+    activities: Sequence[dict[str, Any]], sport: str = "run",
+    since: date | None = None,
+) -> dict[str, Any]:
+    """Cadence and stride length, and what they say together.
+
+    Reported as a pair on purpose. Cadence alone is not a target you can chase:
+    it rises naturally with pace, so a faster session shows a higher number
+    without anything having improved. Stride length is what closes the loop —
+    the same pace at a higher cadence means a shorter stride, which means the
+    foot lands closer to underneath the body.
+    """
+    rows = []
+    for a in activities:
+        if (a.get("sport") or "") != sport:
+            continue
+        if since is not None:
+            day = _as_date(a.get("start_date")) if a.get("start_date") else None
+            if day is None or day < since:
+                continue
+        cad = a.get("avg_cadence")
+        if not cad:
+            continue
+        # Stride length is derived when Garmin has not sent it. The list endpoint
+        # omits the running-dynamics fields that the detail endpoint carries, and
+        # the arithmetic is exact rather than an estimate: distance per step is
+        # speed divided by steps per second. Checked against a session where
+        # Garmin did report it — 87.4 cm derived against 86.74 reported.
+        stride = a.get("stride_length_cm")
+        if not stride and a.get("avg_speed_mps") and float(cad) > 0:
+            stride = float(a["avg_speed_mps"]) / (float(cad) / 60.0) * 100.0
+        rows.append({
+            "date": _as_date(a["start_date"]),
+            "cadence": float(cad),
+            "stride_cm": round(float(stride), 1) if stride else None,
+            "ground_contact_ms": float(a["ground_contact_ms"])
+                                 if a.get("ground_contact_ms") else None,
+            "vertical_ratio": float(a["vertical_ratio"])
+                              if a.get("vertical_ratio") else None,
+            "speed_mps": float(a["avg_speed_mps"]) if a.get("avg_speed_mps") else None,
+            "minutes": round((a.get("duration_s") or 0) / 60.0, 1),
+        })
+    rows.sort(key=lambda r: r["date"])
+    if not rows:
+        return {"points": [], "avg": None, "verdict": "no_data", "message":
+                f"No {sport} sessions with cadence recorded yet."}
+
+    avg = sum(r["cadence"] for r in rows) / len(rows)
+    strides = [r["stride_cm"] for r in rows if r["stride_cm"]]
+    if avg < CADENCE_LOW_SPM:
+        verdict, message = "low", (
+            f"Averaging {avg:.0f} steps per minute. Under {CADENCE_LOW_SPM:.0f} "
+            f"usually means the stride is long and the foot is landing ahead of "
+            f"you, which brakes and loads the knee and shin. Adding 5% is the "
+            f"cheapest change available."
+        )
+    elif avg < CADENCE_TARGET_SPM:
+        verdict, message = "fair", (
+            f"Averaging {avg:.0f} steps per minute — workable, and a few percent "
+            f"quicker would shorten the stride slightly at the same pace."
+        )
+    else:
+        verdict, message = "good", (
+            f"Averaging {avg:.0f} steps per minute, which is in the range most "
+            f"coaching aims for. Nothing to change."
+        )
+    return {
+        "points": rows,
+        "avg": round(avg, 1),
+        "avg_stride_cm": round(sum(strides) / len(strides), 1) if strides else None,
+        "target": CADENCE_TARGET_SPM,
+        "verdict": verdict,
+        "message": message,
+    }
+
+
 def polarisation_from_streams(
     streams: dict[str, Sequence[dict[str, Any]]],
     activities: Sequence[dict[str, Any]],

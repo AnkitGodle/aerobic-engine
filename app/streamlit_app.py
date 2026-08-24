@@ -39,6 +39,7 @@ from core.analysis import (  # noqa: E402
     baseline_trend,
     hr_points,
     hr_trend,
+    cadence_stats,
     ef_data_status,
     ef_points,
     polarisation,
@@ -699,6 +700,51 @@ def page_progress(data: dict, today: date) -> None:
                     "good durability."):
         drift_block(acts)
 
+    g, h = st.columns(2, gap="medium")
+    with g, ui.card("Cadence and stride",
+                    "How the distance was covered, not how fast. A quicker "
+                    "turnover at the same pace means a shorter stride and a "
+                    "softer landing."):
+        cadence_block(acts, today)
+    with h, ui.card("Running dynamics", "What the watch measures about your form."):
+        form_block(acts)
+
+
+def form_block(acts: list[dict]) -> None:
+    """Ground contact, vertical oscillation and vertical ratio.
+
+    Garmin measures all three and this app ignored them until now. Vertical
+    ratio is the useful one: it is bounce as a share of stride, so it says how
+    much of each step went upwards instead of forwards.
+    """
+    runs = [a for a in acts if a.get("sport") == "run"
+            and (a.get("ground_contact_ms") or a.get("vertical_ratio"))]
+    if not runs:
+        st.caption(
+            "Ground contact and bounce are not in the activity list Garmin "
+            "returns — they arrive with the next full sync of each run.")
+        return
+
+    def mean(field: str) -> float | None:
+        vals = [float(a[field]) for a in runs if a.get(field)]
+        return sum(vals) / len(vals) if vals else None
+
+    gct, osc, ratio = (mean("ground_contact_ms"), mean("vertical_osc_cm"),
+                       mean("vertical_ratio"))
+    ui.rows([
+        ("Ground contact", f"{gct:.0f} ms" if gct else "—",
+         "under 250 ms is quick, 300+ is long"),
+        ("Vertical bounce", f"{osc:.1f} cm" if osc else "—",
+         "how far the body rises each step"),
+        ("Bounce as % of stride", f"{ratio:.1f}%" if ratio else "—",
+         "under 8% is efficient"),
+    ])
+    if ratio and ratio > 9:
+        st.caption(
+            f"At {ratio:.1f}% a noticeable share of each step goes upwards "
+            f"rather than forwards. A quicker cadence is the usual fix — it is "
+            f"the same change that shortens the stride.")
+
 
 def intensity_block(zones: list[dict], today: date,
                     notes: dict | None = None, data: dict | None = None) -> None:
@@ -799,6 +845,80 @@ def efficiency_block(acts: list[dict], today: date,
     short = [s for s in statuses if s["total"] and s["needed_for_verdict"]]
     if short:
         st.caption(" · ".join(f"{s['sport']}: {s['steady']}/3 steady" for s in short))
+
+
+def cadence_block(acts: list[dict], today: date) -> None:
+    """Cadence and stride together, because neither means much alone.
+
+    Cadence rises with pace on its own, so a faster session shows a higher
+    number without the stride having changed. Stride length is what closes the
+    loop: the same pace at a higher cadence is a shorter stride, which means the
+    foot lands closer to underneath the body instead of out in front of it.
+    """
+    stats = cadence_stats(acts)
+    pts = stats["points"]
+    if not pts:
+        st.caption(stats["message"])
+        return
+
+    tone = {"low": "bad", "fair": "caution", "good": "good"}.get(
+        stats["verdict"], "neutral")
+    ui.stats_row([
+        {"label": "Cadence", "value": f"{stats['avg']:.0f} spm",
+         "note": f"target {stats['target']:.0f}+", "tone": tone},
+        {"label": "Stride", "value": f"{stats['avg_stride_cm']:.0f} cm"
+         if stats.get("avg_stride_cm") else "—", "note": "distance per step"},
+        {"label": "Sessions", "value": len(pts), "note": "with cadence recorded"},
+    ])
+
+    fig = go.Figure()
+    fig.add_scatter(x=[p["date"] for p in pts], y=[p["cadence"] for p in pts],
+                    mode="lines+markers" if len(pts) >= 3 else "markers",
+                    name="cadence", line=dict(color=SPORT_COLOR["run"], width=2),
+                    marker=dict(size=9),
+                    customdata=[p["stride_cm"] for p in pts],
+                    hovertemplate="%{x|%a %d %b}<br>%{y:.0f} spm<br>"
+                                  "stride %{customdata:.0f} cm<extra>run</extra>")
+    fig.add_hline(y=stats["target"], line_dash="dot",
+                  line_color="rgba(140,158,176,.6)",
+                  annotation_text=f"{stats['target']:.0f} spm")
+    fig.update_layout(yaxis_title="steps per minute")
+    ui.chart(fig, 200, date_axis=True)
+    st.caption(stats["message"])
+
+    if stats["verdict"] != "good":
+        with st.expander("How to raise it"):
+            st.markdown(
+                "Cadence is a habit your nervous system holds, so it changes "
+                "with repetition rather than with effort. Two rules before "
+                "anything else:\n\n"
+                "1. **Add 5%, not 20%.** From "
+                f"{stats['avg']:.0f} spm that is about "
+                f"{stats['avg'] * 1.05:.0f} spm. A big jump just makes you "
+                "bounce, which is worse than a long stride.\n"
+                "2. **Hold the effort, let the pace drop.** Shorter steps at "
+                "first mean a slower pace. That is the change working, not a "
+                "loss of fitness — the pace comes back within a few weeks.\n\n"
+                "Then, in this order:"
+            )
+            for drill in strength.DRILLS.values():
+                if drill.get("focus") != "cadence" or "bike" in drill["name"].lower():
+                    continue
+                with st.container(border=True):
+                    st.markdown(f"**{drill['name']}** — {drill['dose']}")
+                    st.caption(drill["where"])
+                    st.markdown(f"**Set up:** {drill['setup']}")
+                    st.markdown("\n".join(f"{i}. {x}" for i, x
+                                           in enumerate(drill["steps"], 1)))
+                    st.markdown(f"**Common mistake:** {drill['mistakes']}")
+                    st.caption(f"Why it matters: {drill['why']}")
+            st.markdown(
+                "**Stride length looks after itself.** It is pace divided by "
+                "cadence, so at the same pace a quicker turnover shortens it "
+                "automatically. Chasing a longer stride directly means reaching "
+                "the foot out in front, which brakes and loads the knee — the "
+                "opposite of what you want."
+            )
 
 
 def drift_block(acts: list[dict]) -> None:
@@ -2037,18 +2157,25 @@ def header_controls(data: dict, today: date) -> tuple[str, date, list[str]]:
     # The filters are left-aligned under the nav rather than pushed right: a
     # right-aligned control with an empty half-page to its left reads as
     # floating, and this is a toolbar, which belongs under the thing it filters.
-    ui.brand("Aerobic Engine", data["subtitle"])
+    # A keyed container, because CSS needs something stable to pin. Streamlit
+    # renders `key` as a class on the wrapper, which is the only reliable handle
+    # it offers — the emotion class names change between releases, and the
+    # brand's own vertical block is the whole page, so sticking that would pin
+    # everything.
+    with st.container(key="topbar"):
+        ui.brand("Aerobic Engine", data["subtitle"])
 
-    # The filters live in a popover rather than laid out beside the tabs. Column
-    # ratios only ever "fit" a window you happened to test: a week selector plus
-    # four pills next to six tabs wraps as soon as the viewport, the font size or
-    # the number of sports changes. A single trigger button always fits, at any
-    # width, and its label carries the current state so nothing is hidden.
-    nav_col, filter_col = st.columns([5, 2], vertical_alignment="center")
-    with nav_col:
-        page = nav()
-    with filter_col:
-        today, sports = filter_popover(data, today)
+        # The filters live in a popover rather than laid out beside the tabs.
+        # Column ratios only ever "fit" a window you happened to test: a week
+        # selector plus four pills next to six tabs wraps as soon as the
+        # viewport, the font size or the number of sports changes. A single
+        # trigger button always fits, at any width, and its label carries the
+        # current state so nothing is hidden.
+        nav_col, filter_col = st.columns([5, 2], vertical_alignment="center")
+        with nav_col:
+            page = nav()
+        with filter_col:
+            today, sports = filter_popover(data, today)
     if set(sports) != set(FILTER_SPORTS):
         st.caption("Recovery, HRV and sleep still cover everything — they are "
                    "not attributable to one sport, and the written summary "

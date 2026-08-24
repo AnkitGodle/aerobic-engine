@@ -319,6 +319,17 @@ COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     # Speed, elevation and heart rate only mean anything together: a climb
     # explains a heart-rate spike that would otherwise read as lost fitness.
     ("hr_streams", "altitude_m", "REAL"),
+    # Running dynamics: the other half of pace, and the part that says how the
+    # distance was covered rather than just how fast.
+    ("activities", "avg_cadence", "REAL"),
+    ("activities", "max_cadence", "REAL"),
+    ("activities", "stride_length_cm", "REAL"),
+    ("activities", "ground_contact_ms", "REAL"),
+    ("activities", "vertical_osc_cm", "REAL"),
+    ("activities", "vertical_ratio", "REAL"),
+    ("activities", "steps", "REAL"),
+    ("hr_streams", "cadence", "REAL"),
+    ("hr_streams", "stride_length_cm", "REAL"),
 ]
 
 
@@ -636,11 +647,14 @@ class Store:
                 # repeated t_s in one downsampled stream would raise a unique
                 # violation on Postgres but pass silently on SQLite.
                 "INSERT INTO hr_streams"
-                "(activity_id, t_s, hr, speed_mps, power_w, altitude_m)"
-                " VALUES (?,?,?,?,?,?) "
+                "(activity_id, t_s, hr, speed_mps, power_w, altitude_m,"
+                " cadence, stride_length_cm)"
+                " VALUES (?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(activity_id, t_s) DO UPDATE SET"
                 " hr=excluded.hr, speed_mps=excluded.speed_mps,"
-                " power_w=excluded.power_w, altitude_m=excluded.altitude_m",
+                " power_w=excluded.power_w, altitude_m=excluded.altitude_m,"
+                " cadence=excluded.cadence,"
+                " stride_length_cm=excluded.stride_length_cm",
                 [
                     (
                         activity_id,
@@ -649,6 +663,8 @@ class Store:
                         s.get("speed_mps"),
                         s.get("power_w"),
                         s.get("altitude_m"),
+                        s.get("cadence"),
+                        s.get("stride_length_cm"),
                     )
                     for s in samples
                     if s.get("t_s") is not None
@@ -658,7 +674,8 @@ class Store:
 
     def stream(self, activity_id: str) -> list[dict[str, Any]]:
         return self.query(
-            "SELECT t_s, hr, speed_mps, power_w, altitude_m FROM hr_streams "
+            "SELECT t_s, hr, speed_mps, power_w, altitude_m, cadence,"
+            " stride_length_cm FROM hr_streams "
             "WHERE activity_id = ? ORDER BY t_s",
             (activity_id,),
         )
@@ -680,7 +697,12 @@ class Store:
             # elevation is not re-fetched on every sync forever.
             f"  OR (COALESCE(elevation_gain_m, 0) > 5 AND activity_id NOT IN"
             f"      (SELECT DISTINCT activity_id FROM hr_streams"
-            f"       WHERE altitude_m IS NOT NULL))) "
+            f"       WHERE altitude_m IS NOT NULL))"
+            # Same reasoning for cadence: only expect a trace where the activity
+            # itself reports one, so a pool swim is not re-fetched forever.
+            f"  OR (COALESCE(avg_cadence, 0) > 0 AND activity_id NOT IN"
+            f"      (SELECT DISTINCT activity_id FROM hr_streams"
+            f"       WHERE cadence IS NOT NULL))) "
             f"ORDER BY start_date DESC",
             list(sports),
         )
