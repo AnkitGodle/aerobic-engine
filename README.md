@@ -3,6 +3,11 @@
 **Endurance training analytics and an adaptive weekly planner, built on your own
 Garmin data — and it runs for nothing.**
 
+**Live: [aerobic-engine.streamlit.app](https://aerobic-engine.streamlit.app)**
+
+One athlete's real data, read-only. The dashboard is open; changing anything —
+syncing, logging, sending a workout to the watch — needs a PIN.
+
 Every part of the stack is a free tier, and not the crippled kind:
 
 | Piece | What it costs |
