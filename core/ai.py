@@ -36,6 +36,10 @@ MAX_TOKENS = int(os.getenv("AI_MAX_TOKENS", "6000"))
 # since gone busy.
 _WORKING_MODEL: dict[str, str] = {}
 
+# The chain used when AI_BACKEND says nothing. Lives here because this module is
+# the only one that is supposed to know a provider by name.
+DEFAULT_CHAIN = "gemini,groq"
+
 RETRY_ATTEMPTS = int(os.getenv("AI_RETRY_ATTEMPTS", "3"))
 RETRY_BACKOFF_S = float(os.getenv("AI_RETRY_BACKOFF", "1.5"))
 
@@ -532,7 +536,7 @@ def _one_backend(name: str) -> LLMBackend:
 def get_backend(name: str | None = None) -> LLMBackend:
     """Resolve AI_BACKEND, which may name one provider or a comma-separated
     chain to try in order (for example `gemini,groq`)."""
-    raw = name or os.getenv("AI_BACKEND", "anthropic")
+    raw = name or os.getenv("AI_BACKEND") or DEFAULT_CHAIN
     names = [n.strip().lower() for n in str(raw).split(",") if n.strip()]
     if not names:
         return NullBackend()

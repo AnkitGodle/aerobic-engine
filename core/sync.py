@@ -181,7 +181,7 @@ def _note_backends() -> list[Any]:
 
     names = [n.strip().lower() for n in
              (os.getenv("AI_NOTES_BACKEND") or os.getenv("AI_BACKEND")
-              or "gemini").split(",") if n.strip()]
+              or ai.DEFAULT_CHAIN).split(",") if n.strip()]
     out = []
     for name in names:
         try:

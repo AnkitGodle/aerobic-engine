@@ -49,19 +49,24 @@ aerobic-engine/
   app/streamlit_app.py       # UI only — thin
   core/
     garmin_client.py         # login (cached session), incremental fetch
-    store.py                 # SQLite read/write, schema, migrations
+    store.py                 # Postgres/SQLite read/write, schema, migrations
     analysis.py              # EF, decoupling, RHR/HRV/VO2max trends, weekly load
     planner.py               # facts + rules envelope + enforcement + calls ai
     ai.py                    # plan_week(payload) -> plan ; JSON contract
+    insights.py              # deterministic page/chart readings, then prose
+    sync.py                  # the sync itself, shared by CLI and dashboard
+    auth.py                  # read and write PIN gates, hashed, rate-limited
+    garmin_guard.py          # request pacing, budgets, breaker, sync lock
+    garmin_workout.py        # push a planned session to the watch
     strength.py              # fixed exercise library + deterministic progression
     schemas.py               # pydantic models for payloads
   scripts/fetch.py           # the incremental sync (local / scheduled)
   scripts/migrate_to_postgres.py  # copy a local SQLite file into Postgres
-  scripts/set_pin.py         # generate the write-PIN salt + hash
+  scripts/set_pin.py         # generate a read or write PIN salt + hash
   scripts/export_tokens.py   # export the Garmin session for a hosted deploy
   tests/                     # guardrail + analysis regression suite
   data/aerobic_engine.db         # gitignored
-  .env                       # gitignored — Garmin + Anthropic creds
+  .env                       # gitignored — Garmin, database and AI keys
 ```
 
 ## 5. Data layer (`garmin_client.py`, `store.py`)

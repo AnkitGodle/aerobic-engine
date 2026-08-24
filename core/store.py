@@ -242,9 +242,11 @@ SCHEMA: list[str] = [
     )
     """,
     # A mirror of core/strength.py, refreshed on every sync, so the library is
-    # queryable and visible in the data. Deliberately a mirror and not the
-    # source: the allowlist the AI is validated against stays in code, because a
-    # table the app can write is a table that could grow an exercise nobody
+    # queryable alongside what was logged against it. Write-only from the app's
+    # point of view: every screen reads the library from code, and this exists
+    # for querying the database directly. Deliberately a mirror and not the
+    # source — the allowlist the AI is validated against stays in code, because
+    # a table the app can write is a table that could grow an exercise nobody
     # vetted.
     """
     CREATE TABLE IF NOT EXISTS exercise_library (
@@ -1017,9 +1019,6 @@ class Store:
 
     def sync_exercise_library(self, rows: Iterable[dict[str, Any]]) -> int:
         return self._upsert("exercise_library", rows, "exercise_id")
-
-    def exercise_library(self) -> list[dict[str, Any]]:
-        return self.query("SELECT * FROM exercise_library ORDER BY focus, name")
 
     def set_personal_records(self, rows: Iterable[dict[str, Any]]) -> int:
         return self._upsert("personal_records", rows, "type_id")
