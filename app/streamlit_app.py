@@ -1501,130 +1501,132 @@ def page_lifetime(data: dict, today: date) -> None:
 
 
 def page_about(data: dict, today: date) -> None:
-    """What the app does, what it deliberately refuses to do, and where the
-    numbers come from.
-
-    Worth a page because most of the interesting decisions here are invisible
-    from the charts: which constraints the AI cannot cross, why a number is
-    missing rather than estimated, and what the data is not good enough to say.
-    """
+    """Plain-English overview: what it does, what Garmin already does, and why
+    the extra layer exists at all."""
     ui.brand("About Aerobic Engine",
              "Endurance training analytics with a rules-first planner.")
 
-    ui.section("What it is for")
+    ui.section("What it does")
     st.markdown(
-        "One question, asked well: **is fitness rising while heart rate "
-        "falls?** Everything else exists to answer it honestly, or to turn the "
-        "answer into next week's training.\n\n"
-        "Garmin is treated as a sensor, not a coach. A Forerunner 265 has no "
-        "triathlon coaching, so the cross-sport decisions — how the week divides "
-        "between swim, bike, run and legs — are made here."
+        "It asks one question: **is your fitness going up while your heart "
+        "rate comes down?**\n\n"
+        "Your watch collects the data. This reads it, works out the answer, "
+        "and turns it into next week's training across swim, bike, run and leg "
+        "strength."
     )
 
-    ui.section("How to use it", "A weekly rhythm, and one daily glance.")
+    ui.section("How you use it", "One look a day. One review a week.")
     ui.rows([
-        ("Every morning", "Today",
-         "what to train, with the exact heart-rate range"),
-        ("After a session", "nothing to do",
-         "the watch uploads; Refresh pulls it in"),
-        ("Feeling off", "Plan → check-in",
-         "sleep, soreness, motivation, time — the week re-plans"),
-        ("Once a week", "Progress",
-         "is heart rate falling at the same pace?"),
-        ("When it stalls", "Lifetime", "the long view, which weeks hide"),
-        ("Changing focus", "the header toggle",
-         "switch a sport off and the plan drops it"),
+        ("Each morning", "Today", "what to train, and the heart rate to hold"),
+        ("After training", "nothing", "the watch uploads, Refresh pulls it in"),
+        ("Feeling rough", "Plan", "answer four sliders and the week rebuilds"),
+        ("Once a week", "Progress", "is the same pace costing fewer beats?"),
+        ("Now and then", "Lifetime", "how far you have come in total"),
+        ("Changing focus", "the filter button", "turn a sport off and it goes"),
     ])
     st.markdown(
-        "**The one habit that makes it work:** log your leg sessions on the "
-        "watch in strength mode. They come back automatically, count towards "
-        "training load, and keep readiness honest — and the progression only "
-        "advances from a session it can see.\n\n"
-        "**The one number to watch:** heart rate at your usual pace, on "
-        "Progress. Everything else is context for it."
+        "**One habit matters:** record leg sessions on the watch in strength "
+        "mode. They come back on their own, count towards your training load, "
+        "and the weights only go up from a session the app can see."
     )
 
-    ui.section("How a week gets planned", "Three layers, in this order.")
+    ui.section("What Garmin already gives you",
+               "Most of the raw numbers. This app does not recompute them.")
     ui.rows([
-        ("1. Facts", "deterministic",
-         "completed sessions, volume, efficiency trend, recovery signals"),
-        ("2. Rules envelope", "always wins",
-         "session counts, volume cap, deload triggers, spacing, rest days"),
-        ("3. AI", "adjusts inside the envelope",
-         "volume, intensity and placement, plus the reasons"),
+        ("Training Readiness, HRV status", "Garmin", "used as-is"),
+        ("VO2max and race predictions", "Garmin", "used as-is"),
+        ("Heart-rate zones", "Garmin", "so they match your watch"),
+        ("Time in each zone per session", "Garmin", "used as-is"),
+        ("Steps, stress, sleep, breathing", "Garmin", "used as-is"),
+        ("Personal records", "Garmin", "used as-is"),
+        ("Suggested workouts", "Garmin", "one sport at a time"),
+    ])
+
+    ui.section("What this adds",
+               "Your watch has no triathlon coach, so nothing on it plans "
+               "across four sports at once. That gap is the reason this exists.")
+    ui.rows([
+        ("A whole week across four sports", "new",
+         "swim, bike, run and legs balanced together"),
+        ("Efficiency trend", "new",
+         "speed per heartbeat — Garmin has no equivalent"),
+        ("Only steady sessions counted", "new",
+         "races and intervals would hide the trend"),
+        ("Heart-rate drift in long sessions", "new",
+         "how well the pace holds late on"),
+        ("Your own easy ceiling", "new",
+         "Garmin's easy zone is fixed; yours is not"),
+        ("Leg strength programme", "new",
+         "22 exercises, with the weights worked out for you"),
+        ("Strength placed safely", "new",
+         "never the day before a long run"),
+        ("Weather taken into account", "new",
+         "a humid day is marked, not mistaken for lost fitness"),
+        ("Trends that answer sooner", "new",
+         "a slope through your data, not a fixed 28-day wait"),
+        ("Written in plain English", "new", "on every page and chart"),
+    ])
+
+    ui.section("How the plan is decided", "Three steps, in this order.")
+    ui.rows([
+        ("1. Facts", "your data",
+         "what you did, how you recovered, which way the trend points"),
+        ("2. Rules", "always win",
+         "session limits, weekly ceiling, rest days, easy-week triggers"),
+        ("3. AI", "fills in the detail",
+         "adjusts length, effort and which day, and explains itself"),
     ])
     st.markdown(
-        "The order matters more than the AI does. A language model asked how "
-        "your week should go is agreeable: say *I feel great* and it hands you a "
-        "reckless week, say *I'm tired* and it cancels everything. So every "
-        "constraint is re-checked **in code** after the model answers — and if "
-        "the numbers no longer support what it wrote, the explanation is "
-        "rewritten too. The plan says `ai_repaired` when that happened."
+        "The order is the point. Ask a chatbot how your week should go and it "
+        "agrees with you: say you feel great and it hands you a reckless week, "
+        "say you are tired and it cancels everything.\n\n"
+        "So every limit is checked again **in code** after the AI answers. If "
+        "the numbers no longer match what it wrote, the reason gets rewritten "
+        "too. The plan says `ai_repaired` when that happened."
     )
 
-    ui.section("What the AI is not allowed to do")
+    ui.section("What the AI is never allowed to do")
     ui.rows([
-        ("Invent an exercise", "blocked",
-         "it may only pick ids from a fixed library"),
-        ("Overrule a deload", "blocked", "recovery signals decide, not mood"),
-        ("Exceed the progression cap", "blocked", "+10% volume per week"),
-        ("Set a heart-rate target", "blocked",
-         "targets come from your own zones"),
-        ("Decide strength load", "blocked",
-         "progression is arithmetic: one rep, then one step"),
-    ])
-
-    ui.section("Where the numbers come from")
-    ui.rows([
-        ("Efficiency factor", "speed ÷ heart rate",
-         "power ÷ HR on the bike where power exists"),
-        ("Steady sessions only", "filtered",
-         "intervals and races would swamp the trend"),
-        ("Aerobic decoupling", "first half vs second",
-         "under 5% is good durability"),
-        ("Resting HR and HRV", "regression slope",
-         "not a 28-day block comparison, which took too long to answer"),
-        ("Zones", "from Garmin", "so they match what the watch shows"),
-        ("Weather", "per session",
-         "heat and humidity raise HR at the same pace"),
+        ("Make up an exercise", "blocked", "it can only pick from the 22"),
+        ("Cancel an easy week", "blocked", "your recovery data decides, not mood"),
+        ("Add more than 10% volume", "blocked", "that is how injuries start"),
+        ("Choose a heart-rate target", "blocked", "those come from your zones"),
+        ("Decide how much weight", "blocked", "one rep, then one step, in order"),
     ])
 
     ui.section("What it will not pretend to know")
     st.markdown(
-        "- **Your true aerobic ceiling.** Garmin's Z2 top is one convention "
-        "among several; the page shows the alternatives and the real test is "
-        "whether you can still talk in full sentences.\n"
-        "- **Efficiency, before three steady sessions per sport.** It says how "
-        "many more are needed rather than drawing a line through two points.\n"
-        "- **Acute:chronic load, before about three weeks of history.** With one "
-        "week of data the ratio is arithmetic nonsense and would force a "
-        "permanent deload.\n"
-        "- **Anything medical.** Persistent tendon pain is a physio visit, not a "
-        "programming problem."
+        "- **Your real easy limit.** The honest test is whether you can still "
+        "talk in full sentences. No watch can tell you that.\n"
+        "- **Your efficiency, before three steady sessions per sport.** It says "
+        "how many more you need instead of drawing a line through two points.\n"
+        "- **Whether your load is too high, before about three weeks.** With one "
+        "week of data that number is meaningless.\n"
+        "- **Anything medical.** Tendon pain that keeps coming back is a physio "
+        "visit, not a training problem."
     )
 
-    ui.section("Privacy and safety")
+    ui.section("Your data")
     ui.rows([
-        ("Your data", "one database", "not shared with anyone"),
-        ("Garmin login", "never from the web host",
-         "a cached session is exported by hand"),
-        ("Request pacing", "rate-guarded",
-         "budgets, and an hour's cooldown after a single 429"),
-        ("Write actions", "PIN required",
-         "stored as a salted hash, never in plain text"),
-        ("Reading", "open if shared", "set DASHBOARD_PASSWORD to close it"),
+        ("Where it lives", "one database", "not shared with anyone"),
+        ("Garmin sign-in", "never from the web",
+         "a saved session is copied up by hand"),
+        ("How often it asks Garmin", "slowly, on purpose",
+         "with a daily cap and an hour's pause after any refusal"),
+        ("Making changes", "needs your PIN", "stored scrambled, never in plain text"),
+        ("Just reading", "open if you share the link", "close it with a password"),
     ])
+
     ui.section("Source")
     st.markdown(
         "The code is public at "
         "[github.com/AnkitGodle/aerobic-engine]"
         "(https://github.com/AnkitGodle/aerobic-engine) — including the rules "
-        "the planner enforces and the tests that prove it does. The data is not: "
-        "no health data is in the repository."
+        "and the tests that prove they hold. Your training data is not in it."
     )
     st.caption(
-        "Built with the unofficial Garmin Connect API for personal use. Not "
-        "affiliated with or endorsed by Garmin. Not medical advice."
+        "Built on the unofficial Garmin Connect API for personal use. Not "
+        "connected to Garmin. Not medical advice."
     )
 
 
