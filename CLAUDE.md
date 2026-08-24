@@ -197,7 +197,8 @@ heavy/low-rep; tendons want slow, heavy or isometric loading and adapt slowly.
   Verified against the live server, not just the translation layer.
 - **Access from anywhere:** deploy the **dashboard** to Streamlit Community Cloud
   as a **private app** (health data must not sit on a public URL), or set
-  `DASHBOARD_PASSWORD` for the built-in gate.
+  a read PIN (`scripts/set_pin.py --read`) for the built-in gate. Read and
+  write PINs are separate and separately rate-limited.
 - **Keep fetch local/scheduled** — don't run Garmin login from a cloud host.
 - **Why not SQLite when hosted:** a free host's disk is ephemeral. If the file
   vanished, the next sync would re-pull months of history — hundreds of requests

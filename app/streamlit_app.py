@@ -10,7 +10,6 @@ reads the database, draws, and collects input. Presentation primitives are in
 
 from __future__ import annotations
 
-import hmac
 import logging
 import os
 import sys
@@ -289,18 +288,45 @@ def writes_allowed() -> bool:
     return True
 
 
+def read_pin_gate() -> PinGate:
+    """The gate on reading the dashboard at all.
+
+    A separate PIN from the write one, and separately rate-limited: they are
+    guessed at independently, and one counter would mean strangers failing at
+    the front door locking the owner out of their own controls.
+
+    This replaced a plaintext DASHBOARD_PASSWORD compared with
+    compare_digest. Same PBKDF2 hashing as the write PIN, so the secret stored
+    on the host is not the secret you type, and wrong guesses now cost time
+    instead of nothing.
+    """
+    return PinGate(_StateStore(),
+                   pin_hash=_secret("READ_PIN_HASH"),
+                   salt=_secret("READ_PIN_SALT"),
+                   plaintext=_secret("READ_PIN"),
+                   attempts_key="read_pin_attempts")
+
+
 def read_gate() -> bool:
-    expected = _secret("DASHBOARD_PASSWORD")
-    if not expected or st.session_state.get("authed"):
+    gate = read_pin_gate()
+    if not gate.configured or st.session_state.get("authed"):
         return True
-    ui.page_title("Aerobic Engine")
-    with st.form("gate"):
-        pw = st.text_input("Password", type="password")
+
+    ui.brand("Aerobic Engine", "Enter your PIN to continue.")
+    wait = gate.lockout_remaining()
+    if wait > 0:
+        st.error(f"Too many wrong PINs. Try again in {wait:.0f}s.")
+        return False
+    with st.form("read_gate", clear_on_submit=True):
+        pin = st.text_input("PIN", type="password", label_visibility="collapsed",
+                            placeholder="PIN")
         if st.form_submit_button("Enter", type="primary"):
-            if hmac.compare_digest(pw.encode("utf-8"), expected.encode("utf-8")):
+            ok, message = gate.verify(pin)
+            del pin
+            if ok:
                 st.session_state["authed"] = True
                 st.rerun()
-            st.error("Incorrect.")
+            st.error(message)
     return False
 
 
@@ -1865,7 +1891,7 @@ def page_about(data: dict, today: date) -> None:
         ("Where it lives", "one database", "shared with nobody"),
         ("Garmin sign-in", "never from the web", "a saved session, copied by hand"),
         ("Changing anything", "needs your PIN", "stored scrambled, never as text"),
-        ("Reading", "open if you share the link", "closeable with a password"),
+        ("Reading", "open if you share the link", "closeable with a second PIN"),
     ])
     st.markdown(
         "Code: [github.com/AnkitGodle/aerobic-engine]"

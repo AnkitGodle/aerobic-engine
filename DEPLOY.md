@@ -101,7 +101,8 @@ Check before pushing that `.env`, `data/*.db`, `.garmin_tokens/` and
 
 Keep the app **private** in Streamlit's sharing settings if you would rather the
 page not be public at all. If you do share it publicly, also set
-`DASHBOARD_PASSWORD` — the PIN protects *writes*, not *reads*, and this is health
+a read PIN with `python scripts/set_pin.py --read` — the write PIN protects
+*changes*, not *reading*, and this is health
 data.
 
 ### What the hosted app deliberately cannot do

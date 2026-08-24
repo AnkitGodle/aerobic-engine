@@ -80,6 +80,7 @@ class PinGate:
         pin_hash: str | None = None,
         salt: str | None = None,
         plaintext: str | None = None,
+        attempts_key: str = ATTEMPTS_KEY,
     ) -> None:
         self.store = store
         self.pin_hash = (pin_hash if pin_hash is not None
@@ -88,6 +89,10 @@ class PinGate:
                      else os.getenv("REFRESH_PIN_SALT", "")).strip()
         self.plaintext = (plaintext if plaintext is not None
                           else os.getenv("REFRESH_PIN", "")).strip()
+        # Separate counters per gate. The read PIN and the write PIN are guessed
+        # at independently, and sharing one counter would mean failed guesses at
+        # the door locking the owner out of their own controls.
+        self.attempts_key = attempts_key
 
     # -- configuration --------------------------------------------------
     @property
@@ -115,7 +120,7 @@ class PinGate:
     def _attempts(self) -> dict[str, Any]:
         if self.store is None:
             return {"failures": 0, "locked_until": None}
-        raw = self.store.get_state(ATTEMPTS_KEY)
+        raw = self.store.get_state(self.attempts_key)
         if not raw:
             return {"failures": 0, "locked_until": None}
         try:
@@ -126,7 +131,7 @@ class PinGate:
 
     def _save_attempts(self, data: dict[str, Any]) -> None:
         if self.store is not None:
-            self.store.set_state(ATTEMPTS_KEY, json.dumps(data, default=str))
+            self.store.set_state(self.attempts_key, json.dumps(data, default=str))
 
     def lockout_remaining(self) -> float:
         until = self._attempts().get("locked_until")

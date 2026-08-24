@@ -1,11 +1,18 @@
 #!/usr/bin/env python
-"""Generate a salted PIN hash for the dashboard's write actions.
+"""Generate a salted PIN hash for the dashboard.
 
-Writes REFRESH_PIN_SALT and REFRESH_PIN_HASH into .env (and prints them for
-copying into a hosting provider's secrets). The PIN itself is never stored.
+Two independent PINs, because they guard different things and are guessed at
+separately:
 
-    python scripts/set_pin.py            # prompts, does not echo
-    python scripts/set_pin.py --pin 1234 # non-interactive (shell history!)
+  * the write PIN gates syncing, logging and sending workouts to the watch
+  * the read PIN, with --read, gates opening the dashboard at all
+
+Neither PIN is stored — only a salt and a PBKDF2 hash, in .env and printed for
+a hosting provider's secrets.
+
+    python scripts/set_pin.py             # write PIN, prompts, does not echo
+    python scripts/set_pin.py --read      # read PIN
+    python scripts/set_pin.py --pin 1234  # non-interactive (shell history!)
 """
 
 from __future__ import annotations
@@ -34,16 +41,21 @@ def upsert_env(path: Path, values: dict[str, str]) -> None:
             out.append(line)
     if remaining:
         out.append("")
-        out.append("# Dashboard write-action PIN (salted hash — the PIN is not stored)")
+        out.append("# Dashboard PIN (salted hash — the PIN itself is not stored)")
         out.extend(f"{k}={v}" for k, v in remaining.items())
     path.write_text("\n".join(out) + "\n")
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Set the dashboard write PIN")
+    ap = argparse.ArgumentParser(description="Set a dashboard PIN")
     ap.add_argument("--pin", help="avoid this: it lands in your shell history")
+    ap.add_argument("--read", action="store_true",
+                    help="set the read PIN (opening the dashboard) instead of "
+                         "the write PIN (making changes)")
     ap.add_argument("--env", default=str(ENV))
     args = ap.parse_args()
+    prefix = "READ" if args.read else "REFRESH"
+    which = "read" if args.read else "write"
 
     pin = args.pin or getpass.getpass("New PIN: ")
     if not args.pin:
@@ -59,14 +71,17 @@ def main() -> int:
     salt = new_salt()
     digest = hash_pin(pin, salt)
     upsert_env(Path(args.env), {
-        "REFRESH_PIN_SALT": salt,
-        "REFRESH_PIN_HASH": digest,
-        "REFRESH_PIN": "",   # clear any plaintext PIN left behind
+        f"{prefix}_PIN_SALT": salt,
+        f"{prefix}_PIN_HASH": digest,
+        f"{prefix}_PIN": "",   # clear any plaintext PIN left behind
     })
-    print(f"Written to {args.env}\n")
+    print(f"{which.title()} PIN written to {args.env}\n")
     print("For a hosted deployment, put these in the host's secrets:")
-    print(f'REFRESH_PIN_SALT = "{salt}"')
-    print(f'REFRESH_PIN_HASH = "{digest}"')
+    print(f'{prefix}_PIN_SALT = "{salt}"')
+    print(f'{prefix}_PIN_HASH = "{digest}"')
+    if args.read:
+        print("\nWith a read PIN set, the dashboard asks for it before showing "
+              "anything. Remove both lines to make it public again.")
     print("\nThe PIN itself is not stored anywhere. Losing it means re-running this.")
     return 0
 

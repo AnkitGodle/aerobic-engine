@@ -131,3 +131,39 @@ def test_non_ascii_plaintext_pin_also_works():
     g = PinGate(FakeStore(), pin_hash="", salt="", plaintext="日本語")
     assert g.verify("日本語")[0] is True
     assert g.verify("nope")[0] is False
+
+
+# --------------------------------------------------------------------------
+# The read gate. A separate PIN from the write one, and separately counted.
+# --------------------------------------------------------------------------
+
+
+def test_read_and_write_lockouts_are_independent():
+    """Sharing one counter would let strangers failing at the front door lock
+    the owner out of their own controls."""
+    store = FakeStore()
+    salt = new_salt()
+    read = PinGate(store, pin_hash=hash_pin("1111", salt), salt=salt,
+                   attempts_key="read_pin_attempts")
+    write = PinGate(store, pin_hash=hash_pin("2222", salt), salt=salt)
+
+    for _ in range(6):
+        read.verify("0000")
+    assert read.lockout_remaining() > 0
+    assert write.lockout_remaining() == 0
+    assert write.verify("2222")[0]
+
+
+def test_the_read_pin_is_not_the_write_pin():
+    salt = new_salt()
+    read = PinGate(FakeStore(), pin_hash=hash_pin("1111", salt), salt=salt,
+                   attempts_key="read_pin_attempts")
+    assert read.verify("1111")[0]
+    assert not PinGate(FakeStore(), pin_hash=hash_pin("1111", salt), salt=salt,
+                       attempts_key="read_pin_attempts").verify("2222")[0]
+
+
+def test_no_read_pin_configured_means_the_dashboard_is_open():
+    """Absence has to mean public, or an upgrade would lock the owner out."""
+    gate = PinGate(FakeStore(), pin_hash="", salt="", plaintext="")
+    assert not gate.configured
