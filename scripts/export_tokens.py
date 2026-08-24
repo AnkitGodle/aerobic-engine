@@ -18,6 +18,8 @@ you change your password. Never commit it.
 from __future__ import annotations
 
 import argparse
+import getpass
+import os
 import sys
 from pathlib import Path
 
@@ -38,7 +40,18 @@ def main() -> int:
     ap.add_argument("--out", help="write the blob to this file instead of stdout")
     args = ap.parse_args()
 
-    client = GarminClient(prompt_mfa=prompt_mfa)
+    # Asked for rather than read from a file. A cached session covers every
+    # normal run, so this password is needed a few times a year at most, and a
+    # credential kept on disk for that is a credential kept for no reason. It
+    # stays in this process's memory and is never written anywhere.
+    password = os.getenv("GARMIN_PASSWORD")
+    if not password:
+        email = os.getenv("GARMIN_EMAIL") or "(GARMIN_EMAIL unset)"
+        print(f"Garmin password for {email} — not stored anywhere:",
+              file=sys.stderr)
+        password = getpass.getpass("Password: ")
+
+    client = GarminClient(password=password, prompt_mfa=prompt_mfa)
     api = client.connect()
     print(f"Logged in as {client.display_name or '(unknown)'}", file=sys.stderr)
 

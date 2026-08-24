@@ -461,7 +461,10 @@ def send_to_watch(prescriptions: list, day: date, label: str) -> None:
 
     try:
         with st.spinner("Sending…"):
-            client = GarminClient()
+            # Never allow an SSO login from here. The dashboard may be hosted,
+            # and a password login from a datacenter IP is the single riskiest
+            # call this app can make. A stale token must fail loudly instead.
+            client = GarminClient(allow_password_login=False)
             created = garmin_workout.push(
                 client.connect(), prescriptions, label, on_date=day.isoformat())
         with_store(lambda st_: st_.set_state(key, str(created.get("workoutId", ""))))
@@ -521,7 +524,8 @@ def send_session_to_watch(day_plan: dict, day: date) -> None:
     try:
         with st.spinner("Sending…"):
             created = garmin_workout.push_endurance(
-                GarminClient().connect(), sport, minutes, target, label,
+                GarminClient(allow_password_login=False).connect(),
+                sport, minutes, target, label,
                 purpose=day_plan.get("purpose") or "", on_date=day.isoformat())
         with_store(lambda st_: st_.set_state(key, str(created.get("workoutId", ""))))
         st.success(

@@ -207,6 +207,11 @@ class GarminClient:
         allow_password_login: bool = True,
     ) -> None:
         self.email = email or os.getenv("GARMIN_EMAIL")
+        # Read from the environment but not expected to be there. A cached
+        # session covers every normal run, so the password is only needed to mint
+        # tokens in the first place — and a credential that lives on disk to be
+        # used a few times a year is a credential stored for no reason. Passed in
+        # by scripts/export_tokens.py, which asks for it and keeps it in memory.
         self.password = password or os.getenv("GARMIN_PASSWORD")
         # A token blob (from scripts/export_tokens.py) can be supplied directly
         # instead of a path — that is how a hosted deployment authenticates
@@ -247,7 +252,9 @@ class GarminClient:
             log.warning("Cached session unusable (%s); logging in fresh", exc)
             if not self.email or not self.password:
                 raise GarminConnectAuthenticationError(
-                    "No usable cached session and GARMIN_EMAIL/GARMIN_PASSWORD are unset"
+                    "No usable cached session, and no credentials were supplied "
+                    "to mint a new one. Run scripts/export_tokens.py, which will "
+                    "ask for your password and keep it in memory only."
                 ) from exc
             try:
                 api = Garmin(self.email, self.password, prompt_mfa=self.prompt_mfa)
