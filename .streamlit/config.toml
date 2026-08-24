@@ -1,0 +1,18 @@
+# Committed on purpose: this is configuration, not secrets. Only
+# .streamlit/secrets.toml is gitignored.
+
+[client]
+# Full tracebacks instead of "the original error message is redacted". The
+# redacted form names the line that failed and nothing about why, which on a
+# hosted app means the only way to diagnose an import error is the provider's
+# log viewer. This is a single-user dashboard with no user input reaching an
+# exception path, so the trade is worth it.
+showErrorDetails = "full"
+
+[server]
+# Nothing here writes to the filesystem, so there is nothing to protect against
+# a restart; this just avoids the noisy warning about a missing watchdog.
+fileWatcherType = "auto"
+
+[browser]
+gatherUsageStats = false
