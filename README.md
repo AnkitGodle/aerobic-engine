@@ -47,6 +47,99 @@ available, free text) and weekly targets per sport.
 - **A plan for the rest of the week** that responds to recovery data, and a
   plain-English summary of every page so you needn't read the charts
 
+## How it works
+
+The loop the athlete lives in. Every arrow is something that already happens —
+nothing here is planned work.
+
+```mermaid
+flowchart LR
+    W["⌚ Garmin watch<br/>run · bike · swim · legs"]
+    G["Garmin Connect"]
+    S["Sync<br/>paced, budgeted, local only"]
+    DB[("Postgres<br/>activities · streams<br/>wellness · weather")]
+    A["Analysis<br/>efficiency · drift<br/>cadence · trends"]
+    P["Planner<br/>facts → rules → AI"]
+    U["Dashboard"]
+    WK["Workout pushed back<br/>named sets · bpm range"]
+
+    W -->|"uploads"| G
+    G -->|"incremental fetch"| S
+    S --> DB
+    DB --> A --> P --> U
+    U -->|"one tap"| WK
+    WK -->|"scheduled for the day"| W
+    W -.->|"what you actually did"| G
+```
+
+The last two arrows are the part that makes it a loop rather than a report: the
+plan goes back to the watch as a real workout, and what you do against it comes
+back in on the next sync.
+
+## Architecture
+
+Layers, and what each one is not allowed to do. The rules layer is the reason
+this is not a chat wrapper.
+
+```mermaid
+flowchart TD
+    subgraph UI["app/ — thin, no logic"]
+        SA["streamlit_app.py"]
+        UIM["ui.py<br/>design system"]
+    end
+
+    subgraph CORE["core/ — pure Python, no Streamlit"]
+        GC["garmin_client.py<br/>fetch + parse"]
+        GG["garmin_guard.py<br/>pacing · budgets · breaker"]
+        GW["garmin_workout.py<br/>push to watch"]
+        ST["store.py<br/>Postgres / SQLite"]
+        AN["analysis.py<br/>deterministic maths"]
+        PL["planner.py<br/>facts + rules + enforce"]
+        STR["strength.py<br/>closed exercise library"]
+        AI["ai.py<br/>the only module<br/>that knows an LLM"]
+        AU["auth.py<br/>read + write PINs"]
+    end
+
+    EXT["Gemini / Groq"]
+
+    SA --> ST & AN & PL & GW & AU
+    GC --> GG
+    GC --> ST
+    PL --> AN
+    PL --> STR
+    PL --> AI
+    AI -.->|"JSON in, JSON out"| EXT
+    AI -.->|"answer re-checked<br/>by planner.enforce()"| PL
+
+    style AI fill:#2d2a4a,stroke:#7FB6DC
+    style PL fill:#1e3a32,stroke:#3FB68B
+    style EXT fill:#3a2a2a,stroke:#DB5F5A
+```
+
+Two invariants hold this together, and both are enforced rather than intended:
+nothing under `core/` imports Streamlit, and only `core/ai.py` names a provider.
+So the training logic is testable without a browser, and the guardrails are
+testable without a network.
+
+```mermaid
+sequenceDiagram
+    participant A as Athlete
+    participant R as Rules envelope
+    participant M as AI
+    participant E as enforce()
+
+    A->>R: check-in — "I feel great, give me a big week"
+    R->>M: facts + the limits it must stay inside
+    M-->>E: a week, with reasons
+    E->>E: re-check every limit in code
+    Note over E: deload flag · volume cap · session counts<br/>exercise allowlist · spacing · rest days
+    E-->>A: repaired week, marked ai_repaired
+```
+
+A model asked how your training should go will agree with you. That is why the
+answer is checked again after it arrives, and why the explanation gets rewritten
+when the numbers no longer support it.
+
 ## Design
 
 Three layers, in this order:

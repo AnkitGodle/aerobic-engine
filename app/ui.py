@@ -57,8 +57,18 @@ CSS = """
   /* No max-width. layout="wide" already spans the window; capping it here was
      throwing away most of a wide screen and forcing the header controls to wrap
      into a column that had plenty of room beside it. */
-  /* Room for the toolbar the sticky bar now sits below. */
-  .block-container { padding-top: 1rem; padding-bottom: 3rem;
+  /* Streamlit's header is 60px of full-width chrome whose left three quarters
+     is always empty — on a hosted app it holds only Share, GitHub and the menu,
+     all right-aligned. Rather than leaving that band blank, the header is made
+     transparent and click-through so the page title can sit in it, and the
+     toolbar itself is given its clicks back. Right padding on the sticky bar
+     keeps the title clear of those buttons at narrow widths. */
+  [data-testid="stHeader"] { background: transparent !important;
+                             pointer-events: none; }
+  [data-testid="stToolbar"], [data-testid="stHeader"] button,
+  [data-testid="stHeader"] a { pointer-events: auto; }
+
+  .block-container { padding-top: .25rem; padding-bottom: 3rem;
                      max-width: none; padding-left: 2.2rem; padding-right: 2.2rem; }
 
   /* Every injected block owns its own vertical space. Streamlit's container gap
@@ -145,9 +155,9 @@ CSS = """
       /* Offset by Streamlit's own toolbar, which is absolutely positioned at
          z-index 999990 over the top 60px of the page. At top:0 the app title
          sat underneath it and was invisible once scrolled. */
-      position: sticky; top: 3.75rem; z-index: 90;
+      position: sticky; top: 0; z-index: 90;
       background: var(--ic-page);
-      padding: .35rem 0 .45rem;
+      padding: .35rem 11rem .45rem 0;
       border-bottom: 1px solid var(--ic-line);
       margin-bottom: 1rem; }
   /* The popover panel has to clear the bar it hangs from. */
