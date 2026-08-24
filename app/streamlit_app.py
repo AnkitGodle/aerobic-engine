@@ -617,7 +617,7 @@ def send_session_to_watch(day_plan: dict, day: date) -> None:
     key = f"workout_pushed_{sport}_{day.isoformat()}"
     already = with_store(lambda st_: st_.get_state(key))
     unlocked = writes_allowed()
-    label = f"{sport.title()} {minutes}m · Aerobic Engine"
+    label = f"{sport.title()} {minutes}m {garmin_workout.APP_MARKER}"
 
     if already:
         st.caption(f"✓ Sent — “{label}” is on your watch under {sport} workouts.")
@@ -669,14 +669,15 @@ def strength_howto_block(exercise_ids: list[str], log_rows: list[dict],
     if ids:
         prescriptions = [strength.next_prescription(e, log_rows, intensity)
                          for e in ids]
-        label = "Legs · Aerobic Engine"
+        label = f"Legs {garmin_workout.APP_MARKER}"
     else:
         # No list on the plan — fall back to where the cycle has got to.
         prescriptions = strength.build_session(log_rows,
                                                session_index=session_index,
                                                intensity=intensity)
         ids = [x.exercise_id for x in prescriptions]
-        label = f"Legs {chr(65 + session_index % 3)} · Aerobic Engine"
+        label = (f"Legs {chr(65 + session_index % 3)} "
+                 f"{garmin_workout.APP_MARKER}")
     presc = {x.exercise_id: x for x in prescriptions}
     if not ids:
         return

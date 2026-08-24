@@ -347,3 +347,23 @@ def test_weather_effect_skips_sessions_with_no_weather_row():
 
     acts = [act(activity_id="a", ef=1.7, ef_metric="speed_per_hr")]
     assert weather_effect(acts, {})["points"] == []
+
+
+def test_no_module_defines_the_same_name_twice():
+    """A scripted edit once inserted a helper twice and left a 400-line block
+    duplicated in core/sync.py. Python takes the last definition, so the tests
+    passed while the code that ran was the old copy. Cheap to rule out."""
+    import ast
+    from collections import Counter
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    for path in sorted((root / "core").glob("*.py")) + \
+            sorted((root / "app").glob("*.py")) + \
+            sorted((root / "scripts").glob("*.py")):
+        tree = ast.parse(path.read_text())
+        names = [n.name for n in tree.body
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                   ast.ClassDef))]
+        repeated = [n for n, c in Counter(names).items() if c > 1]
+        assert not repeated, f"{path.name} defines {repeated} more than once"

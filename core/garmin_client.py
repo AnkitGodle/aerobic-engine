@@ -549,6 +549,46 @@ class GarminClient:
             "fetched_at": datetime.now().isoformat(timespec="seconds"),
         }
 
+    def scheduled_workouts(self, year: int, month: int) -> list[dict[str, Any]]:
+        """Calendar entries for scheduled workouts in one month.
+
+        Garmin's calendar month is zero-based in the response and one-based in
+        the request, which is exactly the sort of thing to write down rather than
+        rediscover.
+        """
+        data = self._call(self.connect().get_scheduled_workouts, int(year),
+                          int(month), label="get_scheduled_workouts")
+        items = (data or {}).get("calendarItems") if isinstance(data, dict) else None
+        return [
+            {
+                "schedule_id": item.get("id"),
+                "workout_id": item.get("workoutId"),
+                "title": item.get("title") or "",
+                "date": item.get("date"),
+                "sport": item.get("sportTypeKey"),
+                "protected": bool(item.get("protectedWorkoutSchedule")),
+            }
+            for item in (items or [])
+            if isinstance(item, dict) and item.get("workoutId")
+            and item.get("itemType") == "workout"
+        ]
+
+    def unschedule_workout(self, schedule_id: str) -> bool:
+        """Take one entry off the training calendar.
+
+        Separate from deleting the workout: the calendar entry is what shows up
+        in Garmin Connect's plan, and deleting the workout alone leaves it there.
+        """
+        try:
+            self._call(self.connect().unschedule_workout, str(schedule_id),
+                       label="unschedule_workout")
+            return True
+        except Exception as exc:  # noqa: BLE001 - tidying never fails a sync
+            if status_of(exc) in (404, 400):
+                return True
+            log.warning("Could not unschedule %s: %s", schedule_id, exc)
+            return False
+
     def delete_workout(self, workout_id: str) -> bool:
         """Remove a workout from the account. True if Garmin accepted it.
 

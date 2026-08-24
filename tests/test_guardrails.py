@@ -824,17 +824,32 @@ def test_the_floor_is_satisfied_by_sessions_already_completed(healthy):
 
 
 class _FakeGarmin:
-    """Records what would have been deleted, and can be told to refuse."""
+    """Records what would have been deleted or unscheduled, and can refuse."""
 
-    def __init__(self, refuse: set[str] = frozenset()):
+    def __init__(self, refuse: set[str] = frozenset(),
+                 calendar: list[dict] | None = None,
+                 refuse_unschedule: set[str] = frozenset()):
         self.deleted: list[str] = []
+        self.unscheduled: list[str] = []
         self.refuse = set(refuse)
+        self.refuse_unschedule = set(refuse_unschedule)
+        self.calendar = calendar or []
 
     def delete_workout(self, workout_id: str) -> bool:
         if workout_id in self.refuse:
             return False
         self.deleted.append(str(workout_id))
         return True
+
+    def unschedule_workout(self, schedule_id: str) -> bool:
+        if str(schedule_id) in self.refuse_unschedule:
+            return False
+        self.unscheduled.append(str(schedule_id))
+        return True
+
+    def scheduled_workouts(self, year: int, month: int) -> list[dict]:
+        return [c for c in self.calendar
+                if str(c.get("date", "")).startswith(f"{year:04d}-{month:02d}")]
 
 
 def test_a_finished_session_is_taken_off_the_watch(healthy):
@@ -1090,3 +1105,78 @@ def test_a_brick_needs_both_halves_before_it_counts_as_done(healthy):
     ], source="rules")
     marked, _ = planner.refresh_completions(plan, facts, healthy)
     assert [d.sport for d in marked.week_plan if d.purpose == "brick"] == ["brick"]
+
+
+def _calendar_entry(day, workout_id="900", schedule_id="90",
+                    title="Legs A · Aerobic Engine",
+                    sport="strength_training", protected=False):
+    return {"schedule_id": schedule_id, "workout_id": workout_id, "title": title,
+            "date": day.isoformat(), "sport": sport, "protected": protected}
+
+
+def test_a_finished_session_leaves_the_training_calendar_too(healthy):
+    """Deleting the workout is only half of it. `schedule_workout` puts an entry
+    on the calendar, and that entry is the copy you see in Garmin Connect under
+    the plan — it survives the workout being deleted."""
+    from core import sync as sync_mod
+
+    client = _FakeGarmin(calendar=[_calendar_entry(TODAY)])
+    removed = sync_mod.delete_finished_workouts(healthy, client, today=TODAY)
+    assert removed == 1
+    assert client.unscheduled == ["90"]
+    assert client.deleted == ["900"]
+
+
+def test_a_workout_the_athlete_built_is_never_touched(healthy):
+    """A tidy-up that deletes someone's own workouts is not a tidy-up."""
+    from core import sync as sync_mod
+
+    client = _FakeGarmin(calendar=[
+        _calendar_entry(TODAY, workout_id="800", schedule_id="80",
+                        title="Benchmark Run", sport="running")])
+    assert sync_mod.delete_finished_workouts(healthy, client, today=TODAY) == 0
+    assert client.deleted == [] and client.unscheduled == []
+
+
+def test_an_orphan_push_is_still_cleared(healthy):
+    """The bookkeeping only knows about pushes it saw. The calendar knows about
+    all of them, which is why the sweep goes over the calendar."""
+    from core import sync as sync_mod
+
+    assert healthy.states_with_prefix("workout_pushed_") == {}
+    client = _FakeGarmin(calendar=[
+        _calendar_entry(TODAY - timedelta(days=3), workout_id="700",
+                        schedule_id="70")])
+    assert sync_mod.delete_finished_workouts(healthy, client, today=TODAY) == 1
+    assert client.deleted == ["700"]
+
+
+def test_a_protected_calendar_entry_is_left_alone(healthy):
+    """Garmin marks entries belonging to one of its own plans as protected."""
+    from core import sync as sync_mod
+
+    client = _FakeGarmin(calendar=[
+        _calendar_entry(TODAY - timedelta(days=3), protected=True)])
+    assert sync_mod.delete_finished_workouts(healthy, client, today=TODAY) == 0
+    assert client.deleted == []
+
+
+def test_the_workout_stays_if_it_cannot_be_unscheduled(healthy):
+    """Otherwise the calendar keeps an entry pointing at a workout that is gone."""
+    from core import sync as sync_mod
+
+    client = _FakeGarmin(calendar=[_calendar_entry(TODAY)],
+                         refuse_unschedule={"90"})
+    assert sync_mod.delete_finished_workouts(healthy, client, today=TODAY) == 0
+    assert client.deleted == []
+
+
+def test_a_calendar_entry_for_an_unfinished_day_stays(healthy):
+    from core import sync as sync_mod
+
+    client = _FakeGarmin(calendar=[
+        _calendar_entry(TODAY, title="Swim 40m · Aerobic Engine",
+                        sport="swimming")])
+    # No swim on record today, and the day is not stale.
+    assert sync_mod.delete_finished_workouts(healthy, client, today=TODAY) == 0
+    assert client.deleted == []

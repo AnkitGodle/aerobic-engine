@@ -127,6 +127,11 @@ VALID_CATEGORIES = frozenset({
     "BENCH_PRESS", "ROW", "CARRY", "WARM_UP",
 })
 
+# Every workout this app pushes carries this in its name. It is how the cleanup
+# recognises its own: a workout the athlete built in Garmin Connect must never be
+# deleted by a tidy-up, however stale it looks.
+APP_MARKER = "· Aerobic Engine"
+
 REST_SECONDS = 60
 
 

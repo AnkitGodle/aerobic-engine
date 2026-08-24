@@ -425,54 +425,128 @@ def delete_finished_workouts(
     store: Store, client: Any, today: date | None = None,
     keep_days: int = PUSHED_KEEP_DAYS,
 ) -> int:
-    """Take a pushed workout off the watch once it has been done, or has passed.
+    """Take a pushed session off the watch and out of the training calendar.
 
-    A session is pushed most days, and Garmin keeps every one of them in the
-    saved-workout list until it is deleted — so within a fortnight pressing START
-    offers a fortnight of history and the one you want is buried.
+    Two separate things have to go, which is why the first version of this looked
+    like it worked and did not: `delete_workout` removes the workout from the
+    saved list, and the calendar entry `schedule_workout` created stays exactly
+    where it was — which is the copy that shows up in Garmin Connect under the
+    plan.
 
-    "Done" means an activity of that sport exists on that day. A strength push
-    matches a strength activity; a run push matches a run. Anything older than
-    `keep_days` goes whether or not it was done, because the plan has moved on.
+    The calendar is also the better source of truth. Bookkeeping in sync_state
+    only knows about pushes it saw, so a push whose state row was cleared leaves
+    an orphan nothing would ever tidy. The sweep therefore runs over the
+    calendar, filtered to workouts this app named, and the stored keys are
+    cleaned up alongside it.
+
+    A session goes when an activity of that sport exists on its day, or when the
+    day is more than `keep_days` old. Workouts the athlete built themselves are
+    never touched, whatever their age.
     """
     today = today or date.today()
-    pushed = store.states_with_prefix(PUSHED_PREFIX)
-    if not pushed:
-        return 0
-    # One read, then matching in memory: there are at most a few pushes pending.
-    by_day: dict[date, set[str]] = {}
+    trained = _trained_by_day(store, today)
+
+    def finished(day: date, sport: str | None) -> bool:
+        sports = trained.get(day, set())
+        done = (sport in sports) if sport else bool(sports)
+        return done or (today - day).days > keep_days
+
+    removed = 0
+    handled: set[str] = set()
+    for item in _calendar_pushes(client, today):
+        if not finished(item["day"], item["sport"]):
+            continue
+        if item["protected"]:
+            log.info("Leaving protected calendar entry %s alone",
+                     item["schedule_id"])
+            continue
+        # Unschedule first. Deleting the workout while its calendar entry stands
+        # leaves the entry pointing at nothing, which is worse than leaving both.
+        if item["schedule_id"] and not client.unschedule_workout(
+                item["schedule_id"]):
+            continue
+        workout_id = str(item["workout_id"])
+        if client.delete_workout(workout_id):
+            handled.add(workout_id)
+            removed += 1
+            log.info("Removed %s (%s) from the watch and the calendar",
+                     item["title"], item["day"])
+
+    # Then anything the bookkeeping knows about that the calendar did not cover:
+    # a push that never made it onto the calendar, or one already unscheduled.
+    for key, workout_id in store.states_with_prefix(PUSHED_PREFIX).items():
+        sport, day = _pushed_key_parts(key)
+        if day is None or not workout_id:
+            store.delete_state(key)
+            continue
+        if not finished(day, sport or "strength"):
+            continue
+        if workout_id in handled:
+            store.delete_state(key)
+        elif client.delete_workout(workout_id):
+            store.delete_state(key)
+            removed += 1
+    if removed:
+        applog.event(default_db(),
+                     f"Removed {removed} finished workout(s) from the watch")
+    return removed
+
+
+def _trained_by_day(store: Store, today: date) -> dict[date, set[str]]:
+    """Which sports were actually done on each of the last 30 days."""
+    out: dict[date, set[str]] = {}
     for a in store.activities(since=today - timedelta(days=30)):
         try:
             day = date.fromisoformat(str(a["start_date"])[:10])
         except (ValueError, TypeError):
             continue
-        by_day.setdefault(day, set()).add(a.get("sport") or "")
+        out.setdefault(day, set()).add(a.get("sport") or "")
+    return out
 
-    removed = 0
-    for key, workout_id in pushed.items():
-        sport, day = _pushed_key_parts(key)
-        if day is None:
-            store.delete_state(key)
+
+# Garmin's calendar sport keys against the ones the activities table stores.
+CALENDAR_SPORTS = {"strength_training": "strength", "running": "run",
+                   "cycling": "bike", "swimming": "swim"}
+
+
+def _calendar_pushes(client: Any, today: date) -> list[dict[str, Any]]:
+    """This app's scheduled workouts from this month and last.
+
+    Two months, because a session pushed near the end of a month is finished at
+    the start of the next one and a single window would strand it.
+    """
+    from core.garmin_workout import APP_MARKER
+
+    months = {(today.year, today.month)}
+    previous = today.replace(day=1) - timedelta(days=1)
+    months.add((previous.year, previous.month))
+
+    out: list[dict[str, Any]] = []
+    for year, month in sorted(months):
+        try:
+            items = client.scheduled_workouts(year, month)
+        except Exception as exc:  # noqa: BLE001 - tidying never fails a sync
+            log.warning("Could not read the workout calendar for %04d-%02d: %s",
+                        year, month, exc)
             continue
-        if not workout_id:
-            store.delete_state(key)
-            continue
-        trained = by_day.get(day, set())
-        done = bool(trained) if sport is None else sport in trained
-        if sport is None:
-            done = "strength" in trained
-        stale = (today - day).days > keep_days
-        if not (done or stale):
-            continue
-        if client.delete_workout(workout_id):
-            store.delete_state(key)
-            removed += 1
-            log.info("Removed workout %s from the watch (%s %s)",
-                     workout_id, sport or "strength", day)
-    if removed:
-        applog.event(default_db(),
-                     f"Removed {removed} finished workout(s) from the watch")
-    return removed
+        for item in items or []:
+            if APP_MARKER not in (item.get("title") or ""):
+                continue          # not ours; leave it alone
+            try:
+                day = date.fromisoformat(str(item.get("date"))[:10])
+            except (ValueError, TypeError):
+                continue
+            sport_key = str(item.get("sport") or "")
+            out.append({
+                "schedule_id": item.get("schedule_id"),
+                "workout_id": item.get("workout_id"),
+                "title": item.get("title") or "",
+                "day": day,
+                "sport": CALENDAR_SPORTS.get(sport_key) or sport_key or None,
+                "protected": bool(item.get("protected")),
+            })
+    return out
+
 
 
 def recompute_metrics(
