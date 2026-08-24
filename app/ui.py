@@ -305,6 +305,9 @@ CSS = """
       padding: .3rem .75rem; font-size: .84rem; font-weight: 600;
       text-decoration: none !important; margin: .1rem 0 .35rem; }
   a.ic-linkchip:hover { filter: brightness(1.08); }
+  .ic-chiprow { display: flex; flex-wrap: wrap; gap: .4rem;
+                margin: .1rem 0 .35rem; }
+  .ic-chiprow a.ic-linkchip { margin: 0; }
 
   /* Chart panels */
   .ic-card-title { font-size: .93rem; font-weight: 620; letter-spacing: -.01em;
@@ -491,18 +494,25 @@ def rows(items: list[tuple]) -> None:
                 unsafe_allow_html=True)
 
 
-def link_chip(label: str, url: str, color: str = "#FC5200") -> None:
-    """An outbound link, styled as a chip in the destination's own colour.
+def link_chips(items: Iterable[tuple[str, str, str]]) -> None:
+    """Outbound links as chips, each in its destination's own colour.
+
+    One markdown block for the row: Streamlit puts every call in its own block,
+    so a chip per call stacked them vertically and turned two links into two
+    rows of sidebar.
 
     `target="_blank"` with `rel="noopener noreferrer"`: the app sits behind a PIN
     and a new tab must not be handed a reference back to this one.
     """
-    st.markdown(
+    chips = "".join(
         f'<a class="ic-linkchip" style="color:{esc(color)}" '
         f'href="{esc(url)}" target="_blank" rel="noopener noreferrer">'
-        f"{esc(label)} ↗</a>",
-        unsafe_allow_html=True,
+        f"{esc(label)} ↗</a>"
+        for label, url, color in items if url
     )
+    if chips:
+        st.markdown(f'<div class="ic-chiprow">{chips}</div>',
+                    unsafe_allow_html=True)
 
 
 def banner(headline: str, body: str = "", tone: Tone = "neutral") -> None:

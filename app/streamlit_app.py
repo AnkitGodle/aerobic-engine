@@ -394,6 +394,15 @@ LOCAL_TZ = ZoneInfo(os.getenv("LOCAL_TZ", "Asia/Kolkata"))
 # touch. Override with STRAVA_PROFILE_URL if the profile ever moves.
 STRAVA_PROFILE_URL = os.getenv(
     "STRAVA_PROFILE_URL", "https://www.strava.com/athletes/71829400")
+INSTAGRAM_PROFILE_URL = os.getenv(
+    "INSTAGRAM_PROFILE_URL", "https://www.instagram.com/ankitgodle/")
+
+# Label, URL, brand colour. Instagram's mark is a gradient; its pink is the one
+# solid colour that still reads as Instagram at chip size.
+PROFILE_LINKS: tuple[tuple[str, str, str], ...] = (
+    ("Strava", STRAVA_PROFILE_URL, "#FC5200"),
+    ("Instagram", INSTAGRAM_PROFILE_URL, "#E1306C"),
+)
 EVENING_CUTOFF_HOUR = int(os.getenv("EVENING_CUTOFF_HOUR", "19"))
 
 
@@ -2847,10 +2856,10 @@ def page_about(data: dict, today: date) -> None:
         "(https://github.com/AnkitGodle/aerobic-engine). Your training data is "
         "not in it."
     )
+    ui.link_chips(PROFILE_LINKS)
     if STRAVA_PROFILE_URL:
-        st.markdown(f"Strava: [your profile]({STRAVA_PROFILE_URL})")
         st.caption(
-            "A link only. Nothing is read from Strava and nothing is sent to "
+            "Links only. Nothing is read from Strava and nothing is sent to "
             "it: their API terms forbid using their data with a language model, "
             "and the planning here is one. Garmin remains the single source.")
     st.caption(
@@ -3305,10 +3314,9 @@ def sidebar(data: dict) -> None:
         # No logo or app name here: the top bar carries both, and a third copy
         # in the sidebar is just noise.
         st.subheader(data["name"] or "Athlete", anchor=False)
-        # At the top and in Strava's own colour: it is the one link out of
-        # the app, and buried at the foot of the sidebar nobody found it.
-        if STRAVA_PROFILE_URL:
-            ui.link_chip("Strava profile", STRAVA_PROFILE_URL)
+        # At the top, in each service's own colour: these are the only links
+        # out of the app, and at the foot of the sidebar nobody found them.
+        ui.link_chips(PROFILE_LINKS)
         # Which store is in use, always visible. Neon is the real database and
         # the SQLite file is a local fallback, and the two cost a whole evening
         # once already: the CLI wrote to the file while the dashboard read Neon
