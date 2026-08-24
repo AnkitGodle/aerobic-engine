@@ -135,3 +135,70 @@ def test_acwr_flags_a_spike():
 def test_recovery_signals_tolerate_empty_data():
     sig = recovery_signals([], [], as_of=TODAY)
     assert sig.rhr_recent is None and sig.acwr is None
+
+
+# --------------------------------------------------------------------------
+# Lap-based drift. Decoupling needs an hour-long session to split in half, so
+# on this athlete's 45-minute sessions it never computed once. Laps answer the
+# same question per kilometre.
+# --------------------------------------------------------------------------
+
+
+def _lap(index, seconds=450, metres=1000, hr=150, speed=2.2):
+    return {"activity_id": "a1", "lap_index": index, "duration_s": seconds,
+            "distance_m": metres, "avg_hr": hr, "avg_speed_mps": speed}
+
+
+def test_drift_is_measured_only_across_laps_at_the_same_pace():
+    """Heart rate rising with pace is effort, not drift. Speeding up must not
+    be reported as poor durability."""
+    from core.analysis import lap_drift
+
+    # Steady pace, heart rate climbing: real drift.
+    steady = [_lap(i, hr=140 + i * 5) for i in range(1, 5)]
+    assert lap_drift(steady)["drift_bpm"] == 15
+    assert lap_drift(steady)["verdict"] == "steep"
+
+    # Pace rising with heart rate: the later laps fall outside the tolerance and
+    # are excluded, so there is nothing honest to report.
+    faster = [_lap(i, hr=140 + i * 5, speed=2.2 + i * 0.3) for i in range(1, 5)]
+    assert faster and lap_drift(faster)["drift_bpm"] is None
+
+
+def test_short_laps_are_ignored():
+    """A 40-second lap is a stop or a warm-up segment; its average heart rate
+    has not settled and would drag the comparison."""
+    from core.analysis import lap_drift
+
+    laps = [_lap(1, seconds=40, hr=110)] + [_lap(i, hr=150) for i in range(2, 5)]
+    result = lap_drift(laps)
+    assert result["laps_compared"] == 3
+    assert result["drift_bpm"] == 0
+
+
+def test_flat_heart_rate_reads_as_good_durability():
+    from core.analysis import lap_drift
+
+    result = lap_drift([_lap(i, hr=148 + (i % 2)) for i in range(1, 6)])
+    assert result["verdict"] == "flat"
+    assert "durability" in result["message"]
+
+
+def test_too_few_usable_laps_says_so_rather_than_guessing():
+    from core.analysis import lap_drift
+
+    assert lap_drift([])["drift_bpm"] is None
+    assert lap_drift([_lap(1), _lap(2)])["drift_bpm"] is None
+    assert "three laps" in lap_drift([_lap(1)])["message"]
+
+
+def test_pace_spread_separates_steady_from_intervals():
+    """A more direct reading than heart-rate spread, which also moves with heat,
+    fatigue and hills."""
+    from core.analysis import lap_pace_spread
+
+    steady = [_lap(i, speed=2.20 + (i % 2) * 0.01) for i in range(1, 7)]
+    intervals = [_lap(i, speed=2.2 if i % 2 else 3.6) for i in range(1, 7)]
+    assert lap_pace_spread(steady) < 1.0
+    assert lap_pace_spread(intervals) > 15.0
+    assert lap_pace_spread([_lap(1), _lap(2)]) is None

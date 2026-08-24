@@ -28,6 +28,8 @@ STREAM_SPORTS = {"run", "bike", "swim", "brick"}
 # Pool swims and strength sessions happen indoors, so asking for weather would
 # spend a request to learn nothing.
 WEATHER_SPORTS = {"run", "bike", "brick"}
+# Laps only mean something where distance is measured and paced.
+LAP_SPORTS = {"run", "bike", "swim", "brick"}
 ZONE_SPORTS = {"run", "bike", "swim", "strength", "brick"}
 
 
@@ -409,6 +411,15 @@ def _sync_locked(
         if row:
             weather_rows += store.upsert_weather([row])
     stats["weather_rows"] = weather_rows
+
+    # Laps, backfilled from the database like weather and streams, so a session
+    # skipped by a request cap is picked up next run rather than left without.
+    if progress:
+        progress("Fetching laps…")
+    lap_rows = 0
+    for a in store.activities_missing_laps(sorted(LAP_SPORTS))[:stream_limit]:
+        lap_rows += store.upsert_laps(client.fetch_laps(a["activity_id"]))
+    stats["laps"] = lap_rows
 
     # Body constants and lifetime records. One call each, so they are refreshed
     # every sync rather than tracked for staleness.

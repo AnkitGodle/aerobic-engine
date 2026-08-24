@@ -549,6 +549,43 @@ class GarminClient:
             "fetched_at": datetime.now().isoformat(timespec="seconds"),
         }
 
+    def fetch_laps(self, activity_id: str) -> list[dict[str, Any]]:
+        """Per-lap heart rate and pace.
+
+        Worth a request per session because it answers a question the session
+        averages cannot: whether heart rate climbed while pace held. Aerobic
+        drift computed from the stream needs a 60-minute session to split in
+        half; auto-lap gives the same signal on a 45-minute one, one kilometre
+        at a time.
+        """
+        api = self.connect()
+        raw = self._call(api.get_activity_splits, activity_id, label="laps")
+        laps = (raw or {}).get("lapDTOs") if isinstance(raw, dict) else None
+        rows = []
+        for lap in _entries(laps):
+            index = lap.get("lapIndex")
+            if index is None:
+                continue
+            rows.append({
+                "activity_id": str(activity_id),
+                "lap_index": int(index),
+                "duration_s": _f(lap.get("duration")),
+                "distance_m": _f(lap.get("distance")),
+                "avg_hr": _f(lap.get("averageHR")),
+                "max_hr": _f(lap.get("maxHR")),
+                "avg_speed_mps": _f(lap.get("averageSpeed")),
+                "avg_cadence": _f(lap.get("averageRunCadence")
+                                  or lap.get("averageBikeCadence")),
+                "avg_power_w": _f(lap.get("averagePower")),
+                "elevation_gain_m": _f(lap.get("elevationGain")),
+                # Garmin labels every auto-lap "INTERVAL" whether or not the
+                # session was one, so this is stored as a fact about the file
+                # rather than trusted as a description of the training.
+                "intensity": dig_str(lap, "intensityType"),
+                "fetched_at": datetime.now().isoformat(timespec="seconds"),
+            })
+        return rows
+
     def fetch_profile(self) -> dict[str, Any]:
         """Body and physiology constants: weight, height, age, threshold HR.
 

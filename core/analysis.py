@@ -674,6 +674,97 @@ def polarisation(zone_rows: Sequence[dict[str, Any]], **kw: Any) -> dict[str, fl
     }
 
 
+# A lap has to be long enough for heart rate to have settled before its average
+# means anything. Under three minutes is a warm-up segment or a stop.
+LAP_MIN_SECONDS = 150.0
+# How closely two laps must match on pace before their heart rates can be
+# compared. 5% is tight enough that pace is not the explanation.
+LAP_PACE_TOLERANCE = 0.05
+
+
+def lap_drift(laps: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """How much heart rate climbed across a session at unchanged pace.
+
+    This is the same question aerobic decoupling asks, answered from auto-lap
+    instead of from the stream. Decoupling needs a session long enough to split
+    into two halves that are each worth comparing — in practice an hour — and
+    this athlete's longest session is 45 minutes, so that number has never once
+    computed. Laps give it at kilometre resolution.
+
+    Only laps within `LAP_PACE_TOLERANCE` of the first usable lap's pace are
+    compared, because heart rate rising with pace is not drift, it is effort.
+    Returns None-ish when there is nothing honest to say.
+    """
+    usable = [
+        l for l in laps
+        if (l.get("duration_s") or 0) >= LAP_MIN_SECONDS
+        and l.get("avg_hr") and l.get("avg_speed_mps")
+    ]
+    if len(usable) < 3:
+        return {"drift_bpm": None, "laps_compared": 0,
+                "message": "needs three laps of three minutes or more"}
+
+    usable.sort(key=lambda l: l["lap_index"])
+    reference = float(usable[0]["avg_speed_mps"])
+    matched = [
+        l for l in usable
+        if abs(float(l["avg_speed_mps"]) - reference) / reference
+        <= LAP_PACE_TOLERANCE
+    ]
+    if len(matched) < 3:
+        return {"drift_bpm": None, "laps_compared": len(matched),
+                "message": "pace varied too much across laps to separate drift "
+                           "from effort"}
+
+    first, last = float(matched[0]["avg_hr"]), float(matched[-1]["avg_hr"])
+    drift = last - first
+    per_km = None
+    covered = sum(float(l.get("distance_m") or 0) for l in matched) / 1000.0
+    if covered > 0:
+        per_km = drift / covered
+
+    if drift <= 3:
+        verdict = "flat"
+        message = (f"Heart rate held within {abs(drift):.0f} bpm across "
+                   f"{len(matched)} laps at the same pace. That is good aerobic "
+                   f"durability.")
+    elif drift <= 10:
+        verdict = "mild"
+        message = (f"Heart rate rose {drift:.0f} bpm across {len(matched)} laps "
+                   f"at unchanged pace — normal for a longer session, and worth "
+                   f"watching if it grows.")
+    else:
+        verdict = "steep"
+        message = (f"Heart rate rose {drift:.0f} bpm across {len(matched)} laps "
+                   f"while pace held. That is the session getting harder without "
+                   f"getting faster, which usually means it started too quick.")
+    return {
+        "drift_bpm": round(drift, 1),
+        "drift_per_km": round(per_km, 1) if per_km is not None else None,
+        "first_hr": round(first), "last_hr": round(last),
+        "laps_compared": len(matched), "laps_total": len(laps),
+        "verdict": verdict, "message": message,
+    }
+
+
+def lap_pace_spread(laps: Sequence[dict[str, Any]]) -> float | None:
+    """Coefficient of variation of lap pace, as a percentage.
+
+    A steady session holds one pace; intervals do not. This is a more direct
+    reading of "was this steady" than heart-rate spread, which also moves with
+    heat, fatigue and hills.
+    """
+    speeds = [float(l["avg_speed_mps"]) for l in laps
+              if (l.get("duration_s") or 0) >= LAP_MIN_SECONDS
+              and l.get("avg_speed_mps")]
+    if len(speeds) < 3:
+        return None
+    mean = fmean(speeds)
+    if mean <= 0:
+        return None
+    return round(pstdev(speeds) / mean * 100, 1)
+
+
 def zone_bounds_with_ceiling(
     bounds: dict[int, tuple[int, int | None]], ceiling: float | None,
 ) -> dict[int, tuple[int, int | None]]:

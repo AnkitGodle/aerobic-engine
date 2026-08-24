@@ -2,12 +2,12 @@
 # .streamlit/secrets.toml is gitignored.
 
 [client]
-# Full tracebacks instead of "the original error message is redacted". The
-# redacted form names the line that failed and nothing about why, which on a
-# hosted app means the only way to diagnose an import error is the provider's
-# log viewer. This is a single-user dashboard with no user input reaching an
-# exception path, so the trade is worth it.
-showErrorDetails = "full"
+# Back to redacted now the import error is understood. Full tracebacks print
+# internal paths and local values on a page anyone with the link can open, and
+# that is not a standing trade worth making for a dashboard that is usually
+# working. When something does break, set this to "full", push, read the real
+# message, and set it back — which is exactly how the last one was diagnosed.
+showErrorDetails = "stacktrace"
 
 [server]
 # Nothing here writes to the filesystem, so there is nothing to protect against

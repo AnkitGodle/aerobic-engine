@@ -272,6 +272,27 @@ SCHEMA: list[str] = [
         synced_at   TEXT NOT NULL
     )
     """,
+    # Laps. Garmin's auto-lap gives a heart rate and a pace per kilometre, which
+    # answers a question the full-session numbers cannot: whether heart rate rose
+    # while pace held. Aerobic drift from the stream needs a 60-minute session to
+    # split in half; this works on a 45-minute one.
+    """
+    CREATE TABLE IF NOT EXISTS activity_laps (
+        activity_id   TEXT NOT NULL REFERENCES activities(activity_id),
+        lap_index     INTEGER NOT NULL,
+        duration_s    REAL,
+        distance_m    REAL,
+        avg_hr        REAL,
+        max_hr        REAL,
+        avg_speed_mps REAL,
+        avg_cadence   REAL,
+        avg_power_w   REAL,
+        elevation_gain_m REAL,
+        intensity     TEXT,
+        fetched_at    TEXT NOT NULL,
+        PRIMARY KEY (activity_id, lap_index)
+    )
+    """,
     """
     CREATE TABLE IF NOT EXISTS personal_records (
         type_id     INTEGER PRIMARY KEY,
@@ -533,7 +554,13 @@ class Store:
         if unknown:
             raise ValueError(f"refusing to write unknown columns to {table}: {unknown}")
         placeholders = ",".join("?" for _ in cols)
-        updates = ",".join(f"{c}=excluded.{c}" for c in cols if c != key)
+        # `key` may name more than one column ("activity_id, lap_index"), so the
+        # SET clause has to exclude every part of it. Comparing the whole string
+        # against one column name excluded nothing and wrote each key column back
+        # to itself — harmless in both backends, and wrong the moment a future
+        # table has a key column it also wants to update.
+        key_cols = {part.strip() for part in key.split(",") if part.strip()}
+        updates = ",".join(f"{c}=excluded.{c}" for c in cols if c not in key_cols)
         sql = (
             f"INSERT INTO {table} ({','.join(cols)}) VALUES ({placeholders}) "
             f"ON CONFLICT({key}) DO UPDATE SET {updates}"
@@ -1019,6 +1046,29 @@ class Store:
 
     def sync_exercise_library(self, rows: Iterable[dict[str, Any]]) -> int:
         return self._upsert("exercise_library", rows, "exercise_id")
+
+    def upsert_laps(self, rows: Iterable[dict[str, Any]]) -> int:
+        return self._upsert("activity_laps", rows, "activity_id, lap_index")
+
+    def laps(self, activity_id: str | None = None) -> list[dict[str, Any]]:
+        if activity_id:
+            return self.query(
+                "SELECT * FROM activity_laps WHERE activity_id = ?"
+                " ORDER BY lap_index", (activity_id,))
+        return self.query("SELECT * FROM activity_laps ORDER BY activity_id, lap_index")
+
+    def activities_missing_laps(self, sports: Sequence[str]) -> list[dict[str, Any]]:
+        """Sessions with no laps stored. Long enough to have more than one."""
+        if not sports:
+            return []
+        marks = ",".join("?" * len(sports))
+        return self.query(
+            f"SELECT activity_id, sport, start_date FROM activities"
+            f" WHERE sport IN ({marks})"
+            f" AND COALESCE(is_multisport_parent, 0) = 0"
+            f" AND COALESCE(duration_s, 0) > 600"
+            f" AND activity_id NOT IN (SELECT DISTINCT activity_id FROM activity_laps)"
+            f" ORDER BY start_time DESC", list(sports))
 
     def set_personal_records(self, rows: Iterable[dict[str, Any]]) -> int:
         return self._upsert("personal_records", rows, "type_id")

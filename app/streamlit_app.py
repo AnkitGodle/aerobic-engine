@@ -41,6 +41,8 @@ from core.analysis import (  # noqa: E402
     hr_points,
     hr_trend,
     cadence_stats,
+    lap_drift,
+    lap_pace_spread,
     ef_data_status,
     ef_points,
     polarisation,
@@ -185,6 +187,7 @@ def load(stamp: float) -> dict:  # noqa: ARG001 - stamp is the cache key
             "profile": profile,
             "records": s.personal_records(),
             "weather": s.weather(),
+            "laps": s.laps(),
             "plan": s.latest_plan(week_start_of(date.today())),
         }
 
@@ -970,9 +973,7 @@ def page_progress(data: dict, today: date) -> None:
     with detail[3], ui.frame():
         form_block(acts)
     with detail[4], ui.frame():
-        st.caption("Efficiency in the second half versus the first. Under 5% is "
-                   "good durability.")
-        drift_block(acts)
+        drift_block(acts, data.get("laps"))
 
 
 def form_block(acts: list[dict]) -> None:
@@ -1196,11 +1197,51 @@ def cadence_block(acts: list[dict], today: date) -> None:
             )
 
 
-def drift_block(acts: list[dict]) -> None:
+def drift_block(acts: list[dict], laps: list[dict] | None = None) -> None:
+    """Aerobic drift, from laps where the stream cannot give it.
+
+    Decoupling needs a session long enough to split into two comparable halves —
+    an hour in practice — so on 45-minute sessions this panel was permanently
+    empty. Auto-lap answers the same question at kilometre resolution, and only
+    compares laps run at the same pace, because heart rate rising with pace is
+    effort rather than drift.
+    """
+    by_activity: dict[str, list[dict]] = {}
+    for lap in laps or []:
+        by_activity.setdefault(str(lap["activity_id"]), []).append(lap)
+
+    rows = []
+    for a in acts:
+        session_laps = by_activity.get(str(a.get("activity_id")))
+        if not session_laps:
+            continue
+        d = lap_drift(session_laps)
+        if d.get("drift_bpm") is None:
+            continue
+        rows.append({"act": a, "drift": d,
+                     "spread": lap_pace_spread(session_laps)})
+
+    if rows:
+        st.caption("Measured across laps run at the same pace, so a rise here is "
+                   "the session getting harder rather than faster.")
+        table(pd.DataFrame([{
+            "start_date": r["act"]["start_date"],
+            "sport": r["act"]["sport"],
+            "Drift": f"+{r['drift']['drift_bpm']:.0f} bpm",
+            "From": f"{r['drift']['first_hr']} → {r['drift']['last_hr']}",
+            "Laps": r["drift"]["laps_compared"],
+            "Pace spread": f"{r['spread']:.1f}%" if r["spread"] else "—",
+        } for r in rows]))
+        worst = max(rows, key=lambda r: r["drift"]["drift_bpm"])
+        tone = {"flat": "good", "mild": "caution", "steep": "bad"}[
+            worst["drift"]["verdict"]]
+        ui.banner("Aerobic drift", worst["drift"]["message"], tone)
+
     drift = [a for a in acts if a.get("decoupling_pct") is not None]
     if not drift:
-        st.caption("No session long enough yet — drift needs 60+ minutes with a "
-                   "heart-rate stream.")
+        if not rows:
+            st.caption("Needs three laps of three minutes or more in one session, "
+                       "or a 60-minute session for the stream-based version.")
         return
     df = pd.DataFrame([{"Date": a["start_date"], "Sport": a["sport"],
                         "Drift": round(a["decoupling_pct"], 2)} for a in drift])

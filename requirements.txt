@@ -1,8 +1,22 @@
-garminconnect>=0.3.2
-streamlit>=1.36
-pandas>=2.2
-plotly>=5.22
-python-dotenv>=1.0
-anthropic>=0.40
-pydantic>=2.7
-psycopg[binary]>=3.1
+# Pinned to the versions this app was built and tested against.
+#
+# These were `>=` until a deploy resolved whatever was newest at build time,
+# which meant the tested environment and the deployed one could differ without
+# anything changing in the repository. On a dashboard that reads health data and
+# writes to a Garmin account, a silent dependency upgrade is not a risk worth
+# carrying for the convenience of automatic updates.
+#
+# To upgrade: raise a pin, run the suite, look at the pages, commit.
+# Compatible releases (~=) rather than exact for patch-level fixes.
+
+garminconnect==0.3.2      # unofficial API; pinned hard, its shape moves
+streamlit~=1.62.0
+pandas~=3.0.5
+plotly~=6.9.0
+pydantic~=2.13.4
+psycopg[binary]~=3.3.4
+python-dotenv~=1.2.3
+
+# Only needed when AI_BACKEND includes `anthropic`. Gemini and Groq are reached
+# over plain HTTP, so the default chain pulls nothing extra.
+anthropic~=1.0.0

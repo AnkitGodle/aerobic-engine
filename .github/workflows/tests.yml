@@ -1,0 +1,49 @@
+# Runs the suite on every push and pull request.
+#
+# This cannot block a deploy — Streamlit Community Cloud redeploys straight from
+# the branch and does not consult CI. What it does buy is knowing within a
+# minute that a commit broke something, instead of finding out by opening the
+# page. Given the tests here are mostly guardrails on training load and
+# injury-risk rules, that is worth having.
+
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Matches the version the app is developed and deployed on. Testing on
+          # a different interpreter to the one that runs in production would
+          # defeat the point.
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Tests
+        # No database, no Garmin credentials, no API keys. The suite is designed
+        # to run without them: SQLite in a temp directory, and fake backends
+        # where an LLM would be.
+        run: python -m pytest -q
+
+      - name: Dead code
+        # Non-blocking: vulture reports pydantic fields and validators as unused
+        # because it cannot see the framework calling them, so a failure here
+        # would be noise rather than signal.
+        continue-on-error: true
+        run: |
+          pip install vulture
+          python -m vulture core/ app/ scripts/ --min-confidence 80
