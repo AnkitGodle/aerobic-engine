@@ -1558,6 +1558,80 @@ def refresh_completions(
     return week, before != after
 
 
+def enrich_manual(
+    plan: dict[str, Any] | WeekPlan,
+    store: Store,
+    today: date | None = None,
+) -> tuple[WeekPlan, bool]:
+    """Fill in the parts of a hand-edited week the editor cannot ask for.
+
+    A manual plan outranks anything the rules or the model would have chosen —
+    that is the whole point of the button — but "what I typed" and "a complete
+    plan" are not the same thing. The editor offers a day, a sport, minutes and a
+    zone. It cannot offer the exercises for a leg session, the heart-rate range
+    that zone means for this athlete, or a reason for the session, so those
+    arrived empty and the pages downstream had to guess.
+
+    This fills only what is missing, and never contradicts an entry:
+
+      * strength days get the next session in the cycle, progressed from what has
+        actually been logged and reduced in a deload week — the same prescription
+        the page and the watch would have shown anyway, now recorded in the plan
+        so all three agree;
+      * endurance days get a real bpm range for their zone;
+      * a blank zone becomes Z2, which is what a base week is made of;
+      * a blank reason gets the one the rules would have given.
+
+    Nothing already entered is touched: not the day, not the sport, not the
+    minutes. Returns the plan and whether anything was filled in.
+    """
+    week = plan if isinstance(plan, WeekPlan) else WeekPlan.model_validate(plan)
+    facts = build_facts(store, today=today)
+    envelope = build_envelope(facts, store)
+    bounds = zone_bounds(store.zones(since=facts.today - timedelta(days=120)))
+    ceiling_raw = store.get_state("aerobic_ceiling_bpm")
+    ceiling = int(float(ceiling_raw)) if ceiling_raw else None
+    log_rows = store.strength_log()
+    # Where the cycle has got to, counted the same way the pages count it.
+    session_index = len({str(r["day"]) for r in log_rows})
+    intensity = 0.6 if envelope.deload else 1.0
+
+    before = week.model_dump(mode="json")
+    # Calendar order, and only days that can still be trained. Iterating in list
+    # order let a Monday that had already been done take the next session in the
+    # cycle, which pushed Wednesday one further along and prescribed a session
+    # out of sequence.
+    order = {name: i for i, name in enumerate(DAYS)}
+    today_index = order.get(DAYS[facts.today.weekday()], 0)
+    upcoming = sorted(
+        (d for d in week.week_plan
+         if d.purpose != "completed" and d.duration_min > 0
+         and order.get(d.day, 9) >= today_index),
+        key=lambda d: order.get(d.day, 9))
+    for day in upcoming:
+        if day.sport == "strength":
+            if not day.exercise_ids:
+                presc = strength.build_session(
+                    log_rows, session_index=session_index, intensity=intensity)
+                day.exercise_ids = [p.exercise_id for p in presc]
+                # Only when they left it blank: an entered number is a decision.
+                if not day.duration_min:
+                    day.duration_min = strength.session_minutes(presc)
+                session_index += 1
+            day.target_zone = "n/a"
+        elif day.target_zone in (None, "", "n/a"):
+            day.target_zone = "Z2"
+        if not (day.purpose or "").strip():
+            day.purpose = PURPOSE_FOR_ROLE.get(
+                "endurance" if day.sport != "strength" else "strength",
+                "chosen by athlete")
+        if not (day.why or "").strip():
+            day.why = "your own choice, kept as entered"
+
+    _stamp_hr_targets(week.week_plan, bounds, ceiling)
+    return week, week.model_dump(mode="json") != before
+
+
 def reapply_rules(
     store: Store,
     plan: dict[str, Any],

@@ -1180,3 +1180,93 @@ def test_a_calendar_entry_for_an_unfinished_day_stays(healthy):
     # No swim on record today, and the day is not stale.
     assert sync_mod.delete_finished_workouts(healthy, client, today=TODAY) == 0
     assert client.deleted == []
+
+
+def test_a_hand_edited_week_is_filled_in_without_being_overruled(healthy):
+    """Manual edits outrank the rules — but "what I typed" and "a complete plan"
+    are not the same thing. The editor has columns for a day, a sport, minutes
+    and a zone; it has none for the exercises in a leg session or the bpm range a
+    zone means for this athlete, so those arrived empty."""
+    from core import planner
+    from core.schemas import PlanDay, WeekPlan
+
+    # The synthetic fixture has no zone rows, and without them there is no bpm
+    # range to stamp — which is correct behaviour, so give it some.
+    activity = healthy.activities()[-1]["activity_id"]
+    healthy.upsert_zones([
+        {"activity_id": activity, "zone_number": z, "secs_in_zone": 60.0,
+         "zone_low_bpm": low}
+        for z, low in ((1, 93), (2, 112), (3, 138), (4, 149), (5, 167))
+    ])
+    typed = WeekPlan(week_plan=[
+        PlanDay(day="Sat", sport="bike", duration_min=95, target_zone="Z2",
+                purpose="", why=""),
+        PlanDay(day="Sun", sport="strength", duration_min=30, target_zone="",
+                purpose="", why=""),
+    ], source="manual")
+    filled, changed = planner.enrich_manual(typed, healthy, today=TODAY)
+    assert changed is True
+
+    ride = next(d for d in filled.week_plan if d.sport == "bike")
+    legs = next(d for d in filled.week_plan if d.sport == "strength")
+    # Nothing entered is touched.
+    assert (ride.day, ride.duration_min, ride.target_zone) == ("Sat", 95, "Z2")
+    assert (legs.day, legs.duration_min) == ("Sun", 30)
+    # What was missing is filled: a real range, real exercises, a reason.
+    assert "bpm" in ride.target_hr
+    assert legs.exercise_ids
+    assert all(e in strength.EXERCISES for e in legs.exercise_ids)
+    assert legs.target_zone == "n/a"
+    assert ride.purpose and legs.purpose and ride.why and legs.why
+
+
+def test_filling_in_is_idempotent(healthy):
+    """It runs on every page load."""
+    from core import planner
+    from core.schemas import PlanDay, WeekPlan
+
+    typed = WeekPlan(week_plan=[
+        PlanDay(day="Sun", sport="strength", duration_min=30)], source="manual")
+    once, _ = planner.enrich_manual(typed, healthy, today=TODAY)
+    twice, changed = planner.enrich_manual(once, healthy, today=TODAY)
+    assert changed is False
+    assert twice.week_plan[0].exercise_ids == once.week_plan[0].exercise_ids
+
+
+def test_a_finished_day_does_not_take_the_next_strength_session(healthy):
+    """A completed Monday used to be handed the next session in the cycle, which
+    pushed the day still to come one further along and prescribed the wrong
+    session for it."""
+    from core import planner
+    from core.schemas import PlanDay, WeekPlan
+
+    facts = planner.build_facts(healthy, today=TODAY)
+    plan = WeekPlan(week_plan=[
+        PlanDay(day="Mon", sport="strength", duration_min=28, purpose="legs"),
+        PlanDay(day="Fri", sport="strength", duration_min=28, purpose="legs"),
+    ], source="manual")
+    marked, _ = planner.refresh_completions(plan, facts, healthy)
+    filled, _ = planner.enrich_manual(marked, healthy, today=TODAY)
+
+    monday = [d for d in filled.week_plan if d.day == "Mon"]
+    friday = next(d for d in filled.week_plan if d.day == "Fri")
+    # Monday is on record as done, so it keeps its completed row and no
+    # prescription; Friday gets the next session in the cycle.
+    assert all(d.purpose == "completed" for d in monday)
+    assert friday.exercise_ids
+    logged_days = len({str(r["day"]) for r in healthy.strength_log()})
+    assert friday.exercise_ids == [
+        p.exercise_id for p in strength.build_session(
+            healthy.strength_log(), session_index=logged_days, intensity=1.0)]
+
+
+def test_a_day_already_gone_is_not_prescribed_for(healthy):
+    """There is nothing to hand someone for a Monday when it is Wednesday."""
+    from core import planner
+    from core.schemas import PlanDay, WeekPlan
+
+    plan = WeekPlan(week_plan=[
+        PlanDay(day="Tue", sport="strength", duration_min=28, purpose="legs"),
+    ], source="manual")
+    filled, _ = planner.enrich_manual(plan, healthy, today=TODAY)  # a Wednesday
+    assert filled.week_plan[0].exercise_ids == []

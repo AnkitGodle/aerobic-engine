@@ -706,9 +706,14 @@ def strength_howto_block(exercise_ids: list[str], log_rows: list[dict],
     presc = {x.exercise_id: x for x in prescriptions}
     if not ids:
         return
-    ui.section("How to do today's session",
-               "Slow and controlled beats heavy. Stop a set if something sharp "
-               "appears — soreness is fine, pain is not.")
+    # The session's own length, which is not always the plan's nominal figure: a
+    # deload trims the accessory work, and a hand-edited plan can carry any
+    # number at all. Saying both beats silently contradicting the week strip.
+    minutes = strength.session_minutes(prescriptions)
+    ui.section(f"How to do today's session · {minutes} min",
+               ("Reduced for a deload week. " if intensity < 1 else "")
+               + "Slow and controlled beats heavy. Stop a set if something "
+                 "sharp appears — soreness is fine, pain is not.")
     # Exactly what is listed below, in this order, at these numbers.
     send_to_watch(prescriptions, day or date.today(), label)
     for i, eid in enumerate(ids):
@@ -2136,6 +2141,11 @@ def page_plan(data: dict, today: date) -> None:
         mine = WeekPlan(week_plan=completed + days, source="manual",
                         flags=["Your own plan — the rules were not applied."])
         with Store(db_path()) as s:
+            # Your rows win, but a plan needs more than the editor can ask for:
+            # the exercises for a leg session, the bpm range a zone means for
+            # you, a reason for each session. Filled in here so the plan, the
+            # page and the watch all carry the same thing.
+            mine, _ = planner.enrich_manual(mine, s, today=today)
             s.save_plan(week_start_of(today), mine.model_dump(mode="json"), "manual")
         st.session_state["plan"] = mine.model_dump(mode="json")
         refresh()
@@ -2471,11 +2481,19 @@ def _conformed_plan(stamp: float, iso_today: str, raw: str,
             today = date.fromisoformat(iso_today)
             fixed, changed = planner.reapply_rules(
                 s, plan, today=today, only_sports=list(sports) or None)
-            # Always, whatever the plan's source: a hand-edited week is exempt
-            # from being re-shaped by the rules, but not from the fact that
-            # Monday's session already happened.
+            # Completions first, whatever the plan's source: a hand-edited week
+            # is exempt from being re-shaped by the rules, but not from the fact
+            # that Monday's session already happened. It also has to come before
+            # the fill-in below, so a finished day is not handed the next
+            # session in the strength cycle.
             facts = planner.build_facts(s, today=today)
             marked, moved = planner.refresh_completions(fixed, facts, s)
+            if marked.source == "manual":
+                # Not re-shaping — filling in. A hand-edited week keeps its days,
+                # sports and minutes; what it gains is the detail the editor has
+                # no column for.
+                marked, filled = planner.enrich_manual(marked, s, today=today)
+                moved = moved or filled
             return marked.model_dump(mode="json"), changed or moved
         return with_store(conform)
     except Exception as exc:  # noqa: BLE001 - showing the saved plan beats an error
