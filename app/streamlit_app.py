@@ -29,6 +29,15 @@ import plotly.graph_objects as go  # noqa: E402
 import streamlit as st  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
 
+# Before the first `core` import, and for a reason worth stating: a hosted
+# container can pull a new revision, re-execute this script, and still hold the
+# previous revision's `core` modules — so an import of a function that exists in
+# the checked-out source fails and the app is down until someone reboots it. See
+# app/freshness.py.
+from app.freshness import purge_stale_modules, stamp_modules  # noqa: E402
+
+purge_stale_modules(log=logging.getLogger("aerobic_engine.ui").warning)
+
 import app.ui as ui  # noqa: E402
 from core import ai, insights, planner, strength, sync as sync_mod  # noqa: E402
 from core.analysis import (  # noqa: E402
@@ -68,6 +77,11 @@ from core.garmin_client import GarminClient  # noqa: E402
 from core.garmin_guard import GarminBlocked  # noqa: E402
 from core.schemas import DAYS, ENDURANCE_SPORTS, SPORTS, Checkin, PlanDay, WeekPlan  # noqa: E402
 from core.store import Store, default_db, is_postgres, week_start_of  # noqa: E402
+
+# Stamped here, with every app module loaded and agreeing with the files it came
+# from. That is what lets the guard above tell "changed since I imported it" from
+# "first time I have looked at it".
+stamp_modules()
 
 try:  # psycopg is only installed where Postgres is used
     from psycopg import InterfaceError, OperationalError

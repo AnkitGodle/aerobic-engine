@@ -281,6 +281,16 @@ error, found only by looking at actual payloads:
   history. Not a parsing bug — the trends degrade to None and the planner falls
   back to its own load maths.
 
+- **A hosted container can outlive a deploy.** Three times, a commit that added a
+  function to a `core` module and imported it at the top of the app brought the
+  hosted dashboard down with `ImportError` on a name that was plainly in the
+  checked-out source: Streamlit Cloud had pulled the new revision and re-executed
+  the app script while `sys.modules` still held the previous revision's modules.
+  `app/freshness.py` stamps every app module's source mtime right after import and
+  drops the lot on the next run if a file has changed since, so the imports that
+  follow re-execute from disk. A cold start pays ten `stat` calls and purges
+  nothing.
+
 - **Tests over the guardrails, not just the maths.** `tests/test_guardrails.py`
   feeds `enforce()` a deliberately reckless plan (Z5 intervals during a deload,
   invented plyometrics, three strength days, no rest day, 1485 minutes) and asserts
