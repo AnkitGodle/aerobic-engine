@@ -581,7 +581,8 @@ def send_to_watch(prescriptions: list, day: date, label: str) -> None:
         st.success(
             f"Sent. On the watch: START → Strength → it should offer “{label}”. "
             f"Every set arrives already named, so nothing needs assigning "
-            f"afterwards.")
+            f"afterwards. Once you have logged it, the next sync takes it back "
+            f"off the watch so tomorrow's session is the one on offer.")
         refresh()
     except GarminBlocked as exc:
         st.warning(str(exc))
@@ -642,7 +643,9 @@ def send_session_to_watch(day_plan: dict, day: date) -> None:
             f"Sent. On the watch: START → {sport.title()} → “{label}”. "
             + (f"It will hold you to {band[0]}-{band[1]} bpm and buzz if you "
                f"drift out." if band else
-               "No heart-rate range was set for this session, so it is timed only."))
+               "No heart-rate range was set for this session, so it is timed "
+               "only.")
+            + " It is removed from the watch once the session is logged.")
         refresh()
     except GarminBlocked as exc:
         st.warning(str(exc))
@@ -653,18 +656,35 @@ def send_session_to_watch(day_plan: dict, day: date) -> None:
 
 
 def strength_howto_block(exercise_ids: list[str], log_rows: list[dict],
-                         session_index: int = 0) -> None:
-    """The full session, with instructions, for the day it is scheduled."""
-    presc = {x.exercise_id: x for x in
-             strength.build_session(log_rows, session_index=session_index)}
-    ids = [e for e in exercise_ids if e in strength.EXERCISES] or list(presc)
+                         session_index: int = 0, intensity: float = 1.0,
+                         day: date | None = None) -> None:
+    """The full session, with instructions, for the day it is scheduled.
+
+    The prescription comes from the plan's own exercise list when it has one.
+    It used to display the plan's exercises and send the template's, which is
+    how a session on the watch could contain exercises that were never on the
+    page — and at the template's volume rather than the plan's.
+    """
+    ids = [e for e in exercise_ids if e in strength.EXERCISES]
+    if ids:
+        prescriptions = [strength.next_prescription(e, log_rows, intensity)
+                         for e in ids]
+        label = "Legs · Aerobic Engine"
+    else:
+        # No list on the plan — fall back to where the cycle has got to.
+        prescriptions = strength.build_session(log_rows,
+                                               session_index=session_index,
+                                               intensity=intensity)
+        ids = [x.exercise_id for x in prescriptions]
+        label = f"Legs {chr(65 + session_index % 3)} · Aerobic Engine"
+    presc = {x.exercise_id: x for x in prescriptions}
     if not ids:
         return
     ui.section("How to do today's session",
                "Slow and controlled beats heavy. Stop a set if something sharp "
                "appears — soreness is fine, pain is not.")
-    send_to_watch(list(presc.values()), date.today(),
-                  f"Legs {chr(65 + session_index % 3)} · Aerobic Engine")
+    # Exactly what is listed below, in this order, at these numbers.
+    send_to_watch(prescriptions, day or date.today(), label)
     for i, eid in enumerate(ids):
         with st.container(border=True):
             exercise_howto(strength.EXERCISES[eid], presc.get(eid))
@@ -795,7 +815,11 @@ def page_today(data: dict, today: date) -> None:
     if legs_today:
         strength_howto_block(
             list(legs_today.get("exercise_ids") or []), data["strength"],
-            session_index=len({str(r["day"]) for r in data["strength"]}))
+            session_index=len({str(r["day"]) for r in data["strength"]}),
+            # The same reduction the planner applies, so the page, the watch and
+            # the plan agree on the numbers in a deload week.
+            intensity=0.6 if env.deload else 1.0,
+            day=focus_day)
 
 
 
@@ -2051,12 +2075,20 @@ def page_plan(data: dict, today: date) -> None:
     if b[0].button("Save my plan", type="primary", width="stretch",
                    disabled=not unlocked) and writes_allowed():
         days, rejected = [], []
+        # The editor has no column for exercises, so a strength row would come
+        # back with an empty list and the session would silently revert to
+        # whatever the template said. Carried across from the stored plan by day.
+        legs_before = {d["day"]: list(d.get("exercise_ids") or [])
+                       for d in stored.get("week_plan", [])
+                       if d.get("sport") == "strength"}
         for n, r in edited.iterrows():
             try:
                 days.append(PlanDay(
                     day=str(r["Day"]), sport=str(r["Sport"]),
                     duration_min=max(0, min(400, int(r["Minutes"] or 0))),
                     target_zone=str(r["Zone"] or "Z2"),
+                    exercise_ids=(legs_before.get(str(r["Day"]), [])
+                                  if str(r["Sport"]) == "strength" else []),
                     purpose="chosen by athlete", why=str(r["Note"] or "")[:200]))
             except Exception as exc:  # noqa: BLE001
                 rejected.append(f"row {int(n) + 1}: {type(exc).__name__}")
@@ -2675,7 +2707,8 @@ def page_about(data: dict, today: date) -> None:
         ("3. You train", "the watch guides",
          "it buzzes if you drift out of the range"),
         ("4. It reads what happened", "on Refresh",
-         "and rebuilds the rest of the week"),
+         "and rebuilds the rest of the week, and clears the done session off "
+         "the watch"),
         ("5. You ask it anything", "Ask the coach",
          "answered from your own numbers, on the Today page"),
     ])
@@ -3034,6 +3067,63 @@ def log_sessions(data: dict, today: date) -> None:
     lap_block(aid, data.get("laps") or [], act["sport"])
 
 
+def assign_sets_block(unmapped: list[dict], unlocked: bool) -> None:
+    """Let the athlete name the sets the watch could not.
+
+    The watch records what it recognises. A pushed session now names every
+    exercise, but it still drops a name occasionally — a 30-second hold comes
+    back as a bare SQUAT — and a session pushed before that fix has none at all.
+    Left alone those sets are dropped from the log, so the progression never sees
+    the work. This is the one place a guess is acceptable, because the person
+    making it was there.
+    """
+    groups: dict[tuple[str, str, str], list[dict]] = {}
+    for row in unmapped:
+        key = (str(row.get("activity_id")),
+               str(row.get("garmin_category") or "—"),
+               str(row.get("garmin_name") or ""))
+        groups.setdefault(key, []).append(row)
+
+    with st.expander(f"{len(unmapped)} recorded set(s) the watch could not name"):
+        st.caption("Assigning them adds the work to your log, so the weights "
+                   "progress from what you actually did.")
+        names = {eid: ex.name for eid, ex in strength.EXERCISES.items()}
+        for (activity_id, category, name), rows in sorted(groups.items()):
+            reps = [r.get("reps") or 0 for r in rows]
+            secs = [round(r.get("duration_s") or 0) for r in rows]
+            label = f"{category}{' · ' + name if name else ''}"
+            c = st.columns([2, 2, 1], vertical_alignment="bottom")
+            c[0].markdown(
+                f"**{label}**  \n<span style='opacity:.6;font-size:.8em'>"
+                f"{len(rows)} set(s) · "
+                f"{'reps ' + '/'.join(str(int(x)) for x in reps) if any(reps) else ''}"
+                f"{' · ' if any(reps) else ''}"
+                f"{'holds ' + '/'.join(f'{x}s' for x in secs)}</span>",
+                unsafe_allow_html=True)
+            pick = c[1].selectbox(
+                "Exercise", ["—", *names], format_func=lambda k: names.get(k, k),
+                key=f"assign_{activity_id}_{category}_{name}",
+                label_visibility="collapsed")
+            if c[2].button("Assign", key=f"do_{activity_id}_{category}_{name}",
+                           disabled=not unlocked or pick == "—"):
+                if writes_allowed() and pick != "—":
+                    indices = [r["set_index"] for r in rows]
+                    with Store(db_path()) as store:
+                        store.assign_exercise_sets(activity_id, pick, indices)
+                        # Rebuild this activity's log rows from the sets, so the
+                        # newly named work reaches the progression.
+                        fresh = store.exercise_sets(activity_id)
+                        day = store.activity_day(activity_id)
+                        store.delete_strength_log(activity_id=activity_id)
+                        rebuilt = strength.sets_to_log_rows(day, activity_id, fresh)
+                        if rebuilt:
+                            store.log_strength(rebuilt)
+                    st.session_state["strength_flash"] = (
+                        f"Assigned {len(indices)} set(s) to {names[pick]}.")
+                    refresh()
+                    st.rerun()
+
+
 def log_strength(data: dict, today: date) -> None:
     unlocked = writes_allowed()
     log_rows = data["strength"]
@@ -3042,12 +3132,12 @@ def log_strength(data: dict, today: date) -> None:
     insight_banner("Strength", data, today)
     if strength.needs_physio_note(log_rows):
         st.warning(strength.PHYSIO_NOTE)
-    unmapped = [s for s in data["sets"] if not s.get("exercise_id")]
+    # Rests excluded: the watch records the gap after every step as a set of its
+    # own, and counting those made a clean session read as a dozen strays.
+    unmapped = [s for s in data["sets"]
+                if not s.get("exercise_id") and not s.get("is_rest")]
     if unmapped:
-        st.caption(f"{len(unmapped)} watch-recorded set(s) sit outside this exercise "
-                   f"list and were not logged: " + ", ".join(sorted(
-                       {s.get("garmin_name") or s.get("garmin_category") or "?"
-                        for s in unmapped})))
+        assign_sets_block(unmapped, unlocked)
     if not unlocked:
         st.caption("🔒 Read-only. Enter your PIN in the sidebar to log a session.")
 
@@ -3182,14 +3272,27 @@ def sidebar(data: dict) -> None:
         # No logo or app name here: the top bar carries both, and a third copy
         # in the sidebar is just noise.
         st.subheader(data["name"] or "Athlete", anchor=False)
+        # Which store is in use, always visible. Neon is the real database and
+        # the SQLite file is a local fallback, and the two cost a whole evening
+        # once already: the CLI wrote to the file while the dashboard read Neon
+        # and nothing errored, the numbers just disagreed.
+        on_neon = is_postgres(db_path())
         ui.rows([
             ("Watch", "Forerunner 265"),
             ("Phase", "Base"),
+            ("Database", "Neon Postgres" if on_neon else "local file",
+             "" if on_neon else "not the hosted store"),
             ("Last synced",
              fmt_stamp(data["last_sync"])),
             ("On record", f"{data['counts']['activities']} activities",
              f"{data['counts']['daily_wellness']} days"),
         ])
+        if not on_neon:
+            st.warning(
+                f"Reading **{db_path()}**, not Neon. Anything saved here — a "
+                f"plan, a rule, a logged session — stays on this machine and "
+                f"will not appear on the hosted app. Set DATABASE_URL to point "
+                f"at Neon.")
         st.divider()
         unlock_control()
         sync_control()

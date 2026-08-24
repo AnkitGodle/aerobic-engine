@@ -63,35 +63,60 @@ KG = {"unitId": 8, "unitKey": "kilogram", "factor": 1000.0}
 # watch displays. Nothing here is a near-miss substitution: labelling a reverse
 # lunge as WALKING_LUNGE would be a name Garmin accepts and a lie about what to
 # do.
+# Names this account actually keeps. Probed by uploading a workout, reading it
+# back and comparing: an unknown name is accepted, silently blanked, and the
+# watch then shows the bare category instead. That is how a tibialis raise came
+# out as "Calf raise" and a wall sit as "Squat" — the right exercise under a
+# label for a different muscle, which is worse than no label at all.
+#
+# Round-tripped 2026-08-24. Re-probe with the same method if Garmin's catalogue
+# moves; do not add a name here on the strength of it looking plausible.
 VERIFIED_NAMES = frozenset({
     "STANDING_CALF_RAISE", "SEATED_CALF_RAISE", "WEIGHTED_STANDING_CALF_RAISE",
-    "GOBLET_SQUAT", "STEP_UP", "WALKING_LUNGE", "ROMANIAN_DEADLIFT",
-    "STRAIGHT_LEG_DEADLIFT", "SIDE_PLANK", "LEG_CURL", "SIDE_LYING_LEG_RAISE",
+    "SINGLE_LEG_STANDING_CALF_RAISE", "SINGLE_LEG_BENT_KNEE_CALF_RAISE",
+    "GOBLET_SQUAT", "STEP_UP", "BARBELL_STEP_UP", "BOX_STEP_SQUAT",
+    "DUMBBELL_SPLIT_SQUAT", "BODY_WEIGHT_WALL_SQUAT", "BRACED_SQUAT",
+    "WALKING_LUNGE", "BARBELL_REVERSE_LUNGE", "REVERSE_LUNGE_WITH_REACH_BACK",
+    "ROMANIAN_DEADLIFT", "STRAIGHT_LEG_DEADLIFT",
+    "SINGLE_LEG_ROMANIAN_DEADLIFT_WITH_DUMBBELL",
+    "LEG_CURL", "SLIDING_LEG_CURL", "SINGLE_LEG_SLIDING_LEG_CURL",
+    "SPLIT_STANCE_EXTENSION",
+    "HIP_RAISE", "WEIGHTED_HIP_RAISE", "SINGLE_LEG_HIP_RAISE",
+    "SIDE_PLANK", "SIDE_PLANK_WITH_LEG_LIFT", "SIDE_PLANK_LIFT",
+    "SIDE_LYING_LEG_RAISE", "LATERAL_WALKS_WITH_BAND_AT_ANKLES",
+    "STANDING_HIP_ABDUCTION", "ANKLE_DORSIFLEXION_WITH_BAND",
 })
 
+# Every library exercise now has a name the watch will display. Where Garmin has
+# no entry for the exact movement, the closest verified name is used and the
+# mismatch is only ever the implement — "barbell reverse lunge" while you hold
+# dumbbells reads oddly but tells you which exercise you are doing, which is the
+# job. A name that points at the wrong muscle is never used.
 GARMIN_TARGET: dict[str, tuple[str, str | None]] = {
     "calf_raise_straight": ("CALF_RAISE", "STANDING_CALF_RAISE"),
     "calf_raise_bent": ("CALF_RAISE", "SEATED_CALF_RAISE"),
-    "calf_raise_single_leg": ("CALF_RAISE", None),
-    "single_leg_calf_hold": ("CALF_RAISE", None),
-    "tib_raise": ("CALF_RAISE", None),
-    "split_squat": ("SQUAT", None),
-    "reverse_lunge": ("LUNGE", None),
+    "calf_raise_single_leg": ("CALF_RAISE", "SINGLE_LEG_STANDING_CALF_RAISE"),
+    "single_leg_calf_hold": ("CALF_RAISE", "SINGLE_LEG_STANDING_CALF_RAISE"),
+    # Under WARM_UP because that is the only category Garmin files ankle
+    # dorsiflexion under. CALF_RAISE was the opposite muscle group.
+    "tib_raise": ("WARM_UP", "ANKLE_DORSIFLEXION_WITH_BAND"),
+    "split_squat": ("SQUAT", "DUMBBELL_SPLIT_SQUAT"),
+    "reverse_lunge": ("LUNGE", "BARBELL_REVERSE_LUNGE"),
     "step_up": ("SQUAT", "STEP_UP"),
-    "step_down": ("SQUAT", None),
+    "step_down": ("SQUAT", "BOX_STEP_SQUAT"),
     "goblet_squat": ("SQUAT", "GOBLET_SQUAT"),
-    "wall_sit": ("SQUAT", None),
-    "spanish_squat": ("SQUAT", None),
-    "terminal_knee_extension": ("SQUAT", None),
+    "wall_sit": ("SQUAT", "BODY_WEIGHT_WALL_SQUAT"),
+    "spanish_squat": ("SQUAT", "BRACED_SQUAT"),
+    "terminal_knee_extension": ("LEG_CURL", "SPLIT_STANCE_EXTENSION"),
     "rdl": ("DEADLIFT", "ROMANIAN_DEADLIFT"),
-    "single_leg_rdl": ("DEADLIFT", None),
-    "nordic_curl_assisted": ("LEG_CURL", "LEG_CURL"),
-    "glute_bridge": ("HIP_RAISE", None),
-    "hip_thrust": ("HIP_RAISE", None),
+    "single_leg_rdl": ("DEADLIFT", "SINGLE_LEG_ROMANIAN_DEADLIFT_WITH_DUMBBELL"),
+    "nordic_curl_assisted": ("LEG_CURL", "SLIDING_LEG_CURL"),
+    "glute_bridge": ("HIP_RAISE", "HIP_RAISE"),
+    "hip_thrust": ("HIP_RAISE", "WEIGHTED_HIP_RAISE"),
     "side_lying_abduction": ("HIP_STABILITY", "SIDE_LYING_LEG_RAISE"),
-    "band_monster_walk": ("HIP_STABILITY", None),
+    "band_monster_walk": ("HIP_STABILITY", "LATERAL_WALKS_WITH_BAND_AT_ANKLES"),
     "side_plank_hip_lift": ("PLANK", "SIDE_PLANK"),
-    "copenhagen_plank": ("PLANK", None),
+    "copenhagen_plank": ("PLANK", "SIDE_PLANK_WITH_LEG_LIFT"),
 }
 
 # Categories the account accepted. An unlisted one is an HTTP 400, not a
@@ -99,7 +124,7 @@ GARMIN_TARGET: dict[str, tuple[str, str | None]] = {
 VALID_CATEGORIES = frozenset({
     "SQUAT", "DEADLIFT", "CALF_RAISE", "LUNGE", "HIP_RAISE", "PLANK", "CURL",
     "LEG_CURL", "HIP_STABILITY", "CORE", "TOTAL_BODY", "OLYMPIC_LIFT",
-    "BENCH_PRESS", "ROW", "CARRY",
+    "BENCH_PRESS", "ROW", "CARRY", "WARM_UP",
 })
 
 REST_SECONDS = 60

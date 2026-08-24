@@ -338,6 +338,13 @@ COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("daily_wellness", "battery_charged", "REAL"),
     ("daily_wellness", "battery_drained", "REAL"),
     ("weekly_targets", "enabled", "INTEGER DEFAULT 1"),
+    # The watch logs the rest between sets as a set of its own: active, no
+    # category, no reps. They are stored (the raw record is worth keeping) but
+    # marked, so "12 sets outside the library" does not mostly mean "12 rests".
+    ("exercise_sets", "is_rest", "INTEGER DEFAULT 0"),
+    # Set when the athlete names a set the watch could not. Nothing derived is
+    # allowed to overwrite it: they were there, the mapping table was not.
+    ("exercise_sets", "assigned_by_hand", "INTEGER DEFAULT 0"),
     # Daily context that was being left on the table. Stress and respiration are
     # recovery signals in their own right; steps and intensity minutes are the
     # load that happens outside a logged session and still has to be recovered
@@ -602,6 +609,22 @@ class Store:
                 (key, value),
             )
 
+    def states_with_prefix(self, prefix: str) -> dict[str, str]:
+        """Every state row whose key starts with `prefix`.
+
+        Needed because the pushed-workout bookkeeping is keyed by date and sport
+        — `workout_pushed_run_2026-08-24` — so there is no fixed list of keys to
+        ask for.
+        """
+        rows = self.query(
+            "SELECT key, value FROM sync_state WHERE key LIKE ? ORDER BY key",
+            [f"{prefix}%"])
+        return {r["key"]: r["value"] for r in rows}
+
+    def delete_state(self, key: str) -> None:
+        with self.tx():
+            self.execute("DELETE FROM sync_state WHERE key = ?", (key,))
+
     # -- activities -----------------------------------------------------
     def upsert_activities(self, rows: Iterable[dict[str, Any]]) -> int:
         return self._upsert("activities", rows, "activity_id")
@@ -808,22 +831,63 @@ class Store:
 
     # -- exercise sets (watch strength mode) -----------------------------
     def replace_exercise_sets(self, activity_id: str, rows: Sequence[dict[str, Any]]) -> int:
+        """Rewrite one activity's recorded sets, keeping any hand-assigned ones.
+
+        The rewrite is how both a re-import and a re-map work, and either would
+        otherwise silently undo the athlete's own assignment — which is the one
+        piece of information in this table that cannot be derived again.
+        """
+        manual = {
+            int(r["set_index"]): r["exercise_id"]
+            for r in self.query(
+                "SELECT set_index, exercise_id FROM exercise_sets "
+                "WHERE activity_id = ? AND COALESCE(assigned_by_hand, 0) = 1",
+                [str(activity_id)])
+            if r.get("exercise_id")
+        }
+        rows = [dict(r) for r in rows]
+        for i, r in enumerate(rows):
+            if i in manual:
+                r["exercise_id"] = manual[i]
+                r["assigned_by_hand"] = 1
         with self.tx():
             self.execute("DELETE FROM exercise_sets WHERE activity_id = ?", (activity_id,))
             self.executemany(
                 "INSERT INTO exercise_sets"
                 "(activity_id, set_index, garmin_category, garmin_name, exercise_id,"
-                " reps, duration_s, load_kg) VALUES (?,?,?,?,?,?,?,?)",
+                " reps, duration_s, load_kg, is_rest, assigned_by_hand)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?)",
                 [
                     (
                         activity_id, i, r.get("garmin_category"), r.get("garmin_name"),
                         r.get("exercise_id"), r.get("reps"), r.get("duration_s"),
-                        r.get("load_kg"),
+                        r.get("load_kg"), int(r.get("is_rest") or 0),
+                        int(r.get("assigned_by_hand") or 0),
                     )
                     for i, r in enumerate(rows)
                 ],
             )
         return len(rows)
+
+    def assign_exercise_sets(self, activity_id: str, exercise_id: str,
+                             indices: Sequence[int]) -> int:
+        """Point specific recorded sets at a library exercise.
+
+        For the sets the watch recorded without a usable name — a hold it could
+        not identify, or a session pushed before every exercise carried one.
+        Assigning them by hand is better than guessing in code: this is the
+        athlete saying what they actually did.
+        """
+        indices = [int(i) for i in indices]
+        if not indices:
+            return 0
+        marks = ",".join("?" for _ in indices)
+        with self.tx():
+            cur = self.execute(
+                f"UPDATE exercise_sets SET exercise_id = ?, assigned_by_hand = 1 "
+                f"WHERE activity_id = ? AND set_index IN ({marks})",
+                [exercise_id, str(activity_id), *indices])
+        return int(getattr(cur, "rowcount", 0) or 0)
 
     def exercise_sets(self, activity_id: str | None = None) -> list[dict[str, Any]]:
         sql = "SELECT * FROM exercise_sets"
@@ -832,6 +896,23 @@ class Store:
             sql += " WHERE activity_id = ?"
             params.append(activity_id)
         return self.query(sql + " ORDER BY activity_id, set_index", params)
+
+    def activity_day(self, activity_id: str) -> str | None:
+        row = self.execute("SELECT start_date FROM activities WHERE activity_id = ?",
+                           (str(activity_id),)).fetchone()
+        return row["start_date"] if row else None
+
+    def delete_strength_log(self, activity_id: str) -> int:
+        """Remove the log rows one activity produced.
+
+        Scoped to the activity on purpose: a session the athlete typed in by hand
+        has no activity_id, and must survive a re-import of the watch's own sets.
+        """
+        with self.tx():
+            cur = self.execute(
+                "DELETE FROM strength_log WHERE activity_id = ?",
+                (str(activity_id),))
+        return int(getattr(cur, "rowcount", 0) or 0)
 
     def strength_activities_missing_sets(self) -> list[dict[str, Any]]:
         return self.query(

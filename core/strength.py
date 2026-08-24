@@ -13,7 +13,7 @@ Two hard rules live here, and neither is negotiable by the AI layer:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -710,9 +710,36 @@ GARMIN_EXERCISE_MAP: dict[str, str] = {
     "WEIGHTED_SEATED_CALF_RAISE": "calf_raise_bent",
     "SINGLE_LEG_CALF_RAISE": "calf_raise_single_leg",
     "SINGLE_LEG_STANDING_CALF_RAISE": "calf_raise_single_leg",
+    "SINGLE_LEG_BENT_KNEE_CALF_RAISE": "calf_raise_bent",
+    # Garmin files ankle dorsiflexion under WARM_UP; it is the only name it has
+    # for the front of the shin, and it is what this app sends for a tibialis
+    # raise. Without this line the set came back as a calf raise — the muscle a
+    # tibialis raise exists to balance.
+    "ANKLE_DORSIFLEXION_WITH_BAND": "tib_raise",
+    "ANKLE_DORSIFLEXION": "tib_raise",
     # single-leg squat patterns
     "SPLIT_SQUAT": "split_squat",
+    "DUMBBELL_SPLIT_SQUAT": "split_squat",
     "BULGARIAN_SPLIT_SQUAT": "split_squat",
+    # The rest of what this app now sends, so a session comes back as the
+    # exercises it was pushed as. Every one of these was round-tripped against
+    # the account; see core/garmin_workout.GARMIN_TARGET.
+    "BODY_WEIGHT_WALL_SQUAT": "wall_sit",
+    "BRACED_SQUAT": "spanish_squat",
+    "BOX_STEP_SQUAT": "step_down",
+    "BARBELL_STEP_UP": "step_up",
+    "BARBELL_REVERSE_LUNGE": "reverse_lunge",
+    "REVERSE_LUNGE_WITH_REACH_BACK": "reverse_lunge",
+    "SINGLE_LEG_ROMANIAN_DEADLIFT_WITH_DUMBBELL": "single_leg_rdl",
+    "SPLIT_STANCE_EXTENSION": "terminal_knee_extension",
+    "SLIDING_LEG_CURL": "nordic_curl_assisted",
+    "SINGLE_LEG_SLIDING_LEG_CURL": "nordic_curl_assisted",
+    "WEIGHTED_HIP_RAISE": "hip_thrust",
+    "SINGLE_LEG_HIP_RAISE": "glute_bridge",
+    "LATERAL_WALKS_WITH_BAND_AT_ANKLES": "band_monster_walk",
+    "STANDING_HIP_ABDUCTION": "side_lying_abduction",
+    "SIDE_PLANK_WITH_LEG_LIFT": "copenhagen_plank",
+    "SIDE_PLANK_LIFT": "copenhagen_plank",
     "WEIGHTED_SPLIT_SQUAT": "split_squat",
     "REVERSE_LUNGE": "reverse_lunge",
     "LUNGE": "reverse_lunge",
@@ -815,7 +842,6 @@ def _substring_match(text: str) -> str | None:
         ("HAMSTRING", "nordic_curl_assisted"),
         ("KNEE_EXTENSION", "terminal_knee_extension"),
         ("GOBLET", "goblet_squat"),
-        ("SQUAT", "goblet_squat"),
     ):
         if needle in text:
             return exercise_id
@@ -826,7 +852,55 @@ def _norm(raw: object) -> str:
     return str(raw or "").strip().upper().replace(" ", "_").replace("-", "_")
 
 
-def map_garmin_exercise(category: str | None, name: str | None) -> str | None:
+def _unambiguous_categories() -> dict[str, str]:
+    """Categories where the library has exactly one exercise, so a bare category
+    identifies it.
+
+    Derived rather than listed, so adding an exercise cannot leave a stale
+    mapping behind. The ambiguous ones deliberately map to nothing: a bare SQUAT
+    used to become a goblet squat, which is how a pushed wall sit and split squat
+    both came back logged as goblet squats and the progression started adding
+    weight to an exercise that was never done.
+    """
+    from core.garmin_workout import GARMIN_TARGET
+
+    per_category: dict[str, set[str]] = {}
+    for exercise_id, (category, _name) in GARMIN_TARGET.items():
+        per_category.setdefault(category, set()).add(exercise_id)
+    return {c: next(iter(ids)) for c, ids in per_category.items()
+            if len(ids) == 1}
+
+
+# A set with no reps and at least this long is a hold, not a rep-counted set.
+HOLD_SECONDS_MIN = 20.0
+
+# Where Garmin has one name for both a rep exercise and its isometric version,
+# the shape of the set tells them apart: {name: (rep version, hold version)}.
+HOLD_VARIANTS: dict[str, tuple[str, str]] = {
+    "SINGLE_LEG_STANDING_CALF_RAISE": ("calf_raise_single_leg",
+                                       "single_leg_calf_hold"),
+    "SINGLE_LEG_CALF_RAISE": ("calf_raise_single_leg", "single_leg_calf_hold"),
+}
+
+
+def looks_like_rest(row: Mapping[str, Any]) -> bool:
+    """A recorded "set" that is really the gap between two.
+
+    The watch emits one of these after every step of a pushed workout: no
+    category, no exercise name, no reps, just a duration. They are not work, and
+    counting them as unidentified sets made a clean session look like a mess.
+    """
+    category = _norm(row.get("garmin_category"))
+    if _norm(row.get("garmin_name")):
+        return False
+    if category not in ("", "UNKNOWN", "REST"):
+        return False
+    return not (row.get("reps") or 0)
+
+
+def map_garmin_exercise(category: str | None, name: str | None,
+                        reps: float | None = None,
+                        duration_s: float | None = None) -> str | None:
     """Best-effort match from Garmin's taxonomy into the library.
 
     Precedence is specific-before-generic, in four passes: the exact exercise
@@ -843,15 +917,34 @@ def map_garmin_exercise(category: str | None, name: str | None) -> str | None:
     would corrupt the progression for whatever it was mistaken for.
     """
     nkey, ckey = _norm(name), _norm(category)
+    # Garmin has one single-leg calf name and this library has two exercises
+    # using it — the raise and the isometric hold. Nothing in the name separates
+    # them, but the set does: a hold records seconds and no reps.
+    variants = HOLD_VARIANTS.get(nkey)
+    if variants:
+        held = (not reps) and (duration_s or 0) >= HOLD_SECONDS_MIN
+        return variants[1] if held else variants[0]
     if nkey and nkey in GARMIN_EXERCISE_MAP:
         return GARMIN_EXERCISE_MAP[nkey]
     if nkey:
         hit = _substring_match(nkey)
         if hit:
             return hit
-    if ckey and ckey in GARMIN_EXERCISE_MAP:
-        return GARMIN_EXERCISE_MAP[ckey]
-    return _substring_match(f"{nkey}_{ckey}")
+    if ckey:
+        # A category on its own only identifies an exercise when the library has
+        # one in that category. Otherwise it is a guess, and a wrong guess feeds
+        # the progression for an exercise that was never done.
+        solo = _unambiguous_categories().get(ckey)
+        if solo:
+            return solo
+    hit = _substring_match(f"{nkey}_{ckey}")
+    # The same rule applies to the last pass: it must not resolve a bare
+    # ambiguous category through a substring either.
+    if hit and not nkey and ckey not in _unambiguous_categories():
+        generic = _substring_match(ckey)
+        if generic == hit:
+            return None
+    return hit
 
 
 def sets_to_log_rows(

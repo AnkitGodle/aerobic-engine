@@ -8,6 +8,7 @@ reckless plan and the output is checked against every constraint.
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 
 import pytest
 
@@ -605,19 +606,33 @@ def test_isometric_holds_go_as_time_not_reps():
     assert all(s["endConditionValue"] > 0 for s in timed)
 
 
-def test_an_exercise_without_a_trusted_garmin_name_still_carries_it():
-    """Category-only entries must put the real name in the description, or the
-    watch shows a bare category and the athlete cannot tell the sets apart."""
+def test_every_library_exercise_reaches_the_watch_by_name():
+    """It used to be that anything Garmin had no name for was sent as a bare
+    category, and the watch labelled a tibialis raise "Calf raise" and a wall sit
+    "Squat" — the right exercise under a different muscle's name. Every id now
+    maps to a name that was round-tripped against the account, and the real name
+    still goes in the description."""
     from core import garmin_workout
 
-    category_only = [eid for eid, (_, name)
-                     in garmin_workout.GARMIN_TARGET.items() if name is None]
-    assert category_only, "the conservative mapping should have some of these"
-    for eid in category_only:
+    for eid, exercise in strength.EXERCISES.items():
+        category, name = garmin_workout.GARMIN_TARGET[eid]
+        assert category in garmin_workout.VALID_CATEGORIES, (eid, category)
+        assert name, f"{eid} would show as a bare {category}"
+        assert name in garmin_workout.VERIFIED_NAMES, (eid, name)
         presc = strength.next_prescription(eid, [], 1.0)
-        step = garmin_workout._step(1, presc, strength.EXERCISES[eid])
-        assert "exerciseName" not in step
-        assert strength.EXERCISES[eid].name in step["description"]
+        step = garmin_workout._step(1, presc, exercise)
+        assert step["exerciseName"] == name
+        assert exercise.name in step["description"]
+
+
+def test_no_exercise_is_filed_under_the_wrong_muscle():
+    """The specific bug: a tibialis raise is a shin exercise and was going up as
+    a calf raise, which is the muscle it exists to balance."""
+    from core import garmin_workout
+
+    assert garmin_workout.GARMIN_TARGET["tib_raise"][0] != "CALF_RAISE"
+    assert "DORSIFLEXION" in garmin_workout.GARMIN_TARGET["tib_raise"][1]
+    assert "WALL" in garmin_workout.GARMIN_TARGET["wall_sit"][1]
 
 
 def test_an_empty_session_is_refused_rather_than_uploaded():
@@ -806,3 +821,206 @@ def test_the_floor_is_satisfied_by_sessions_already_completed(healthy):
     empty = facts.model_copy(update={"endurance_days": []})
     added = planner._ensure_minimum_endurance([], empty, envelope, [])
     assert len(added) == envelope.min_endurance_sessions
+
+
+class _FakeGarmin:
+    """Records what would have been deleted, and can be told to refuse."""
+
+    def __init__(self, refuse: set[str] = frozenset()):
+        self.deleted: list[str] = []
+        self.refuse = set(refuse)
+
+    def delete_workout(self, workout_id: str) -> bool:
+        if workout_id in self.refuse:
+            return False
+        self.deleted.append(str(workout_id))
+        return True
+
+
+def test_a_finished_session_is_taken_off_the_watch(healthy):
+    """A workout is pushed most days and Garmin keeps every one of them, so
+    within a fortnight pressing START offers a fortnight of history."""
+    from core import sync as sync_mod
+
+    # Wednesday is TODAY in the fixtures, and it has a completed run on it.
+    healthy.set_state(f"workout_pushed_run_{TODAY.isoformat()}", "111")
+    client = _FakeGarmin()
+    assert sync_mod.delete_finished_workouts(healthy, client, today=TODAY) == 1
+    assert client.deleted == ["111"]
+    # And the bookkeeping goes with it, so the page offers to send again.
+    assert healthy.get_state(f"workout_pushed_run_{TODAY.isoformat()}") is None
+
+
+def test_todays_unfinished_session_stays_on_the_watch(healthy):
+    from core import sync as sync_mod
+
+    key = f"workout_pushed_swim_{TODAY.isoformat()}"
+    healthy.set_state(key, "222")
+    client = _FakeGarmin()
+    # No swim on record today, so it has not been done.
+    assert sync_mod.delete_finished_workouts(healthy, client, today=TODAY) == 0
+    assert client.deleted == []
+    assert healthy.get_state(key) == "222"
+
+
+def test_yesterdays_session_goes_whether_or_not_it_was_done(healthy):
+    """The plan has moved on, and an unused workout from yesterday is exactly
+    what you do not want offered when you press START."""
+    from core import sync as sync_mod
+
+    key = f"workout_pushed_swim_{(TODAY - timedelta(days=2)).isoformat()}"
+    healthy.set_state(key, "333")
+    client = _FakeGarmin()
+    assert sync_mod.delete_finished_workouts(healthy, client, today=TODAY) == 1
+    assert client.deleted == ["333"]
+
+
+def test_a_strength_push_matches_a_strength_activity(healthy):
+    """The strength key carries no sport, so it must not be cleared by a run."""
+    from core import sync as sync_mod
+
+    key = f"workout_pushed_{TODAY.isoformat()}"
+    healthy.set_state(key, "444")
+    client = _FakeGarmin()
+    removed = sync_mod.delete_finished_workouts(healthy, client, today=TODAY)
+    # The fixture week logs strength on Monday and Wednesday, and TODAY is a
+    # Wednesday, so this one is done.
+    assert removed == 1
+    assert client.deleted == ["444"]
+
+
+def test_a_refused_delete_keeps_the_bookkeeping(healthy):
+    """Otherwise the workout stays on the watch and nothing remembers to retry."""
+    from core import sync as sync_mod
+
+    key = f"workout_pushed_run_{TODAY.isoformat()}"
+    healthy.set_state(key, "555")
+    client = _FakeGarmin(refuse={"555"})
+    assert sync_mod.delete_finished_workouts(healthy, client, today=TODAY) == 0
+    assert healthy.get_state(key) == "555"
+
+
+def test_bookkeeping_with_no_workout_id_is_just_cleared(healthy):
+    from core import sync as sync_mod
+
+    healthy.set_state(f"workout_pushed_run_{TODAY.isoformat()}", "")
+    client = _FakeGarmin()
+    assert sync_mod.delete_finished_workouts(healthy, client, today=TODAY) == 0
+    assert client.deleted == []
+    assert healthy.get_state(f"workout_pushed_run_{TODAY.isoformat()}") is None
+
+
+def test_every_pushed_name_comes_back_as_the_same_exercise():
+    """The round trip has to close: what the watch is sent must map back to the
+    exercise it was sent for, or the progression logs the wrong movement."""
+    from core import garmin_workout
+
+    for exercise_id, (category, name) in garmin_workout.GARMIN_TARGET.items():
+        exercise = strength.EXERCISES[exercise_id]
+        # A hold is sent as the same Garmin name as its rep version, so the shape
+        # of the set is what separates them coming back.
+        hold = exercise.kind == strength.ISOMETRIC
+        got = strength.map_garmin_exercise(
+            category, name,
+            reps=None if hold else 8,
+            duration_s=40.0 if hold else 25.0)
+        assert got == exercise_id, f"{name} came back as {got}, not {exercise_id}"
+
+
+def test_a_bare_ambiguous_category_maps_to_nothing():
+    """This is the bug that logged a pushed wall sit and split squat as goblet
+    squats, and three sets of tibialis raises as calf raises: a category with no
+    name used to be resolved by guessing the most common exercise in it."""
+    assert strength.map_garmin_exercise("SQUAT", None) is None
+    assert strength.map_garmin_exercise("CALF_RAISE", None) is None
+    assert strength.map_garmin_exercise("DEADLIFT", None) is None
+    assert strength.map_garmin_exercise("UNKNOWN", None) is None
+    # An unmapped set is surfaced for manual assignment, which is honest.
+    # Where the library has exactly one exercise in a category, the category
+    # does identify it and is used.
+    assert strength.map_garmin_exercise("WARM_UP", None) == "tib_raise"
+    assert strength.map_garmin_exercise("LUNGE", None) == "reverse_lunge"
+
+
+def test_a_calf_hold_and_a_calf_raise_are_told_apart_by_the_set(healthy):  # noqa: ARG001
+    """Garmin has one single-leg calf name for both. The hold records seconds and
+    no reps, which is the only thing that distinguishes them."""
+    name = "SINGLE_LEG_STANDING_CALF_RAISE"
+    assert strength.map_garmin_exercise("CALF_RAISE", name, reps=8,
+                                        duration_s=25.0) == "calf_raise_single_leg"
+    assert strength.map_garmin_exercise("CALF_RAISE", name, reps=0,
+                                        duration_s=40.0) == "single_leg_calf_hold"
+    # A short zero-rep set is a rest interval, not a 40-second hold.
+    assert strength.map_garmin_exercise("CALF_RAISE", name, reps=0,
+                                        duration_s=5.0) == "calf_raise_single_leg"
+
+
+def test_a_named_set_still_maps_even_from_a_hand_logged_session():
+    """The watch names sets itself when you pick an exercise on it, and those
+    names are not the ones this app sends."""
+    for name, expected in (
+        ("BULGARIAN_SPLIT_SQUAT", "split_squat"),
+        ("WEIGHTED_STANDING_CALF_RAISE", "calf_raise_straight"),
+        ("SEATED_CALF_RAISE", "calf_raise_bent"),
+        ("STRAIGHT_LEG_DEADLIFT", "rdl"),
+        ("GOBLET_SQUAT", "goblet_squat"),
+    ):
+        assert strength.map_garmin_exercise(None, name) == expected, name
+
+
+def test_a_rest_interval_is_not_a_missing_exercise(healthy):
+    """The watch records the gap after every pushed step as a set of its own:
+    active, no category, no reps. Counting them as unidentified made a clean
+    session read as a dozen strays."""
+    rest = {"garmin_category": "UNKNOWN", "garmin_name": None, "reps": 0.0,
+            "duration_s": 45.0}
+    work = {"garmin_category": "SQUAT", "garmin_name": None, "reps": 5.0,
+            "duration_s": 30.0}
+    hold = {"garmin_category": "SQUAT", "garmin_name": None, "reps": 0.0,
+            "duration_s": 30.0}
+    assert strength.looks_like_rest(rest) is True
+    # Real work the watch could not categorise is not a rest, and neither is a
+    # hold that reports a category.
+    assert strength.looks_like_rest(work) is False
+    assert strength.looks_like_rest(hold) is False
+
+
+def test_assigning_a_set_by_hand_reaches_the_log(healthy):
+    """The recovery path for sets the watch could not name: the athlete says what
+    it was, and the work has to reach the progression."""
+    from core import sync as sync_mod
+
+    activity_id = "test-strength-1"
+    healthy.upsert_activities([{
+        "activity_id": activity_id, "sport": "strength", "name": "Legs",
+        "start_time": f"{TODAY.isoformat()}T18:00:00",
+        "start_date": TODAY.isoformat(), "duration_s": 1500.0,
+        "ingested_at": f"{TODAY.isoformat()}T19:00:00"}])
+    healthy.replace_exercise_sets(activity_id, [
+        {"garmin_category": "SQUAT", "garmin_name": None, "reps": 0.0,
+         "duration_s": 30.0, "exercise_id": None, "is_rest": 0},
+        {"garmin_category": "SQUAT", "garmin_name": None, "reps": 0.0,
+         "duration_s": 30.0, "exercise_id": None, "is_rest": 0},
+    ])
+    assert healthy.assign_exercise_sets(activity_id, "wall_sit", [0, 1]) == 2
+    sets = healthy.exercise_sets(activity_id)
+    assert [s["exercise_id"] for s in sets] == ["wall_sit", "wall_sit"]
+
+    rows = strength.sets_to_log_rows(TODAY.isoformat(), activity_id, sets)
+    assert rows and rows[0]["exercise_id"] == "wall_sit"
+    assert rows[0]["sets"] == 2
+
+    # A re-map must not undo it: the athlete was there, the mapping table was not.
+    sync_mod.remap_exercise_sets(healthy)
+    after = healthy.exercise_sets(activity_id)
+    assert [s["exercise_id"] for s in after] == ["wall_sit", "wall_sit"]
+
+    # Nor may a re-import from the watch, which rewrites every row.
+    healthy.replace_exercise_sets(activity_id, [
+        {"garmin_category": "SQUAT", "garmin_name": None, "reps": 0.0,
+         "duration_s": 30.0, "exercise_id": None, "is_rest": 0},
+        {"garmin_category": "SQUAT", "garmin_name": None, "reps": 0.0,
+         "duration_s": 30.0, "exercise_id": None, "is_rest": 0},
+    ])
+    reimported = healthy.exercise_sets(activity_id)
+    assert [s["exercise_id"] for s in reimported] == ["wall_sit", "wall_sit"]

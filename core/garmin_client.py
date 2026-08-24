@@ -549,6 +549,29 @@ class GarminClient:
             "fetched_at": datetime.now().isoformat(timespec="seconds"),
         }
 
+    def delete_workout(self, workout_id: str) -> bool:
+        """Remove a workout from the account. True if Garmin accepted it.
+
+        Used to clear a session off the watch once it has been done: a new one is
+        pushed most days, and without this the saved-workout list fills up with
+        every session of the last month.
+
+        A workout that is already gone is a success, not a failure — the goal is
+        "not on the watch any more", and someone deleting it by hand should not
+        make the sync noisy.
+        """
+        try:
+            self._call(self.connect().delete_workout, str(workout_id),
+                       label="delete_workout")
+            return True
+        except Exception as exc:  # noqa: BLE001 - never worth failing a sync for
+            status = status_of(exc)
+            if status in (404, 400):
+                log.info("Workout %s was already gone", workout_id)
+                return True
+            log.warning("Could not delete workout %s: %s", workout_id, exc)
+            return False
+
     def fetch_laps(self, activity_id: str) -> list[dict[str, Any]]:
         """Per-lap heart rate and pace.
 

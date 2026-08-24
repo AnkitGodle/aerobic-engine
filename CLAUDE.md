@@ -24,6 +24,11 @@ weekly plan (swim / bike / run / leg strength) that responds to how the user fee
 - **Storage:** Postgres (Neon) is the live database; SQLite is the local
   fallback when `DATABASE_URL` is unset. One SQL dialect in the source,
   translated on the way out — see `Store.sql()`.
+  SQLite stays for two reasons, both load-bearing: the test suite builds a
+  database per test in a temp directory (200-odd tests would otherwise need a
+  Postgres server), and a headless UI run needs somewhere to write that is not
+  the live account's data. What it must never be is a silent substitute, so the
+  sidebar names the store in use and warns when it is a local file.
 - **UI:** Streamlit.
 - **AI layer:** Gemini (`gemini-3.6-flash`, free tier) via the OpenAI-compatible
   endpoint. Structured JSON in/out, behind an interface, so the provider is a

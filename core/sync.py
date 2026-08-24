@@ -56,6 +56,56 @@ def import_multisport_children(store: Store, client: GarminClient) -> int:
     return added
 
 
+def remap_exercise_sets(store: Store) -> tuple[int, int]:
+    """Re-derive every stored set's exercise, and rebuild the log rows from it.
+
+    Needed whenever the mapping changes, and it changed for a good reason: the
+    first real session came back with a pushed wall sit and split squat logged as
+    goblet squats, and three sets of tibialis raises logged as calf raises,
+    because a bare category used to be resolved by guessing. Nothing is refetched
+    — Garmin's own category and name are already stored beside each set.
+
+    Returns (sets re-mapped, log rows rebuilt). Sessions the athlete logged by
+    hand are left alone: their rows have no activity_id.
+    """
+    changed = rebuilt = 0
+    per_activity: dict[str, list[dict[str, Any]]] = {}
+    for row in store.exercise_sets():
+        per_activity.setdefault(str(row["activity_id"]), []).append(dict(row))
+
+    for activity_id, rows in per_activity.items():
+        moved = False
+        for r in rows:
+            if r.get("assigned_by_hand"):
+                continue          # the athlete's own answer outranks the table
+            before = r.get("exercise_id")
+            r["exercise_id"] = strength.map_garmin_exercise(
+                r.get("garmin_category"), r.get("garmin_name"),
+                reps=r.get("reps"), duration_s=r.get("duration_s"))
+            was_rest = r.get("is_rest")
+            r["is_rest"] = int(strength.looks_like_rest(r))
+            if r["is_rest"] != was_rest:
+                moved = True
+            if r["exercise_id"] != before:
+                moved = True
+                changed += 1
+        if not moved:
+            continue
+        store.replace_exercise_sets(activity_id, rows)
+        day = store.activity_day(activity_id)
+        if not day:
+            continue
+        # Only the rows this activity produced are replaced; a hand-logged
+        # session for the same day is left as the athlete entered it.
+        store.delete_strength_log(activity_id=activity_id)
+        fresh = strength.sets_to_log_rows(day, activity_id, rows)
+        if fresh:
+            rebuilt += store.log_strength(fresh)
+    if changed:
+        log.info("Re-mapped %d sets and rebuilt %d log rows", changed, rebuilt)
+    return changed, rebuilt
+
+
 def import_exercise_sets(store: Store, client: GarminClient) -> tuple[int, int]:
     """Pull watch-recorded strength sets and turn them into strength_log rows."""
     sets_stored = logged = 0
@@ -65,12 +115,18 @@ def import_exercise_sets(store: Store, client: GarminClient) -> tuple[int, int]:
         if not raw:
             continue
         for r in raw:
+            # Reps and duration go in too: they are what separates a single-leg
+            # calf raise from a single-leg calf hold, which Garmin gives the same
+            # name.
             r["exercise_id"] = strength.map_garmin_exercise(
-                r.get("garmin_category"), r.get("garmin_name")
+                r.get("garmin_category"), r.get("garmin_name"),
+                reps=r.get("reps"), duration_s=r.get("duration_s"),
             )
+            r["is_rest"] = int(strength.looks_like_rest(r))
         store.replace_exercise_sets(act["activity_id"], raw)
         sets_stored += len(raw)
-        unmapped = [r for r in raw if not r.get("exercise_id")]
+        unmapped = [r for r in raw
+                    if not r.get("exercise_id") and not r.get("is_rest")]
         if unmapped:
             log.info(
                 "%d of %d sets on %s are outside the exercise library "
@@ -342,6 +398,83 @@ def _chart_inputs(data: dict[str, Any], today: date) -> list[tuple[str, str, Any
     return out
 
 
+
+# Pushed workouts are recorded as `workout_pushed_<date>` for strength and
+# `workout_pushed_<sport>_<date>` for a run or a ride, keyed by the day they were
+# for.
+PUSHED_PREFIX = "workout_pushed_"
+# How long a pushed workout may sit on the watch unused before it is cleared. One
+# day: the plan moves on, and yesterday's session is not what you want offered
+# when you press START.
+PUSHED_KEEP_DAYS = 1
+
+
+def _pushed_key_parts(key: str) -> tuple[str | None, date | None]:
+    """('run', 2026-08-24) or (None, 2026-08-24) for a strength push."""
+    rest = key[len(PUSHED_PREFIX):]
+    bits = rest.rsplit("_", 1)
+    stamp = bits[-1]
+    sport = bits[0] if len(bits) > 1 else None
+    try:
+        return sport, date.fromisoformat(stamp)
+    except ValueError:
+        return sport, None
+
+
+def delete_finished_workouts(
+    store: Store, client: Any, today: date | None = None,
+    keep_days: int = PUSHED_KEEP_DAYS,
+) -> int:
+    """Take a pushed workout off the watch once it has been done, or has passed.
+
+    A session is pushed most days, and Garmin keeps every one of them in the
+    saved-workout list until it is deleted — so within a fortnight pressing START
+    offers a fortnight of history and the one you want is buried.
+
+    "Done" means an activity of that sport exists on that day. A strength push
+    matches a strength activity; a run push matches a run. Anything older than
+    `keep_days` goes whether or not it was done, because the plan has moved on.
+    """
+    today = today or date.today()
+    pushed = store.states_with_prefix(PUSHED_PREFIX)
+    if not pushed:
+        return 0
+    # One read, then matching in memory: there are at most a few pushes pending.
+    by_day: dict[date, set[str]] = {}
+    for a in store.activities(since=today - timedelta(days=30)):
+        try:
+            day = date.fromisoformat(str(a["start_date"])[:10])
+        except (ValueError, TypeError):
+            continue
+        by_day.setdefault(day, set()).add(a.get("sport") or "")
+
+    removed = 0
+    for key, workout_id in pushed.items():
+        sport, day = _pushed_key_parts(key)
+        if day is None:
+            store.delete_state(key)
+            continue
+        if not workout_id:
+            store.delete_state(key)
+            continue
+        trained = by_day.get(day, set())
+        done = bool(trained) if sport is None else sport in trained
+        if sport is None:
+            done = "strength" in trained
+        stale = (today - day).days > keep_days
+        if not (done or stale):
+            continue
+        if client.delete_workout(workout_id):
+            store.delete_state(key)
+            removed += 1
+            log.info("Removed workout %s from the watch (%s %s)",
+                     workout_id, sport or "strength", day)
+    if removed:
+        applog.event(default_db(),
+                     f"Removed {removed} finished workout(s) from the watch")
+    return removed
+
+
 def recompute_metrics(
     store: Store, activity_ids: list[str] | None = None, force: bool = False
 ) -> int:
@@ -461,6 +594,16 @@ def _sync_locked(
     for a in store.activities_missing_laps(sorted(LAP_SPORTS))[:stream_limit]:
         lap_rows += store.upsert_laps(client.fetch_laps(a["activity_id"]))
     stats["laps"] = lap_rows
+
+    # Clear finished sessions off the watch. After the activity fetch on purpose:
+    # "was it done" is answered by what was just pulled in.
+    if progress:
+        progress("Tidying pushed workouts…")
+    try:
+        stats["workouts_removed"] = delete_finished_workouts(store, client)
+    except Exception as exc:  # noqa: BLE001 - tidying is never worth a failed sync
+        log.warning("Could not tidy pushed workouts: %s", exc)
+        stats["workouts_removed"] = 0
 
     # Body constants and lifetime records. One call each, so they are refreshed
     # every sync rather than tracked for staleness.
