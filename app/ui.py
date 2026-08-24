@@ -277,8 +277,21 @@ CSS = """
   .ic-item { font-size: .8rem; margin-top: 7px; line-height: 1.35;
              overflow-wrap: anywhere; }
   .ic-item b { font-weight: 620; }
-  .ic-item.done { opacity: .48; }
+  /* Done, and not done. Fading a completed session was the only signal before,
+     and "faded" reads as less important rather than as finished — so a tick
+     carries it and the colour says which of the two it is. */
+  .ic-item.done { opacity: .72; }
+  .ic-item.done b { color: var(--ic-good); }
+  .ic-item.missed b { color: var(--ic-caution); }
+  .ic-item-mark { font-weight: 700; margin-right: 3px; }
+  .ic-item.done .ic-item-mark { color: var(--ic-good); }
+  .ic-item.missed .ic-item-mark { color: var(--ic-caution); }
   .ic-item-zone { font-size: .69rem; opacity: .5; }
+  /* A day whose work is all done gets a quiet green edge, so the week reads at
+     a glance without having to look at each session. */
+  .ic-day.settled { border-left: 3px solid var(--ic-good); }
+  .ic-day.slipped { border-left: 3px solid var(--ic-caution); }
+  .ic-strip-key { font-size: .74rem; opacity: .55; margin: -.5rem 0 1rem; }
 
   /* Chart panels */
   .ic-card-title { font-size: .93rem; font-weight: 620; letter-spacing: -.01em;
@@ -504,24 +517,43 @@ def proportion_bar(parts: Iterable[tuple[str, float, str]]) -> None:
                 f'<div class="ic-legend">{legend}</div>', unsafe_allow_html=True)
 
 
-def week_strip(days: list[dict]) -> None:
-    """days: [{name, date, today, items:[{sport,minutes,zone,done}]}]"""
+def week_strip(days: list[dict], key: bool = True) -> None:
+    """days: [{name, date, today, items:[{sport,minutes,zone,done,missed}]}]
+
+    `done` marks a session that has been logged, `missed` one whose day has gone
+    by without it. Both matter on the page you look at every morning: "is this
+    week on track" is a question about what did and did not happen, and a strip
+    that only shows the plan cannot answer it.
+    """
     cells = []
+    any_done = any_missed = False
     for d in days:
         items = d.get("items") or []
         cls = "ic-day today" if d.get("today") else "ic-day"
         if not items:
             cls += " rest"
-        body = "".join(
-            f'<div class="ic-item{" done" if it.get("done") else ""}">'
-            f'{SPORT_EMOJI.get(it["sport"], "•")} <b>{esc(it["sport"])}</b>'
-            + (f' {esc(it["minutes"])}′' if it.get("minutes") else "")
-            + (f'<div class="ic-item-zone">{esc(it["zone"])}'
-               + (f' · {esc(it["hr"])}' if it.get("hr") else "")
-               + "</div>" if it.get("zone") or it.get("hr") else "")
-            + "</div>"
-            for it in items
-        ) or '<div class="ic-item" style="opacity:.4">rest</div>'
+        elif all(it.get("done") for it in items):
+            cls += " settled"
+        elif any(it.get("missed") for it in items):
+            cls += " slipped"
+        parts = []
+        for it in items:
+            state = ("done" if it.get("done")
+                     else "missed" if it.get("missed") else "")
+            mark = ("✓" if state == "done"
+                    else "·" if state == "missed" else "")
+            any_done = any_done or state == "done"
+            any_missed = any_missed or state == "missed"
+            parts.append(
+                f'<div class="ic-item{" " + state if state else ""}">'
+                + (f'<span class="ic-item-mark">{mark}</span>' if mark else "")
+                + f'{SPORT_EMOJI.get(it["sport"], "•")} <b>{esc(it["sport"])}</b>'
+                + (f' {esc(it["minutes"])}′' if it.get("minutes") else "")
+                + (f'<div class="ic-item-zone">{esc(it["zone"])}'
+                   + (f' · {esc(it["hr"])}' if it.get("hr") else "")
+                   + "</div>" if it.get("zone") or it.get("hr") else "")
+                + "</div>")
+        body = "".join(parts) or '<div class="ic-item" style="opacity:.4">rest</div>'
         cells.append(
             f'<div class="{cls}">'
             f'<div class="ic-day-name">{esc(d["name"])}'
@@ -530,6 +562,15 @@ def week_strip(days: list[dict]) -> None:
         )
     st.markdown(f'<div class="ic-week">{"".join(cells)}</div>',
                 unsafe_allow_html=True)
+    # Only explain the marks that are actually on screen.
+    if key and (any_done or any_missed):
+        bits = []
+        if any_done:
+            bits.append("✓ logged")
+        if any_missed:
+            bits.append("· planned, not logged")
+        st.markdown(f'<div class="ic-strip-key">{esc(" · ".join(bits))}</div>',
+                    unsafe_allow_html=True)
 
 
 @contextmanager

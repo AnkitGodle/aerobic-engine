@@ -386,6 +386,14 @@ def read_gate() -> bool:
 # The athlete trains in India, and a cloud host runs on UTC — so the cutoff is
 # anchored to a real timezone rather than to wherever the server happens to be.
 LOCAL_TZ = ZoneInfo(os.getenv("LOCAL_TZ", "Asia/Kolkata"))
+
+# The athlete's public Strava profile. A hyperlink and nothing else: no API, no
+# import, no data crossing in either direction. Strava's API terms forbid using
+# their data with a language model, and this app's whole planning layer is a
+# language model — so the profile stays a link out, which those terms do not
+# touch. Override with STRAVA_PROFILE_URL if the profile ever moves.
+STRAVA_PROFILE_URL = os.getenv(
+    "STRAVA_PROFILE_URL", "https://www.strava.com/athletes/71829400")
 EVENING_CUTOFF_HOUR = int(os.getenv("EVENING_CUTOFF_HOUR", "19"))
 
 
@@ -873,7 +881,10 @@ def week_cells(plan: dict | None, today: date,
             {"sport": e["sport"], "minutes": e["duration_min"],
              "zone": "" if e.get("target_zone") in (None, "n/a", "") else e["target_zone"],
              "hr": e.get("target_hr") or "",
-             "done": e.get("purpose") == "completed"}
+             "done": e.get("purpose") == "completed",
+             # A day that has gone by with the session still only planned. Today
+             # is not counted: the evening is still available.
+             "missed": e.get("purpose") != "completed" and d < real_today}
             for e in entries if e["day"] == name and e["sport"] != "rest"
         ]
         cells.append({"name": name, "date": d.strftime("%d-%m"),
@@ -2836,6 +2847,12 @@ def page_about(data: dict, today: date) -> None:
         "(https://github.com/AnkitGodle/aerobic-engine). Your training data is "
         "not in it."
     )
+    if STRAVA_PROFILE_URL:
+        st.markdown(f"Strava: [your profile]({STRAVA_PROFILE_URL})")
+        st.caption(
+            "A link only. Nothing is read from Strava and nothing is sent to "
+            "it: their API terms forbid using their data with a language model, "
+            "and the planning here is one. Garmin remains the single source.")
     st.caption(
         "Built on the unofficial Garmin Connect API for personal use. Not "
         "connected to Garmin. Not medical advice."
@@ -3316,6 +3333,11 @@ def sidebar(data: dict) -> None:
         if st.button("Reload page data", width="stretch"):
             refresh()
             st.rerun()
+        if STRAVA_PROFILE_URL:
+            st.markdown(
+                f'<a href="{ui.esc(STRAVA_PROFILE_URL)}" target="_blank" '
+                f'rel="noopener noreferrer" style="font-size:.82rem">'
+                f'Strava profile ↗</a>', unsafe_allow_html=True)
         st.caption(f"AI: {os.getenv('AI_BACKEND', 'anthropic')} "
                    f"({'ready' if ai.available() else 'off'})")
         st.caption("Not medical advice. Persistent tendon pain is a physio visit.")
