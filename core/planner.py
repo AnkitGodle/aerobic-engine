@@ -1509,6 +1509,55 @@ def suggest_targets(
     return out
 
 
+def refresh_completions(
+    plan: dict[str, Any] | WeekPlan,
+    facts: PlannerFacts,
+    store: Store,
+) -> tuple[WeekPlan, bool]:
+    """Re-mark what has actually been done, from the activities on record.
+
+    Completed sessions are merged into a plan when it is built, which froze that
+    picture at build time: train on Monday evening, sync, and Monday's session
+    was still sitting there as something to do. The plan is stored data, and the
+    activities are the truth about what happened, so this recomputes one from the
+    other on every page load.
+
+    A planned session is treated as done when an activity of the same sport
+    exists on that day. A brick counts when both a ride and a run do, since that
+    is what a brick is. Returns the plan and whether anything moved.
+    """
+    week = plan if isinstance(plan, WeekPlan) else WeekPlan.model_validate(plan)
+    completed = completed_entries(facts, store)
+    done_by_day: dict[str, set[str]] = {}
+    for row in completed:
+        done_by_day.setdefault(row.day, set()).add(row.sport)
+
+    def happened(entry: PlanDay) -> bool:
+        sports = done_by_day.get(entry.day, set())
+        if not sports:
+            return False
+        if entry.sport == "brick":
+            return {"bike", "run"} <= sports
+        return entry.sport in sports
+
+    kept: list[PlanDay] = []
+    dropped = 0
+    for entry in week.week_plan:
+        if entry.purpose == "completed":
+            continue          # rebuilt below from the activities themselves
+        if entry.duration_min > 0 and happened(entry):
+            dropped += 1
+            continue
+        kept.append(entry)
+
+    before = [(d.day, d.sport, d.purpose, d.duration_min) for d in week.week_plan]
+    week.week_plan = completed + kept
+    after = [(d.day, d.sport, d.purpose, d.duration_min) for d in week.week_plan]
+    order = {d: i for i, d in enumerate(DAYS)}
+    week.week_plan.sort(key=lambda d: (order.get(d.day, 9), -d.duration_min))
+    return week, before != after
+
+
 def reapply_rules(
     store: Store,
     plan: dict[str, Any],

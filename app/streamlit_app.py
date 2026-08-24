@@ -782,9 +782,17 @@ def page_today(data: dict, today: date) -> None:
             st.caption(f"also today: {EMOJI.get(extra['sport'], '')} "
                        f"{extra['sport']} · {extra['duration_min']} min")
     elif done_today:
-        ui.today_card("rest", "Session already logged today",
-                      " · ".join(f"{d['sport']} {d['duration_min']} min"
-                                 for d in done_today))
+        # The sport that was actually done, not "rest": a finished session is an
+        # achievement, and labelling it as a rest day reads like the app missed it.
+        first = done_today[0]
+        rest = done_today[1:]
+        ui.today_card(
+            first["sport"],
+            f"Done · {first['duration_min']} min"
+            + (" · " + ", ".join(f"{d['sport']} {d['duration_min']} min"
+                                 for d in rest) if rest else ""),
+            (first.get("why") or "").replace("logged: ", "read back from your watch: ")
+            or "Logged from your watch.")
     else:
         ui.today_card("rest", "Nothing scheduled",
                       "Rest is where the adaptation happens.")
@@ -2430,10 +2438,17 @@ def _conformed_plan(stamp: float, iso_today: str, raw: str,
     import json as _json
     plan = _json.loads(raw)
     try:
-        fixed, changed = with_store(lambda s: planner.reapply_rules(
-            s, plan, today=date.fromisoformat(iso_today),
-            only_sports=list(sports) or None))
-        return fixed.model_dump(mode="json"), changed
+        def conform(s: Store) -> tuple[dict, bool]:
+            today = date.fromisoformat(iso_today)
+            fixed, changed = planner.reapply_rules(
+                s, plan, today=today, only_sports=list(sports) or None)
+            # Always, whatever the plan's source: a hand-edited week is exempt
+            # from being re-shaped by the rules, but not from the fact that
+            # Monday's session already happened.
+            facts = planner.build_facts(s, today=today)
+            marked, moved = planner.refresh_completions(fixed, facts, s)
+            return marked.model_dump(mode="json"), changed or moved
+        return with_store(conform)
     except Exception as exc:  # noqa: BLE001 - showing the saved plan beats an error
         log.warning("Could not re-apply rules to the stored plan: %s", exc)
         return plan, False

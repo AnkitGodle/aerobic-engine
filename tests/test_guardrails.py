@@ -1024,3 +1024,69 @@ def test_assigning_a_set_by_hand_reaches_the_log(healthy):
     ])
     reimported = healthy.exercise_sets(activity_id)
     assert [s["exercise_id"] for s in reimported] == ["wall_sit", "wall_sit"]
+
+
+def test_a_session_that_has_happened_stops_being_planned(healthy):
+    """A plan is stored data and the activities are what happened. Merging the
+    completed sessions only when the plan was built meant training on Monday
+    evening left Monday's session sitting there as something still to do."""
+    from core import planner
+    from core.schemas import PlanDay, WeekPlan
+
+    facts = planner.build_facts(healthy, today=TODAY)
+    # The fixture week logs a swim on Monday and a strength session on Monday.
+    plan = WeekPlan(week_plan=[
+        PlanDay(day="Mon", sport="swim", duration_min=45, purpose="aerobic base"),
+        PlanDay(day="Mon", sport="strength", duration_min=28, purpose="legs"),
+        PlanDay(day="Sun", sport="run", duration_min=70, purpose="long run"),
+    ], source="rules")
+    marked, changed = planner.refresh_completions(plan, facts, healthy)
+    assert changed is True
+    monday = [d for d in marked.week_plan if d.day == "Mon"]
+    assert monday, "Monday's work should still appear, as completed"
+    assert all(d.purpose == "completed" for d in monday), monday
+    # Sunday has not happened yet, so it stays planned.
+    sunday = [d for d in marked.week_plan if d.day == "Sun"]
+    assert [d.purpose for d in sunday] == ["long run"]
+
+
+def test_a_different_sport_on_the_same_day_is_still_planned(healthy):
+    """Riding on Monday does not mean Monday's swim happened."""
+    from core import planner
+    from core.schemas import PlanDay, WeekPlan
+
+    facts = planner.build_facts(healthy, today=TODAY)
+    plan = WeekPlan(week_plan=[
+        PlanDay(day="Tue", sport="run", duration_min=40, purpose="aerobic base"),
+    ], source="rules")
+    marked, _ = planner.refresh_completions(plan, facts, healthy)
+    still_planned = [d for d in marked.week_plan
+                     if d.day == "Tue" and d.sport == "run"
+                     and d.purpose != "completed"]
+    # The fixture logs a ride on Tuesday, not a run.
+    assert still_planned
+
+
+def test_completed_rows_are_rebuilt_rather_than_duplicated(healthy):
+    """Running twice must not leave two copies of every finished session."""
+    from core import planner
+    from core.schemas import WeekPlan
+
+    facts = planner.build_facts(healthy, today=TODAY)
+    once, _ = planner.refresh_completions(WeekPlan(source="rules"), facts, healthy)
+    twice, changed = planner.refresh_completions(once, facts, healthy)
+    assert len(twice.week_plan) == len(once.week_plan)
+    assert changed is False
+
+
+def test_a_brick_needs_both_halves_before_it_counts_as_done(healthy):
+    from core import planner
+    from core.schemas import PlanDay, WeekPlan
+
+    facts = planner.build_facts(healthy, today=TODAY)
+    # Tuesday has a ride only, so a brick planned for Tuesday is not done.
+    plan = WeekPlan(week_plan=[
+        PlanDay(day="Tue", sport="brick", duration_min=90, purpose="brick"),
+    ], source="rules")
+    marked, _ = planner.refresh_completions(plan, facts, healthy)
+    assert [d.sport for d in marked.week_plan if d.purpose == "brick"] == ["brick"]
