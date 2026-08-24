@@ -2223,10 +2223,8 @@ def log_data(data: dict) -> None:
 
 def sidebar(data: dict) -> None:
     with st.sidebar:
-        st.markdown(
-            f'<div class="ic-sidebrand">{ui.logo(24)}'
-            f'<div class="ic-sidebrand-name">Aerobic Engine</div></div>',
-            unsafe_allow_html=True)
+        # No logo or app name here: the top bar carries both, and a third copy
+        # in the sidebar is just noise.
         st.subheader(data["name"] or "Athlete", anchor=False)
         ui.rows([
             ("Watch", "Forerunner 265"),

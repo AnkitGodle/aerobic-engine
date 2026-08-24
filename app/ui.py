@@ -195,16 +195,18 @@ CSS = """
     .ic-fig { flex: 1 1 44%; min-width: 44%; }
   }
 
+  /* Indented to clear Streamlit's sidebar chevron, which sits at x=18-46 and
+     y=16-44 — exactly where the title lands now that it shares the toolbar
+     band. Only this line is indented: the tabs below start under the chevron,
+     so they never collide with it. */
   .ic-brand { display: flex; align-items: center; gap: .55rem;
-              margin: 0 0 .3rem; }
+              margin: 0 0 .3rem; padding-left: 2.5rem; }
   .ic-brand svg { width: 26px; height: 26px; }
   .ic-brand svg { flex: 0 0 auto; opacity: .95; }
   .ic-brand-name { font-size: 1.22rem; font-weight: 680; line-height: 1.25;
                    letter-spacing: -.01em; }
   .ic-brand-sub { font-size: .8rem; opacity: .58; margin-top: .12rem; }
-  .ic-sidebrand { display: flex; align-items: center; gap: .55rem;
-                  margin: 0 0 .5rem; }
-  .ic-sidebrand-name { font-size: .95rem; font-weight: 650; letter-spacing: .01em; }
+  .ic-sidebrand { display: none; }
 
   .ic-frame-title { font-size: .72rem; letter-spacing: .06em;
                     text-transform: uppercase; opacity: .55;
