@@ -144,9 +144,10 @@ these APIs sit behind Cloudflare and reject `urllib`'s default user agent with a
 internal reasoning before emitting anything, so a `max_tokens` that looks
 generous can return an empty response with `finish_reason: length`.
 
-Also behind the same interface: `anthropic` (API key), `claude_cli` (a Claude
-Pro/Max subscription via the Claude Code CLI — local only, since a hosted app has
-no CLI to call), and `azure` (AI Foundry).
+Also behind the same interface: `anthropic` (API key), `cerebras`,
+`openrouter` and `azure` (AI Foundry). `AI_BACKEND` accepts a chain such as
+`gemini,groq`, and the chart summaries fan out across every provider in it,
+so one that rate-limits hands its summary to another instead of pausing.
 
 ## Being a good citizen with an unofficial API
 

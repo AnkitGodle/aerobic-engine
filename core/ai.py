@@ -16,9 +16,6 @@ import json
 import logging
 import os
 import re
-import shlex
-import shutil
-import subprocess
 import time
 from typing import Any, Protocol
 
@@ -39,11 +36,6 @@ MAX_TOKENS = int(os.getenv("AI_MAX_TOKENS", "6000"))
 # since gone busy.
 _WORKING_MODEL: dict[str, str] = {}
 
-# Backends that pay a large fixed cost per call and so are wrong for bulk work.
-# The Claude CLI starts a full agent session each time: measured at 31.6s per
-# call against 1.7s for a Gemini HTTP request. Worth it for one planning call,
-# not for fourteen chart summaries.
-SLOW_BULK_BACKENDS = frozenset({"claude_cli", "claude-cli", "cli", "subscription"})
 RETRY_ATTEMPTS = int(os.getenv("AI_RETRY_ATTEMPTS", "3"))
 RETRY_BACKOFF_S = float(os.getenv("AI_RETRY_BACKOFF", "1.5"))
 
@@ -224,81 +216,6 @@ class AzureAIFoundryBackend:
         return "".join(
             b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"
         )
-
-
-class ClaudeCLIBackend:
-    """Drive the Claude Code CLI in headless mode, using its own login.
-
-    A Claude Pro/Max subscription is not API credit — the Messages API bills
-    separately and there is no key to point the SDK at. The CLI, though, is
-    already authenticated against the subscription and has a print mode built
-    for scripting, so shelling out to it is a legitimate way to use one.
-
-    Two consequences worth knowing before choosing this backend:
-
-      * It only works where the CLI is installed and logged in, which puts the
-        planning step in the same box as the Garmin fetch: local only, never the
-        hosted dashboard. The dashboard stays read-only over SQLite.
-      * Subscription usage limits apply, and this is a personal-use
-        arrangement.
-
-    Flags are kept to the two most stable ones (`-p`, `--output-format json`);
-    anything else goes in CLAUDE_CLI_EXTRA_ARGS so a CLI update cannot break
-    this by renaming a flag we hard-coded.
-    """
-
-    name = "claude_cli"
-    # A subscription has no per-minute request cap, so back-to-back calls need
-    # no spacing. The free HTTP tiers do, which is what note_gap_s exists for.
-    note_gap_s = 0.0
-
-    def __init__(self, binary: str | None = None, model: str | None = None) -> None:
-        self.binary = binary or os.getenv("CLAUDE_CLI_BIN", "claude")
-        self.model = model or os.getenv("CLAUDE_CLI_MODEL", "")
-        self.extra_args = shlex.split(os.getenv("CLAUDE_CLI_EXTRA_ARGS", ""))
-        self.timeout = int(os.getenv("CLAUDE_CLI_TIMEOUT", "180"))
-        if shutil.which(self.binary) is None:
-            raise AIUnavailable(
-                f"{self.binary!r} is not on PATH. Install it with "
-                "`npm install -g @anthropic-ai/claude-code`, run `claude` once to "
-                "log in, then retry."
-            )
-
-    def complete(self, system: str, user: str, json_mode: bool = False) -> str:
-        # The CLI's system-prompt flags have moved between versions, so the
-        # instructions ride along in the prompt itself.
-        prompt = f"{system}\n\n---\n\n{user}"
-        cmd = [self.binary, "-p", prompt, "--output-format", "json"]
-        if self.model:
-            cmd += ["--model", self.model]
-        cmd += self.extra_args
-        try:
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=self.timeout, check=False
-            )
-        except FileNotFoundError as exc:
-            raise AIUnavailable(f"{self.binary!r} disappeared from PATH") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise AIUnavailable(f"{self.binary} timed out after {self.timeout}s") from exc
-
-        if proc.returncode != 0:
-            detail = (proc.stderr or proc.stdout or "").strip()[:300]
-            raise AIUnavailable(f"{self.binary} exited {proc.returncode}: {detail}")
-
-        out = (proc.stdout or "").strip()
-        if not out:
-            raise AIUnavailable(f"{self.binary} returned nothing")
-        # --output-format json wraps the answer; older builds print it bare.
-        try:
-            envelope = json.loads(out)
-        except json.JSONDecodeError:
-            return out
-        if isinstance(envelope, dict):
-            for key in ("result", "text", "content", "response"):
-                value = envelope.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value
-        return out
 
 
 # Providers that speak the OpenAI chat-completions dialect. Base URLs and model
@@ -602,8 +519,6 @@ def _one_backend(name: str) -> LLMBackend:
         return AnthropicBackend()
     if name == "azure":
         return AzureAIFoundryBackend()
-    if name in ("claude_cli", "claude-cli", "cli", "subscription"):
-        return ClaudeCLIBackend()
     if name in OPENAI_COMPAT:
         return OpenAICompatBackend(name)
     if name == "openai_compat":
@@ -616,7 +531,7 @@ def _one_backend(name: str) -> LLMBackend:
 
 def get_backend(name: str | None = None) -> LLMBackend:
     """Resolve AI_BACKEND, which may name one provider or a comma-separated
-    chain to try in order (for example `claude_cli,gemini,groq`)."""
+    chain to try in order (for example `gemini,groq`)."""
     raw = name or os.getenv("AI_BACKEND", "anthropic")
     names = [n.strip().lower() for n in str(raw).split(",") if n.strip()]
     if not names:

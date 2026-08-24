@@ -88,20 +88,6 @@ def import_exercise_sets(store: Store, client: GarminClient) -> tuple[int, int]:
     return sets_stored, logged
 
 
-def _notes_chain() -> str:
-    """The planning chain with subprocess-backed providers dropped.
-
-    Falls back to the configured chain untouched if that would leave nothing —
-    a slow summary beats no summary.
-    """
-    from core import ai
-
-    configured = [n.strip() for n in
-                  (os.getenv("AI_BACKEND") or "gemini").split(",") if n.strip()]
-    fast = [n for n in configured if n.lower() not in ai.SLOW_BULK_BACKENDS]
-    return ",".join(fast or configured)
-
-
 def generate_ai_notes(db: str | None = None, today: date | None = None) -> int:
     """Write every page summary and chart reading into the database.
 
@@ -122,12 +108,8 @@ def generate_ai_notes(db: str | None = None, today: date | None = None) -> int:
     # trip that every time. This runs after a Garmin sync, not in front of a
     # waiting user, so it can simply go slowly. A rate limit pauses and retries
     # once rather than losing the summary.
-    # Summaries use their own backend chain, and the reason is measured rather
-    # than assumed: the Claude CLI spawns a whole agent session per call and
-    # takes 31.6s, against 1.7s for a Gemini HTTP call. That trade is fine for
-    # one planning call where the answer matters; across fourteen summaries it is
-    # seven minutes instead of half a one. So planning can prefer the CLI while
-    # this prefers whatever is fastest, and AI_NOTES_BACKEND overrides.
+    # AI_NOTES_BACKEND can aim the summaries at a different set of providers
+    # from the planner; by default they share AI_BACKEND.
     backends = _note_backends()
     if not backends:
         log.info("No usable summary backend; skipping")
@@ -198,8 +180,8 @@ def _note_backends() -> list[Any]:
     from core import ai
 
     names = [n.strip().lower() for n in
-             (os.getenv("AI_NOTES_BACKEND") or _notes_chain()).split(",")
-             if n.strip()]
+             (os.getenv("AI_NOTES_BACKEND") or os.getenv("AI_BACKEND")
+              or "gemini").split(",") if n.strip()]
     out = []
     for name in names:
         try:

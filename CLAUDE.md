@@ -167,9 +167,9 @@ heavy/low-rep; tendons want slow, heavy or isometric loading and adapt slowly.
 - `plan_week(payload) -> plan`, behind an interface. `gemini` is the default
   (~1500 requests/day free, and a planner call is a chunky ~2.5K tokens, so a
   request-per-day cap suits it better than a tokens-per-minute one). Also
-  supported: `groq`, `cerebras`, `openrouter`, `anthropic`, `azure`,
-  `claude_cli` (a Pro/Max subscription via the CLI's headless mode — local only,
-  since a hosted dashboard has no CLI to call), or `none` to disable.
+  supported: `groq`, `cerebras`, `openrouter`, `anthropic`, `azure`, or `none`
+  to disable. `AI_BACKEND` takes a comma-separated chain (`gemini,groq`); the
+  summary phase fans out across every entry in it.
 - **Input JSON:** `{ completed_this_week, recovery_signals, envelope,
   strength_state, checkin, history }`.
 - **Output JSON (strict — no prose outside JSON):**

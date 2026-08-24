@@ -162,28 +162,30 @@ def test_planner_falls_back_to_rules_when_groq_is_rate_limited(healthy, monkeypa
 
 
 def test_an_unconfigured_provider_is_dropped_from_the_chain(monkeypatch):
-    """claude_cli is not installed on a web host, and that must not be an error."""
-    monkeypatch.setenv("AI_BACKEND", "claude_cli,gemini")
+    """A provider with no key configured must not break the whole chain."""
+    monkeypatch.setenv("AI_BACKEND", "cerebras,gemini")
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    monkeypatch.setenv("CLAUDE_CLI_BIN", "definitely-not-a-real-binary")
+    monkeypatch.delenv("CEREBRAS_API_KEY", raising=False)
+    monkeypatch.delenv("AI_API_KEY", raising=False)
     backend = ai.get_backend()
-    assert "claude_cli" not in backend.name
+    assert "cerebras" not in backend.name
     assert "gemini" in backend.name
 
 
 def test_a_chain_of_one_usable_provider_is_that_provider(monkeypatch):
-    monkeypatch.setenv("AI_BACKEND", "claude_cli,groq")
+    monkeypatch.setenv("AI_BACKEND", "cerebras,groq")
     monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
-    monkeypatch.setenv("CLAUDE_CLI_BIN", "definitely-not-a-real-binary")
+    monkeypatch.delenv("CEREBRAS_API_KEY", raising=False)
+    monkeypatch.delenv("AI_API_KEY", raising=False)
     assert ai.get_backend().name == "groq"
 
 
 def test_a_chain_with_nothing_configured_raises(monkeypatch):
-    monkeypatch.setenv("AI_BACKEND", "claude_cli,gemini")
+    monkeypatch.setenv("AI_BACKEND", "cerebras,gemini")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("CEREBRAS_API_KEY", raising=False)
     monkeypatch.delenv("AI_API_KEY", raising=False)
-    monkeypatch.setenv("CLAUDE_CLI_BIN", "definitely-not-a-real-binary")
     with pytest.raises(ai.AIUnavailable):
         ai.get_backend()
 
