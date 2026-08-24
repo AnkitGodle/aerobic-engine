@@ -411,8 +411,57 @@ def lifetime_insight(data: dict, today: date) -> PageInsight:
     return PageInsight(headline, bullets, tone)
 
 
+def plan_insight(data: dict, today: date) -> PageInsight:
+    """What the week ahead asks of you, and why it looks like that.
+
+    Separate from the overview because the question is different: not "how am I
+    doing" but "why this week, and what would change it".
+    """
+    from core.analysis import recovery_signals
+
+    plan = ((data.get("plan") or {}).get("plan")) or {}
+    days = [d for d in plan.get("week_plan") or []
+            if (d.get("duration_min") or 0) > 0 and d.get("purpose") != "completed"]
+    if not days:
+        return PageInsight("No plan for this week yet.",
+                           ["Build one below, or check in and let it plan around "
+                            "how you feel."], "info")
+
+    minutes = sum(d["duration_min"] for d in days)
+    by_sport: dict[str, int] = {}
+    for d in days:
+        by_sport[d["sport"]] = by_sport.get(d["sport"], 0) + 1
+    bullets = [
+        f"{len(days)} sessions left, {minutes // 60}h {minutes % 60:02d}m: "
+        + ", ".join(f"{n}x {sp}" for sp, n in sorted(by_sport.items()))
+    ]
+
+    hr = {d.get("target_hr") for d in days if d.get("target_hr")}
+    if hr:
+        bullets.append("Endurance targets: " + ", ".join(sorted(hr)) + ".")
+
+    flags = plan.get("flags") or []
+    for flag in flags[:3]:
+        bullets.append(str(flag))
+
+    sig = recovery_signals(data.get("wellness") or [],
+                           data.get("activities") or [], as_of=today)
+    deload = any("deload" in str(f).lower() for f in flags)
+    if deload:
+        headline, tone = "This week is deliberately smaller.", "warning"
+    elif sig and sig.training_readiness and sig.training_readiness < 50:
+        headline, tone = "Planned conservatively — recovery is not strong.", "warning"
+    else:
+        headline, tone = "The week ahead.", "info"
+    if plan.get("source") == "ai_repaired":
+        bullets.append("The AI's version broke a limit, so it was repaired in "
+                       "code before you saw it.")
+    return PageInsight(headline, bullets, tone)
+
+
 PAGES = {
     "Overview": overview_insight,
+    "Plan": plan_insight,
     "Lifetime": lifetime_insight,
     "Activities": activities_insight,
     "Fitness": fitness_insight,

@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import html
 from contextlib import contextmanager
+from datetime import date, timedelta
+from itertools import count
 from typing import Iterable, Literal
 
 import streamlit as st
@@ -36,6 +38,9 @@ SPORT_COLOR = {
 }
 # Cool to hot, so easy zones read calm and hard zones read loud.
 ZONE_COLOR = {1: "#7FB6DC", 2: "#3FB68B", 3: "#D8BC55", 4: "#E28A4E", 5: "#DB5F5A"}
+# Restarts every rerun, which is what makes the keys stable run to run.
+_FRAME_SEQ = count()
+
 SPORT_EMOJI = {"swim": "🏊", "bike": "🚲", "run": "🏃", "strength": "🦵",
                "brick": "🚲🏃", "rest": "😴", "other": "•"}
 
@@ -57,18 +62,11 @@ CSS = """
   /* No max-width. layout="wide" already spans the window; capping it here was
      throwing away most of a wide screen and forcing the header controls to wrap
      into a column that had plenty of room beside it. */
-  /* Streamlit's header is 60px of full-width chrome whose left three quarters
-     is always empty — on a hosted app it holds only Share, GitHub and the menu,
-     all right-aligned. Rather than leaving that band blank, the header is made
-     transparent and click-through so the page title can sit in it, and the
-     toolbar itself is given its clicks back. Right padding on the sticky bar
-     keeps the title clear of those buttons at narrow widths. */
-  [data-testid="stHeader"] { background: transparent !important;
-                             pointer-events: none; }
-  [data-testid="stToolbar"], [data-testid="stHeader"] button,
-  [data-testid="stHeader"] a { pointer-events: auto; }
-
-  .block-container { padding-top: .25rem; padding-bottom: 3rem;
+  /* The title sits below Streamlit's header, not inside it. Sharing that band
+     saved 40px and cost two collisions — the sidebar chevron on the left and
+     Deploy on the right — which is a bad trade for a line of chrome that only
+     appears on a hosted app. */
+  .block-container { padding-top: 1rem; padding-bottom: 3rem;
                      max-width: none; padding-left: 2.2rem; padding-right: 2.2rem; }
 
   /* Every injected block owns its own vertical space. Streamlit's container gap
@@ -113,9 +111,13 @@ CSS = """
              border-top: 1px solid var(--ic-line);
              border-bottom: 1px solid var(--ic-line);
              margin: .1rem 0 1.2rem; }
-  .ic-fig { flex: 1 1 7rem; padding: .5rem .9rem .55rem 0; min-width: 6rem; }
-  .ic-fig + .ic-fig { padding-left: .9rem;
-                      border-left: 1px solid var(--ic-line); }
+  /* Every cell padded identically, and the band pulled left by that padding so
+     the first value still lines up with the page content. The previous version
+     gave the first cell no left padding, which made it wider than the rest — so
+     its label sat where no other label did and the row read as misaligned. */
+  .ic-figs { margin-left: -.9rem; margin-right: -.9rem; }
+  .ic-fig { flex: 1 1 7rem; padding: .5rem .9rem .55rem; min-width: 6rem; }
+  .ic-fig + .ic-fig { border-left: 1px solid var(--ic-line); }
   .ic-fig-label { font-size: .63rem; letter-spacing: .085em;
                   text-transform: uppercase; opacity: .5;
                   margin-bottom: .12rem; white-space: nowrap;
@@ -131,9 +133,14 @@ CSS = """
   /* A hairline frame for a chart. Deliberately not the rounded, filled card
      used for stats: a chart needs a boundary so it reads as one object, but a
      heavy container competes with the plot for attention. */
-  [data-testid="stVerticalBlockBorderWrapper"] {
+  /* Bordered containers, targeted by the key frame() gives them. Streamlit puts
+     the border on the stVerticalBlock itself in this version, not on a wrapper
+     testid — the earlier selector matched nothing, so these panels were showing
+     Streamlit's default styling rather than this one. */
+  [class*="st-key-frame-"] {
       border-color: var(--ic-line) !important; border-radius: 6px !important;
-      background: var(--ic-surface-2); }
+      background: var(--ic-surface-2) !important;
+      padding: .55rem .7rem .3rem !important; }
   /* No negative top margin here. The wordmark is the tallest text on the page,
      and pulling it up past the container's padding clipped its ascenders — the
      top of "Aerobic Engine" was sliced off. */
@@ -155,11 +162,18 @@ CSS = """
       /* Offset by Streamlit's own toolbar, which is absolutely positioned at
          z-index 999990 over the top 60px of the page. At top:0 the app title
          sat underneath it and was invisible once scrolled. */
-      position: sticky; top: 0; z-index: 90;
+      /* Below the 60px header, so nothing shares a line with Deploy or with
+         the sidebar chevron. */
+      position: sticky; top: 3.75rem; z-index: 90;
       background: var(--ic-page);
-      padding: .35rem 11rem .45rem 0;
+      padding: .35rem 0 .4rem;
       border-bottom: 1px solid var(--ic-line);
-      margin-bottom: 1rem; }
+      margin-bottom: .35rem; }
+  /* The first heading after the bar does not need its own top padding: the bar
+     already provides the separation, and the two stacked into a visible gap. */
+  .st-key-topbar + div .ic-section:first-child,
+  [data-testid="stLayoutWrapper"]:has(> .st-key-topbar) + div .ic-section {
+      padding-top: .1rem; }
   /* The popover panel has to clear the bar it hangs from. */
   .stMain .st-key-topbar [data-testid="stPopoverBody"] { z-index: 95; }
 
@@ -177,8 +191,11 @@ CSS = """
      reference detail that belongs on About, the tabs become one horizontally
      scrollable row instead of three stacked ones, and the title and logo shrink. */
   @media (max-width: 700px) {
+    /* Static, so it does not spend half a phone screen — but it still has to
+       start below Streamlit's 60px header, which floats over the top. */
+    .block-container { padding-top: 3.6rem; }
     .stMain [data-testid="stLayoutWrapper"]:has(> .st-key-topbar) {
-        position: static; padding: .1rem 0 .35rem; margin-bottom: .6rem; }
+        position: static; padding: .1rem 0 .3rem; margin-bottom: .45rem; }
     .ic-brand-sub { display: none; }
     .ic-brand { gap: .5rem; margin-bottom: .25rem; }
     .ic-brand svg { width: 26px; height: 26px; }
@@ -195,12 +212,8 @@ CSS = """
     .ic-fig { flex: 1 1 44%; min-width: 44%; }
   }
 
-  /* Indented to clear Streamlit's sidebar chevron, which sits at x=18-46 and
-     y=16-44 — exactly where the title lands now that it shares the toolbar
-     band. Only this line is indented: the tabs below start under the chevron,
-     so they never collide with it. */
   .ic-brand { display: flex; align-items: center; gap: .55rem;
-              margin: 0 0 .3rem; padding-left: 2.5rem; }
+              margin: 0 0 .3rem; }
   .ic-brand svg { width: 26px; height: 26px; }
   .ic-brand svg { flex: 0 0 auto; opacity: .95; }
   .ic-brand-name { font-size: 1.22rem; font-weight: 680; line-height: 1.25;
@@ -398,7 +411,9 @@ def frame(title: str = ""):
     drawn between them. The border is restyled to a rule instead of the default
     filled card, which competes with the plot for attention.
     """
-    box = st.container(border=True)
+    # Keyed, because the key is the only stable CSS handle Streamlit offers for
+    # a container. Containers are not widgets, so a per-run counter is safe.
+    box = st.container(border=True, key=f"frame-{next(_FRAME_SEQ)}")
     with box:
         if title:
             st.markdown(f'<div class="ic-frame-title">{esc(title)}</div>',
@@ -543,10 +558,15 @@ def chart(fig, height: int = 260, date_axis: bool = False) -> None:
     fig.update_layout(
         # Tight margins: Plotly's defaults reserve room for a title and axis
         # labels this app draws in HTML above the chart instead.
-        height=height, margin=dict(t=6, b=2, l=2, r=2),
+        # The legend sits above the plot, not below it. Below, at y=-0.2, it
+        # landed in the same band as the tick labels and the two overlapped;
+        # there is no bottom margin large enough to separate them without
+        # wasting the space on every chart that has no legend.
+        height=height, margin=dict(t=26, b=4, l=2, r=2),
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         font=dict(size=12),
-        legend=dict(orientation="h", y=-0.2, x=0, font=dict(size=11)),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="left", x=0, font=dict(size=11)),
         hoverlabel=dict(font_size=12),
     )
     fig.update_xaxes(showgrid=False, zeroline=False, title=None)
@@ -574,5 +594,17 @@ def chart(fig, height: int = 260, date_axis: bool = False) -> None:
                 picked.append(days[-1])
             fig.update_xaxes(tickmode="array", tickvals=picked)
         fig.update_xaxes(tickformat="%a %-d %b", hoverformat="%a %-d %b %Y")
+        # Clamp the axis to the data. Several charts ask for a fixed window —
+        # twelve weeks of volume, ninety days of sessions — so an account with
+        # three weeks of history drew two months of blank axis before the first
+        # point, which reads as missing data rather than as data that does not
+        # exist yet.
+        if len(days) > 1:
+            span = (date.fromisoformat(days[-1]) - date.fromisoformat(days[0])).days
+            pad = timedelta(days=max(1, round(span * 0.04)))
+            fig.update_xaxes(range=[
+                (date.fromisoformat(days[0]) - pad).isoformat(),
+                (date.fromisoformat(days[-1]) + pad).isoformat(),
+            ])
     fig.update_yaxes(gridcolor="rgba(140,158,176,.15)", zeroline=False)
     st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})

@@ -393,15 +393,13 @@ def insight_banner(page: str, data: dict, today: date) -> None:
     tone = {"success": "good", "warning": "caution", "error": "bad",
             "info": "neutral"}[ins.tone]
     prose = (data.get("notes") or {}).get(page, {}).get("text")
-    # Headline only, with the prose and the numbers folded into one expander.
-    # Printing the headline and then a paragraph restating it, followed by a
-    # separate collapsed row, cost about 130px at the top of every page to say
-    # one sentence twice.
-    ui.banner(ins.headline, "", tone)
-    if prose or ins.bullets:
-        with st.expander("Why, and the numbers behind it"):
-            if prose:
-                st.markdown(prose)
+    # The written summary is visible, not folded away. The reason this app
+    # generates it at all is so the charts are optional — a summary behind a
+    # click is a summary nobody reads. The deterministic bullets stay collapsed:
+    # they are the workings, and the paragraph is the answer.
+    ui.banner(ins.headline, prose or "", tone)
+    if ins.bullets:
+        with st.expander("The numbers behind it"):
             for b in ins.bullets:
                 st.markdown(f"- {b}")
 
@@ -744,6 +742,64 @@ def week_cells(plan: dict | None, today: date,
 # --------------------------------------------------------------------------
 
 
+def acwr_note(sig) -> str:
+    """Acute:chronic load, in words. The number alone means nothing to most people."""
+    if not (sig and sig.acwr):
+        return "needs 3 weeks"
+    if sig.acwr > 1.3:
+        return "ramping too fast"
+    if sig.acwr < 0.8:
+        return "losing fitness"
+    return "sustainable"
+
+
+def acwr_tone(sig) -> str:
+    """Above 1.3 is the injury-risk zone; below 0.8 is detraining."""
+    if not (sig and sig.acwr):
+        return "neutral"
+    if sig.acwr > 1.3:
+        return "bad"
+    if sig.acwr < 0.8:
+        return "caution"
+    return "good"
+
+
+def week_targets(data: dict, today: date) -> dict[str, dict[str, int]]:
+    """Sessions done this week against sessions asked for, per sport.
+
+    The plan is the only thing that makes a session count good or bad — three
+    runs is excellent against a target of three and a warning sign against one.
+    """
+    start = week_start_of(today)
+    done: dict[str, int] = {}
+    for a in data.get("activities") or []:
+        try:
+            day = date.fromisoformat(str(a["start_date"])[:10])
+        except (KeyError, ValueError, TypeError):
+            continue
+        if start <= day <= today:
+            done[a.get("sport")] = done.get(a.get("sport"), 0) + 1
+
+    out: dict[str, dict[str, int]] = {}
+    for sport, target in (data.get("targets") or {}).items():
+        want = int(target.get("sessions") or 0)
+        if want:
+            out[sport] = {"want": want, "done": done.get(sport, 0)}
+    # No explicit target: fall back to what the plan actually prescribes.
+    plan = ((data.get("plan") or {}).get("plan")) or {}
+    for d in plan.get("week_plan") or []:
+        sp = d.get("sport")
+        if sp in ("rest", "strength") or (d.get("duration_min") or 0) <= 0:
+            continue
+        if sp not in out:
+            out[sp] = {"want": 0, "done": done.get(sp, 0)}
+        out[sp]["want"] = max(out[sp]["want"],
+                              sum(1 for x in plan["week_plan"]
+                                  if x.get("sport") == sp
+                                  and (x.get("duration_min") or 0) > 0))
+    return out
+
+
 def page_progress(data: dict, today: date) -> None:
     """Trend first, numbers second.
 
@@ -764,7 +820,8 @@ def page_progress(data: dict, today: date) -> None:
                "Each point is what this session's efficiency implies at your "
                "median pace, so sessions of different speeds are comparable. "
                "Down is progress.")
-    training_hr_block(acts, today, data.get("notes"), data.get("weather"))
+    with ui.frame():
+        training_hr_block(acts, today, data.get("notes"), data.get("weather"))
 
     rhr = baseline_trend(wl, "resting_hr", as_of=today, lower_is_better=True)
     hrv = baseline_trend(wl, "hrv_last_night", as_of=today, lower_is_better=False)
@@ -804,7 +861,7 @@ def page_progress(data: dict, today: date) -> None:
          "note": "Garmin estimate"},
         {"label": "Load ratio",
          "value": f"{sig.acwr:.2f}" if sig and sig.acwr else "—",
-         "note": "needs 3 weeks" if not (sig and sig.acwr) else "acute vs chronic"},
+         "note": acwr_note(sig), "tone": acwr_tone(sig)},
     ]
     if cad.get("avg"):
         figures.append({
@@ -813,13 +870,34 @@ def page_progress(data: dict, today: date) -> None:
                     if cad.get("avg_stride_cm") else "steps/min",
             "tone": {"low": "bad", "fair": "caution",
                      "good": "good"}.get(cad["verdict"], "neutral")})
+    # Per-sport counts are coloured against this week's plan, not against the
+    # lifetime total: "3 runs" is only good or bad relative to what was asked for.
+    planned = week_targets(data, today)
     for sport in shown_sports():
         row = tot["by_sport"].get(sport) or {}
         if not row.get("sessions"):
             continue
-        figures.append({
-            "label": sport.title(), "value": f"{int(row['sessions'])}",
-            "note": f"{row.get('km', 0):.0f} km · {hm(row.get('minutes') or 0)}"})
+        done_this_week = planned.get(sport, {}).get("done", 0)
+        want = planned.get(sport, {}).get("want", 0)
+        note = f"{row.get('km', 0):.0f} km · {hm(row.get('minutes') or 0)}"
+        tone = "neutral"
+        if want:
+            note = f"{done_this_week}/{want} this week · {note}"
+            # Judged against how much of the week has gone. Zero sessions on a
+            # Monday is not behind schedule; zero on a Saturday is.
+            elapsed = (today.weekday() + 1) / 7
+            expected = want * elapsed
+            if done_this_week >= want:
+                tone = "good"
+            elif done_this_week >= expected - 0.5:
+                tone = "neutral"
+            elif elapsed > 0.6:
+                tone = "bad"
+            else:
+                tone = "caution"
+        figures.append({"label": sport.title(),
+                        "value": f"{int(row['sessions'])}",
+                        "note": note, "tone": tone})
     if steps:
         figures.append({"label": "Steps / day", "value": f"{steps:,.0f}",
                         "note": "7-day average"})
@@ -846,17 +924,17 @@ def page_progress(data: dict, today: date) -> None:
 
     detail = st.tabs(["Volume", "Daily signals", "Cadence and stride",
                       "Running form", "Aerobic drift"])
-    with detail[0]:
+    with detail[0], ui.frame():
         st.caption("At most 10% growth a week, every fourth week easier.")
         volume_chart(data, today, data.get("notes"))
-    with detail[1]:
+    with detail[1], ui.frame():
         st.caption("Overnight measurements against your own baseline.")
         trend_chart(wl, today)
-    with detail[2]:
+    with detail[2], ui.frame():
         cadence_block(acts, today)
-    with detail[3]:
+    with detail[3], ui.frame():
         form_block(acts)
-    with detail[4]:
+    with detail[4], ui.frame():
         st.caption("Efficiency in the second half versus the first. Under 5% is "
                    "good durability.")
         drift_block(acts)
@@ -1296,6 +1374,7 @@ def volume_chart(data: dict, today: date,
 
 
 def page_plan(data: dict, today: date) -> None:
+    insight_banner("Plan", data, today)
     unlocked = writes_allowed()
     if not unlocked:
         st.caption("🔒 Read-only. Enter your PIN in the sidebar to make changes.")
@@ -2060,7 +2139,8 @@ def log_sessions(data: dict, today: date) -> None:
                                     showgrid=False, showticklabels=False,
                                     visible=False)
         fig.update_layout(**layout)
-        ui.chart(fig, 280)
+        with ui.frame():
+            ui.chart(fig, 280)
         if has_alt:
             gain = float(sdf["altitude_m"].diff().clip(lower=0).sum())
             st.caption(
@@ -2274,14 +2354,22 @@ def nav() -> str:
 
 
 def filter_summary(today: date, sports: list[str]) -> str:
-    """The popover's label. It has to say what is filtered, or the filter hides."""
+    """The popover's label — short, and only as long as it needs to be.
+
+    "This week · All sports" is the default state, so spelling it out spends the
+    widest label in the header saying nothing is filtered. The sports half
+    appears only when it is actually narrowing something.
+    """
     monday = week_start_of(today)
-    span = f"{monday.strftime('%d %b')} – {(monday + timedelta(days=6)).strftime('%d %b')}"
     if monday == week_start_of(date.today()):
         span = "This week"
-    picked = "All sports" if set(sports) >= set(FILTER_SPORTS) else ", ".join(
-        sp.title() for sp in sports)
-    return f"{span} · {picked}"
+    elif monday == week_start_of(date.today()) + timedelta(weeks=1):
+        span = "Next week"
+    else:
+        span = f"{monday.strftime('%-d %b')}"
+    if set(sports) >= set(FILTER_SPORTS):
+        return span
+    return f"{span} · " + ", ".join(sp[:4].title() for sp in sports)
 
 
 def filter_popover(data: dict, today: date) -> tuple[date, list[str]]:
@@ -2295,7 +2383,7 @@ def filter_popover(data: dict, today: date) -> tuple[date, list[str]]:
     label = filter_summary(
         remembered if isinstance(remembered, date) else today,
         active_sports(data))
-    with st.popover(f"⚙ {label}", width="stretch"):
+    with st.popover(f"⚙ {label}"):
         today = week_picker(today)
         sports = sport_filter(data)
         if set(sports) != set(FILTER_SPORTS):
@@ -2333,7 +2421,7 @@ def header_controls(data: dict, today: date) -> tuple[str, date, list[str]]:
         # viewport, the font size or the number of sports changes. A single
         # trigger button always fits, at any width, and its label carries the
         # current state so nothing is hidden.
-        nav_col, filter_col = st.columns([5, 2], vertical_alignment="center")
+        nav_col, filter_col = st.columns([7, 2], vertical_alignment="center")
         with nav_col:
             page = nav()
         with filter_col:

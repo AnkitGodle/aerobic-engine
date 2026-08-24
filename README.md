@@ -1,8 +1,32 @@
 # Aerobic Engine
 
-**Training analytics and adaptive planning for endurance athletes, built on your
-own Garmin data.** It answers one question properly — *am I getting faster at the
-same heart rate?* — and then plans the rest of the week around the answer.
+**Endurance training analytics and an adaptive weekly planner, built on your own
+Garmin data — and it runs for nothing.**
+
+Every part of the stack is a free tier, and not the crippled kind:
+
+| Piece | What it costs |
+|---|---|
+| Hosting — Streamlit Community Cloud | free |
+| Database — Neon Postgres | free, 0.5 GB, scales to zero |
+| AI — Gemini | free, ~1500 requests a day |
+| AI fallback — Groq | free, no card |
+| Garmin data | you already own it |
+
+No card, no trial clock, no per-seat anything. The AI layer is also optional:
+switch it off and the planner still produces a full week from the rules alone —
+the guardrails are the product, and they are deterministic.
+
+**The free tiers are not a compromise here, they are a fit.** A planning call is
+one chunky ~2.5K-token request a day, and the chart summaries are a dozen short
+ones after each sync. That shape sits comfortably inside a requests-per-day
+allowance, which is why Gemini leads and Groq backs it up: summaries fan out
+across both providers, so one rate-limiting hands its work to the other instead
+of pausing. Measured: fourteen summaries in 5.8 seconds.
+
+It answers one question properly — *am I getting faster at the same heart
+rate?* — and then plans the rest of the week around the answer, across swim,
+bike, run and leg strength, and sends each session to the watch.
 
 Rules first, AI second. A language model adjusts volume, intensity and placement;
 it cannot talk its way past a deload, invent an exercise, or exceed the weekly
