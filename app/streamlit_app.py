@@ -39,7 +39,10 @@ from app.freshness import purge_stale_modules, stamp_modules  # noqa: E402
 purge_stale_modules(log=logging.getLogger("aerobic_engine.ui").warning)
 
 import app.ui as ui  # noqa: E402
-from core import ai, insights, planner, strength, sync as sync_mod  # noqa: E402
+from core import (  # noqa: E402
+    ai, applog, insights, planner, rules as rules_mod, strength,
+    sync as sync_mod,
+)
 from core.analysis import (  # noqa: E402
     ACWR_HIGH,
     ACWR_LOW,
@@ -91,6 +94,11 @@ except ImportError:  # pragma: no cover - SQLite-only environments
 
 load_dotenv()
 log = logging.getLogger("aerobic_engine.ui")
+# Warnings and above are written to the database as well as stderr. On the hosted
+# app the on-screen message is redacted and the container log is behind another
+# login, so without this a failure on the phone is unreadable exactly when it
+# matters. Idempotent, and it fails quietly if the table is unreachable.
+applog.install(default_db())
 st.set_page_config(page_title="Aerobic Engine", page_icon="📈", layout="wide",
                    initial_sidebar_state="collapsed")
 
@@ -514,16 +522,22 @@ def exercise_howto(ex, prescription=None) -> None:
     meta = " · ".join(x for x in (ex.focus, ex.tempo and f"tempo {ex.tempo}") if x)
     if meta:
         st.caption(meta)
-    if ex.setup:
-        st.markdown(f"**Set up:** {ex.setup}")
-    if ex.steps:
-        st.markdown("\n".join(f"{i}. {step}" for i, step in enumerate(ex.steps, 1)))
+    # The dose stays on the page; the technique folds away. Five exercises spelled
+    # out in full is 1,800px of instructions on the one page you open every day,
+    # and by the fourth week you need the numbers, not the tutorial. One click
+    # still brings it back, and the mistake to avoid is the line worth keeping.
+    with st.expander("How to do it"):
+        if ex.setup:
+            st.markdown(f"**Set up:** {ex.setup}")
+        if ex.steps:
+            st.markdown("\n".join(f"{i}. {step}"
+                                  for i, step in enumerate(ex.steps, 1)))
+        if ex.why:
+            st.caption(f"Why it matters: {ex.why}")
+        if ex.load_note:
+            st.caption(f"Progressing: {ex.load_note}")
     if ex.mistakes:
-        st.markdown(f"**Common mistake:** {ex.mistakes}")
-    if ex.why:
-        st.caption(f"Why it matters: {ex.why}")
-    if ex.load_note:
-        st.caption(f"Progressing: {ex.load_note}")
+        st.caption(f"Avoid: {ex.mistakes}")
 
 
 def send_to_watch(prescriptions: list, day: date, label: str) -> None:
@@ -680,82 +694,81 @@ def page_today(data: dict, today: date) -> None:
                   if d["day"] == DAYS[today.weekday()]
                   and d.get("purpose") == "completed"]
 
-    left, right = st.columns([2, 1], gap="medium")
-    with left:
-        heading = "Tomorrow" if rolled else "Today"
-        ui.section(heading, f"It is past {EVENING_CUTOFF_HOUR}:00 — showing "
-                            f"{focus_day.strftime('%A')} instead."
-                   if rolled else "")
-        if not plan:
-            ui.banner("No plan for this week yet",
-                      "Open the Plan page and build one.", "neutral")
-        elif todo:
-            d = todo[0]
-            bits = [f"{d['duration_min']} min"] if d["duration_min"] else []
-            if d.get("target_hr"):
-                # The number the athlete actually watches mid-session.
-                bits.append(f"{d['target_hr']} ({d.get('target_zone', '')})".strip())
-            elif d.get("target_zone") not in (None, "n/a", ""):
-                bits.append(d["target_zone"])
-            names = [strength.EXERCISES[e].name for e in d.get("exercise_ids", [])
-                     if e in strength.EXERCISES]
-            ui.today_card(d["sport"], " · ".join(bits) or "—",
-                          "; ".join(names) if names else d.get("why", ""))
-            if d["sport"] != "strength":
-                send_session_to_watch(d, focus_day)
-            for extra in todo[1:]:
-                st.caption(f"also today: {EMOJI.get(extra['sport'], '')} "
-                           f"{extra['sport']} · {extra['duration_min']} min")
-        elif done_today:
-            ui.today_card("rest", "Session already logged today",
-                          " · ".join(f"{d['sport']} {d['duration_min']} min"
-                                     for d in done_today))
-        else:
-            ui.today_card("rest", "Nothing scheduled",
-                          "Rest is where the adaptation happens.")
-        # Sits here rather than at the foot of the page: it fills the column
-        # beside the stat cards, and it is the most useful thing on the screen.
-        insight_banner("Overview", data, today)
-        ask_block(data, today)
-    with right:
-        tone = {"deload": "bad", "hold": "neutral", "build": "good"}[verdict["verdict"]]
-        ui.section("Right now")
-        ui.stat("Verdict", verdict["headline"].rstrip("."),
-                " · ".join(verdict["reasons"])[:90] or "nothing arguing either way",
-                tone, small=True)
-        ui.stat("Readiness",
-                f"{sig.training_readiness:.0f}" if sig and sig.training_readiness else "—",
-                (sig.training_status or "morning reading") if sig else "no data",
-                "bad" if sig and sig.training_readiness and sig.training_readiness < 35
-                else "neutral")
-        ui.stat("Resting HR",
-                f"{sig.rhr_recent:.0f} bpm" if sig and sig.rhr_recent else "—",
-                f"{sig.rhr_delta:+.1f} vs 28-day" if sig and sig.rhr_delta is not None
-                else "building a baseline",
-                "bad" if sig and sig.rhr_delta and sig.rhr_delta > 3 else "neutral",
-                small=True)
-        # This column used to end here and leave a third of the screen empty
-        # beside the plan. The week's own progress belongs next to the verdict
-        # anyway: "back off" and "you have 20 minutes left of the ceiling" are
-        # the same decision.
-        ui.stat("Load ratio",
-                f"{sig.acwr:.2f}" if sig and sig.acwr else "—",
-                acwr_note(sig), acwr_tone(sig), small=True)
-        wk = week_summaries(acts, weeks=1, as_of=today,
-                            strength_rows=data["strength"])[-1]
-        left_min = max(0.0, env.max_week_minutes - wk.total_minutes)
-        ui.stat("Week so far", hm(wk.total_minutes),
-                f"{hm(left_min)} left of a {hm(env.max_week_minutes)} ceiling",
-                "caution" if left_min <= 0 else "neutral", small=True)
-        ui.proportion_bar([("done", wk.total_minutes, TONE["good"]),
-                           ("still allowed", left_min, "rgba(140,158,176,.35)")])
-        # Days trained rather than rest days: on a Monday morning "7 rest days"
-        # is arithmetically right and reads like a warning.
-        trained = len(facts.trained_days)
-        ui.stat("Days trained", f"{trained}/7",
-                f"{wk.rest_days} rest {'day' if wk.rest_days == 1 else 'days'} "
-                f"left in the week",
-                "bad" if wk.rest_days == 0 else "neutral", small=True)
+    # The written summary first, and full width. Every other page leads with it;
+    # on Today it sat below the session card, which made this the one page where
+    # the reading you actually want was under the thing it was about.
+    insight_banner("Overview", data, today)
+
+    # One column, not two. The right-hand stack of six cards was taller than the
+    # plan beside it, so whichever side was shorter left a third of the screen
+    # empty — first the right, then the left. The same six numbers read fine as a
+    # strip, and the session card gets the width it deserves.
+    tone = {"deload": "bad", "hold": "neutral", "build": "good"}[verdict["verdict"]]
+    wk = week_summaries(acts, weeks=1, as_of=today,
+                        strength_rows=data["strength"])[-1]
+    left_min = max(0.0, env.max_week_minutes - wk.total_minutes)
+    trained = len(facts.trained_days)
+    ui.figures([
+        {"label": "Verdict",
+         "value": {"deload": "Back off", "hold": "Hold", "build": "Build"}[
+             verdict["verdict"]],
+         "note": " · ".join(verdict["reasons"])[:60]
+                 or "nothing arguing either way", "tone": tone},
+        {"label": "Readiness",
+         "value": f"{sig.training_readiness:.0f}"
+                  if sig and sig.training_readiness else "—",
+         "note": (sig.training_status or "morning reading") if sig else "no data",
+         "tone": "bad" if sig and sig.training_readiness
+                 and sig.training_readiness < 35 else "neutral"},
+        {"label": "Resting HR",
+         "value": f"{sig.rhr_recent:.0f}" if sig and sig.rhr_recent else "—",
+         "note": f"{sig.rhr_delta:+.1f} vs 28-day"
+                 if sig and sig.rhr_delta is not None else "building a baseline",
+         "tone": "bad" if sig and sig.rhr_delta and sig.rhr_delta > 3
+                 else "neutral"},
+        {"label": "Load ratio", "value": f"{sig.acwr:.2f}" if sig and sig.acwr
+                                          else "—",
+         "note": acwr_note(sig), "tone": acwr_tone(sig)},
+        {"label": "Week so far", "value": hm(wk.total_minutes),
+         "note": f"{hm(left_min)} left of {hm(env.max_week_minutes)}",
+         "tone": "caution" if left_min <= 0 else "neutral"},
+        {"label": "Days trained", "value": f"{trained}/7",
+         "note": f"{wk.rest_days} rest "
+                 f"{'day' if wk.rest_days == 1 else 'days'} left",
+         "tone": "bad" if wk.rest_days == 0 else "neutral"},
+    ])
+
+    heading = "Tomorrow" if rolled else "Today"
+    ui.section(heading, f"It is past {EVENING_CUTOFF_HOUR}:00 — showing "
+                        f"{focus_day.strftime('%A')} instead." if rolled else "")
+    if not plan:
+        ui.banner("No plan for this week yet",
+                  "Open the Plan page and build one.", "neutral")
+    elif todo:
+        d = todo[0]
+        bits = [f"{d['duration_min']} min"] if d["duration_min"] else []
+        if d.get("target_hr"):
+            # The number the athlete actually watches mid-session.
+            bits.append(f"{d['target_hr']} ({d.get('target_zone', '')})".strip())
+        elif d.get("target_zone") not in (None, "n/a", ""):
+            bits.append(d["target_zone"])
+        names = [strength.EXERCISES[e].name for e in d.get("exercise_ids", [])
+                 if e in strength.EXERCISES]
+        ui.today_card(d["sport"], " · ".join(bits) or "—",
+                      "; ".join(names) if names else d.get("why", ""))
+        if d["sport"] != "strength":
+            send_session_to_watch(d, focus_day)
+        for extra in todo[1:]:
+            st.caption(f"also today: {EMOJI.get(extra['sport'], '')} "
+                       f"{extra['sport']} · {extra['duration_min']} min")
+    elif done_today:
+        ui.today_card("rest", "Session already logged today",
+                      " · ".join(f"{d['sport']} {d['duration_min']} min"
+                                 for d in done_today))
+    else:
+        ui.today_card("rest", "Nothing scheduled",
+                      "Rest is where the adaptation happens.")
+    ask_block(data, today)
 
     ui.section("This week",
                f"{hm(wk.total_minutes)} done of a {hm(env.max_week_minutes)} ceiling")
@@ -2085,9 +2098,144 @@ def page_plan(data: dict, today: date) -> None:
     # Settings last, and deliberately. The week is what this page is for;
     # zones, the easy ceiling and weekly volume get set once and then left,
     # and having them first pushed the plan itself halfway down the page.
-    with st.expander("Settings — heart-rate zones, easy ceiling and weekly targets"):
-        st.caption("Set these once. They shape every week that follows.")
+    st.caption("Zones, your easy ceiling, weekly targets and the training "
+               "rules themselves live on the Rules page.")
 
+
+
+
+# --------------------------------------------------------------------------
+# PAGE 4 — Rules
+#
+# Everything that shapes a week, in one place and editable. It used to be an
+# expander at the foot of the Plan page, which made the rules feel like a
+# footnote to the plan when they are the thing that produces it — and left the
+# athlete with no way to see that the endurance floor was three, never mind
+# change it.
+# --------------------------------------------------------------------------
+
+
+def page_rules(data: dict, today: date) -> None:
+    unlocked = writes_allowed()
+    with Store(db_path()) as s:
+        current = rules_mod.load(s)
+        facts = planner.build_facts(s, today=today)
+        env = planner.build_envelope(facts, s)
+
+    changed = rules_mod.changed_from_default(current)
+    if changed:
+        ui.banner(
+            f"{len(changed)} rule{'s' if len(changed) != 1 else ''} changed from "
+            f"the base-phase default",
+            "; ".join(f"{name.replace('_', ' ')} {mine} (default {default})"
+                      for name, (mine, default) in changed.items()),
+            "caution")
+    else:
+        ui.banner("Running on the base-phase defaults",
+                  "Three endurance sessions a week spaced a day apart, two leg "
+                  "sessions, 10% growth, every fourth week easier.", "neutral")
+
+    ui.section("This week, as the rules resolve it",
+               "What the numbers below actually produced.")
+    ui.figures([
+        {"label": "Week ceiling", "value": hm(env.max_week_minutes),
+         "note": f"{env.progression_cap_pct:.0f}% over "
+                 f"{hm(env.prev_week_minutes)} last week"},
+        {"label": "Block week", "value": f"{env.week_index + 1}/{env.block_weeks}",
+         "note": "last week of a block is a deload",
+         "tone": "caution" if env.deload else "neutral"},
+        {"label": "Endurance floor", "value": f"{env.min_endurance_sessions}",
+         "note": "spaced a day apart" if env.space_endurance else "spacing off"},
+        {"label": "Leg sessions", "value": f"{env.strength_sessions}",
+         "note": "reduced in a deload" if env.deload else "a week"},
+        {"label": "Rest days", "value": f"{env.min_rest_days}",
+         "note": "minimum"},
+        {"label": "Hard sessions", "value": f"{env.max_quality_sessions}",
+         "note": "allowed this week",
+         "tone": "caution" if env.max_quality_sessions == 0 else "neutral"},
+    ])
+
+    ui.section("Your rules", "Change one and the next plan follows it. Every "
+                            "value is clamped to a sane range on the way in.")
+    with st.form("rules"):
+        entered: dict[str, object] = {}
+        rows = rules_mod.describe(current)
+        cols = st.columns(2, gap="large")
+        for n, row in enumerate(rows):
+            with cols[n % 2]:
+                # Whole numbers stay whole. A session count rendered as "3.00"
+                # reads like a measurement rather than a choice.
+                whole = float(row["value"]).is_integer() and float(row["step"]) >= 1
+                entered[row["name"]] = st.number_input(
+                    row["label"],
+                    min_value=int(row["min"]) if whole else float(row["min"]),
+                    max_value=int(row["max"]) if whole else float(row["max"]),
+                    value=int(row["value"]) if whole else float(row["value"]),
+                    step=int(row["step"]) if whole else float(row["step"]),
+                    key=f"rule_{row['name']}",
+                    help=f"{row['why']} Default {row['default']}.")
+        entered["space_endurance"] = st.checkbox(
+            "Keep a clear day between endurance sessions",
+            value=current.space_endurance,
+            help="Leg strength is exempt — it belongs in the gaps.")
+        b = st.columns(2)
+        save = b[0].form_submit_button("Save rules", type="primary",
+                                      width="stretch", disabled=not unlocked)
+        reset = b[1].form_submit_button("Back to defaults", width="stretch",
+                                       disabled=not unlocked)
+    if (save or reset) and writes_allowed():
+        with Store(db_path()) as s:
+            saved = rules_mod.reset(s) if reset else rules_mod.save(s, entered)
+            # Changing a rule is a planning decision, so the week is rebuilt
+            # against it immediately rather than waiting to be asked.
+            stored = (data.get("plan") or {}).get("plan") or {}
+            if stored and stored.get("source") != "manual":
+                fixed, _ = planner.reapply_rules(
+                    s, stored, today=today, only_sports=data.get("scoped_to"))
+                s.save_plan(week_start_of(today), fixed.model_dump(mode="json"),
+                            fixed.source)
+                st.session_state["plan"] = fixed.model_dump(mode="json")
+        refresh()
+        st.toast(f"Saved. Endurance floor {saved.min_endurance_sessions}, "
+                 f"{saved.progression_cap_pct:.0f}% growth cap.")
+        st.rerun()
+
+    ui.section("The deload triggers, and where you are against them",
+               "Fixed on purpose. Any one of these forces a deload whatever the "
+               "check-in says, which is what stops a good mood becoming a bad "
+               "week.")
+    sig = recovery_signals(data["wellness"], data["activities"], as_of=today) \
+        if data.get("wellness") else None
+    live = []
+    if sig:
+        live = [
+            ("HRV vs 28-day baseline",
+             f"{sig.hrv_delta_pct:+.1f}%" if sig.hrv_delta_pct is not None else "—",
+             f"deload at {planner.HRV_DROP_PCT:.0f}%"),
+            ("Resting HR vs baseline",
+             f"{sig.rhr_delta:+.1f} bpm" if sig.rhr_delta is not None else "—",
+             f"deload at +{planner.RHR_RISE_BPM:.0f} bpm"),
+            ("Training Readiness",
+             f"{sig.training_readiness:.0f}" if sig.training_readiness else "—",
+             f"deload under {planner.READINESS_FLOOR:.0f}"),
+            ("Load ratio (7 vs 28 days)",
+             f"{sig.acwr:.2f}" if sig.acwr else "—",
+             f"deload over {planner.ACWR_CEILING:.2f}"),
+        ]
+    if live:
+        ui.rows(live)
+    else:
+        st.caption("No recovery data yet, so nothing to compare against.")
+    if env.deload_reasons:
+        st.caption("Firing right now: " + "; ".join(env.deload_reasons))
+
+    ui.section("Also fixed", "Not numbers, but not yours to move either.")
+    ui.rows([(what, "fixed", why) for what, why in rules_mod.FIXED])
+
+    ui.section("Settings", "Your zones, what counts as easy, and how much of "
+                          "each sport you want.")
+
+    with st.expander("Heart-rate zones and what counts as easy for you"):
         with Store(db_path()) as _s:
             bounds = zone_bounds(_s.zones())
         if bounds:
@@ -2154,74 +2302,71 @@ def page_plan(data: dict, today: date) -> None:
                         f"samples, and shows both numbers side by side."
                     )
 
-        ui.section("Your weekly targets",
-                   "How much of each sport you want. The scheduler builds around this; "
-                   "the safety rules still cap the total.")
-        existing = data["targets"]
-        suggestions = suggested_targets(today, data.get("scoped_to"))
-        with st.form("targets"):
-            st.caption("Pre-filled from your own recent weeks — edit anything you "
-                       "disagree with. Use the header toggle to drop a sport "
-                       "entirely; it then gets no sessions and no long-session "
-                       "requirement, and its share of the week goes to the rest.")
-            rows = []
-            for sport in shown_sports():
-                cur = existing.get(sport) or {}
-                hint = suggestions.get(sport) or {}
-                # An empty box asks the athlete to guess a number the app already has
-                # the evidence for, so a saved value wins and a suggestion fills the
-                # gap. The reasoning is shown either way.
-                default_sessions = int(cur.get("sessions") or hint.get("sessions") or 0)
-                default_minutes = int(cur.get("minutes") or hint.get("minutes") or 0)
-                c = st.columns([1.35, 1, 1], vertical_alignment="center")
-                c[0].markdown(f"{EMOJI[sport]} **{sport.title()}**")
-                if hint.get("basis"):
-                    c[0].caption(("saved" if cur.get("sessions") else "suggested")
-                                 + f" · {hint['basis']}")
-                rows.append({
-                    "sport": sport,
-                    # Preserved, not re-decided here: the header toggle is the one
-                    # place that answers "is this sport on?".
-                    "enabled": int(bool(cur.get("enabled", 1))),
-                    "sessions": c[1].number_input("sessions", 0, 7, default_sessions,
-                                                  key=f"ts_{sport}"),
-                    "minutes": c[2].number_input("minutes", 0, 900, default_minutes,
-                                                 step=15, key=f"tm_{sport}"),
-                })
-            b = st.columns(2)
-            save = b[0].form_submit_button("Save targets", type="primary",
-                                           width="stretch", disabled=not unlocked)
-            clear = b[1].form_submit_button("Clear", width="stretch",
-                                            disabled=not unlocked)
-        if (save or clear) and writes_allowed():
-            # Changing which sports are on IS a planning decision, so rebuild
-            # immediately rather than making the athlete find a second button.
-            with Store(db_path()) as s:
-                if clear:
-                    s.clear_targets()
-                else:
-                    s.set_targets(rows)
-                last = s.latest_checkin()
-                ci = Checkin(
-                    date=today, sleep=(last or {}).get("sleep") or 3,
-                    soreness=(last or {}).get("soreness") or 3,
-                    motivation=(last or {}).get("motivation") or 3,
-                    time_available_min=(last or {}).get("time_available_min") or 90,
-                    notes=(last or {}).get("notes") or "") if last else None
-                with st.spinner("Rebuilding your week around that…"):
-                    plan = planner.plan_week(s, checkin=ci, today=today,
-                                             use_ai=ai.available(),
-                                             only_sports=data.get("scoped_to"))
-            st.session_state["plan"] = plan.model_dump(mode="json")
-            st.session_state.pop("plan_editor", None)
-            refresh()
-            st.rerun()
-
-
-
+    ui.section("Your weekly targets",
+               "How much of each sport you want. The scheduler builds around this; "
+               "the safety rules still cap the total.")
+    existing = data["targets"]
+    suggestions = suggested_targets(today, data.get("scoped_to"))
+    with st.form("targets"):
+        st.caption("Pre-filled from your own recent weeks — edit anything you "
+                   "disagree with. Use the header toggle to drop a sport "
+                   "entirely; it then gets no sessions and no long-session "
+                   "requirement, and its share of the week goes to the rest.")
+        rows = []
+        for sport in shown_sports():
+            cur = existing.get(sport) or {}
+            hint = suggestions.get(sport) or {}
+            # An empty box asks the athlete to guess a number the app already has
+            # the evidence for, so a saved value wins and a suggestion fills the
+            # gap. The reasoning is shown either way.
+            default_sessions = int(cur.get("sessions") or hint.get("sessions") or 0)
+            default_minutes = int(cur.get("minutes") or hint.get("minutes") or 0)
+            c = st.columns([1.35, 1, 1], vertical_alignment="center")
+            c[0].markdown(f"{EMOJI[sport]} **{sport.title()}**")
+            if hint.get("basis"):
+                c[0].caption(("saved" if cur.get("sessions") else "suggested")
+                             + f" · {hint['basis']}")
+            rows.append({
+                "sport": sport,
+                # Preserved, not re-decided here: the header toggle is the one
+                # place that answers "is this sport on?".
+                "enabled": int(bool(cur.get("enabled", 1))),
+                "sessions": c[1].number_input("sessions", 0, 7, default_sessions,
+                                              key=f"ts_{sport}"),
+                "minutes": c[2].number_input("minutes", 0, 900, default_minutes,
+                                             step=15, key=f"tm_{sport}"),
+            })
+        b = st.columns(2)
+        save = b[0].form_submit_button("Save targets", type="primary",
+                                       width="stretch", disabled=not unlocked)
+        clear = b[1].form_submit_button("Clear", width="stretch",
+                                        disabled=not unlocked)
+    if (save or clear) and writes_allowed():
+        # Changing which sports are on IS a planning decision, so rebuild
+        # immediately rather than making the athlete find a second button.
+        with Store(db_path()) as s:
+            if clear:
+                s.clear_targets()
+            else:
+                s.set_targets(rows)
+            last = s.latest_checkin()
+            ci = Checkin(
+                date=today, sleep=(last or {}).get("sleep") or 3,
+                soreness=(last or {}).get("soreness") or 3,
+                motivation=(last or {}).get("motivation") or 3,
+                time_available_min=(last or {}).get("time_available_min") or 90,
+                notes=(last or {}).get("notes") or "") if last else None
+            with st.spinner("Rebuilding your week around that…"):
+                plan = planner.plan_week(s, checkin=ci, today=today,
+                                         use_ai=ai.available(),
+                                         only_sports=data.get("scoped_to"))
+        st.session_state["plan"] = plan.model_dump(mode="json")
+        st.session_state.pop("plan_editor", None)
+        refresh()
+        st.rerun()
 
 # --------------------------------------------------------------------------
-# PAGE 4 — Log
+# PAGE 5 — Log
 # --------------------------------------------------------------------------
 
 
@@ -2574,6 +2719,21 @@ def page_about(data: dict, today: date) -> None:
         ("Garmin waits 28 days for a trend", "this", "answers in about two"),
     ])
 
+    ui.section("Where things are",
+               "Six pages, in the order you would use them.")
+    ui.rows([
+        ("Today", "what to do now",
+         "the session, a written reading, and a coach you can ask"),
+        ("Progress", "is it working",
+         "heart rate at your usual pace, intensity mix, load ramp, drift"),
+        ("Plan", "the week", "check in, see the week, edit it, send it"),
+        ("Rules", "the settings",
+         "session floors, growth cap, deload cadence, zones and targets"),
+        ("Lifetime", "how far you have come",
+         "totals, race predictions, records, and every day you showed up"),
+        ("Log", "the record", "sessions, leg work, raw tables, and app errors"),
+    ])
+
     ui.section("What the AI is not allowed to do",
                "It writes and it places sessions. It does not do the arithmetic.")
     ui.rows([
@@ -2634,13 +2794,54 @@ def page_about(data: dict, today: date) -> None:
 
 
 def page_log(data: dict, today: date) -> None:
-    tabs = st.tabs(["Sessions", "Strength", "Data"])
+    tabs = st.tabs(["Sessions", "Strength", "Data", "App log"])
     with tabs[0]:
         log_sessions(data, today)
     with tabs[1]:
         log_strength(data, today)
     with tabs[2]:
         log_data(data)
+    with tabs[3]:
+        log_app(data)
+
+
+LOG_TONE = {"ERROR": "bad", "CRITICAL": "bad", "WARNING": "caution",
+            "EVENT": "good", "INFO": "neutral"}
+
+
+def log_app(data: dict) -> None:  # noqa: ARG001 - symmetry with the other tabs
+    """What the app itself has been doing, out of the database.
+
+    Here because the hosted dashboard redacts its own error messages and the
+    container log is behind another login — so this is the only place a failure
+    that happened on the phone can actually be read.
+    """
+    target = db_path()
+    tallies = applog.counts(target, days=7)
+    if tallies:
+        ui.figures([
+            {"label": level.title(), "value": f"{count}",
+             "note": "last 7 days",
+             "tone": LOG_TONE.get(level, "neutral")}
+            for level, count in sorted(tallies.items())
+        ])
+    levels = ["ALL", "ERROR", "WARNING", "EVENT", "INFO"]
+    picked = st.segmented_control("Level", levels, default="ALL",
+                                 key="applog_level",
+                                 label_visibility="collapsed") or "ALL"
+    rows = applog.recent(target, limit=300, level=picked)
+    if not rows:
+        st.caption("Nothing logged yet. Warnings, errors and milestones land "
+                   "here; ordinary page loads do not.")
+        return
+    table(pd.DataFrame([{
+        "when": fmt_stamp(r["at"]), "level": r["level"],
+        "where": (r["logger"] or "").replace("aerobic_engine.", ""),
+        "message": r["message"],
+        "detail": (r["context"] or "")[:300],
+    } for r in rows]))
+    st.caption(f"Newest first, {len(rows)} shown. The table keeps the most "
+               f"recent {applog.KEEP_ROWS} entries and prunes itself.")
 
 
 def log_sessions(data: dict, today: date) -> None:
@@ -3006,7 +3207,8 @@ def sidebar(data: dict) -> None:
 FILTER_SPORTS = ("run", "bike", "swim", "strength")
 
 
-PAGES = ("Today", "Progress", "Plan", "Lifetime", "Log", "About")
+PAGES = ("Today", "Progress", "Plan", "Rules", "Lifetime", "Log",
+         "About")
 
 
 def nav() -> str:
@@ -3337,6 +3539,7 @@ def main() -> None:
     data = scope_to_sports(data, sports)
 
     {"Today": page_today, "Progress": page_progress, "Plan": page_plan,
+      "Rules": page_rules,
      "Lifetime": page_lifetime, "Log": page_log,
      "About": page_about}[page](data, today)
 

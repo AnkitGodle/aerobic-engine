@@ -752,3 +752,57 @@ def test_a_hand_edited_week_is_left_exactly_as_saved(healthy):
     assert changed is False
     assert [d.duration_min for d in after.week_plan] == [95, 180, 60]
     assert [d.target_zone for d in after.week_plan] == ["Z5", "Z4", "Z2"]
+
+
+def test_the_endurance_floor_counts_sessions_already_done(healthy):
+    """The floor is three sessions a week, not three still to come. Counting only
+    the remaining days added a fourth session on a Wednesday that already had a
+    swim, a ride and a run behind it — and put it on the same day as the run."""
+    from core import planner
+
+    facts = planner.build_facts(healthy, today=TODAY)
+    assert len(facts.endurance_days) >= 3, facts.endurance_days
+
+    plan = planner.plan_week(healthy, today=TODAY, use_ai=False, save=False)
+    assert not any("floor" in note for note in plan.adjustments_made), \
+        plan.adjustments_made
+
+
+def test_nothing_is_scheduled_onto_a_day_that_already_trained(healthy):
+    """Spacing used to compare proposals only against each other. Completed rows
+    are merged into the plan after enforce() runs, so a ride could land on a day
+    that already had a run on it — the one thing the rule exists to prevent."""
+    from core import planner
+
+    facts = planner.build_facts(healthy, today=TODAY)
+    plan = planner.plan_week(healthy, today=TODAY, use_ai=False, save=False)
+    proposed = [d for d in plan.week_plan
+                if d.purpose != "completed" and d.duration_min > 0
+                and d.sport in planner.SPACED_SPORTS]
+    order = {d: i for i, d in enumerate(DAYS)}
+    busy = {order[d] for d in facts.endurance_days}
+    clashes = [d.day for d in proposed
+               if any(abs(order[d.day] - b) <= 1 for b in busy)]
+    assert not clashes, clashes
+
+
+def test_the_floor_is_satisfied_by_sessions_already_completed(healthy):
+    """Directly, because the spacing rule can mask this: with three endurance
+    days already behind you and empty days ahead, the floor must not add more."""
+    from core import planner
+
+    facts = planner.build_facts(healthy, today=TODAY)
+    facts = facts.model_copy(update={
+        "endurance_days": ["Mon", "Tue", "Wed"],
+        "days_remaining": ["Wed", "Thu", "Fri", "Sat", "Sun"],
+    })
+    envelope = planner.build_envelope(facts, healthy)
+    notes: list[str] = []
+    days = planner._ensure_minimum_endurance([], facts, envelope, notes)
+    assert days == []
+    assert notes == []
+
+    # And the other way: nothing done yet, so the floor does add sessions.
+    empty = facts.model_copy(update={"endurance_days": []})
+    added = planner._ensure_minimum_endurance([], empty, envelope, [])
+    assert len(added) == envelope.min_endurance_sessions

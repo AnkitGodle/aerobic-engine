@@ -47,11 +47,14 @@ Enforced in practice: nothing under `core/` imports `streamlit`, and only
 ```
 aerobic-engine/
   app/streamlit_app.py       # UI only — thin
+  app/freshness.py           # drop modules a hosted container kept from a previous deploy
   core/
     garmin_client.py         # login (cached session), incremental fetch
     store.py                 # Postgres/SQLite read/write, schema, migrations
     analysis.py              # EF, decoupling, RHR/HRV/VO2max trends, weekly load
     planner.py               # facts + rules envelope + enforcement + calls ai
+    rules.py                 # the editable rules: stored, clamped, shown on the Rules page
+    applog.py                # warnings and milestones into the database, readable in the app
     ai.py                    # plan_week(payload) -> plan ; JSON contract
     insights.py              # deterministic page/chart readings, then prose
     sync.py                  # the sync itself, shared by CLI and dashboard
@@ -213,6 +216,13 @@ heavy/low-rep; tendons want slow, heavy or isometric loading and adapt slowly.
 
 ## 12. Constraints & guardrails (summary)
 
+- **Two kinds of rule, and the split is deliberate.** The *shape* of a week is the
+  athlete's — endurance floor, strength count, rest days, growth cap, block
+  length, brick cadence — so those live in `core/rules.py`, are stored one key
+  per rule, clamped to a range, and edited on the Rules page. The *backstop* is
+  not: the deload triggers, the strength library, the hard-session cap and the
+  no-plyometrics rule stay in code. The Rules page shows both, because "you
+  cannot change this" is itself information.
 - Rules override the AI, always. The AI adjusts volume / intensity / placement only.
 - Strength exercises are a fixed library; the AI cannot add exercises. Strength
   progression is deterministic.

@@ -136,6 +136,13 @@ class Envelope(BaseModel):
     progression_cap_pct: float = 10.0
     min_rest_days: int = 1
     strength_sessions: int = 2
+    # The athlete's own rules, resolved when the envelope was built. Carried here
+    # rather than read again inside enforce(): one week is checked against one set
+    # of numbers, even if the settings change while the page is open.
+    min_endurance_sessions: int = 3
+    space_endurance: bool = True
+    block_weeks: int = 4
+    deload_cut_pct: float = 35.0
     brick_required: bool = False
     max_quality_sessions: int = 2
     # deload | hold | build — whether recovery argues for less, the same, or more
@@ -176,6 +183,10 @@ class PlannerFacts(BaseModel):
     recent_checkins: list[Checkin] = Field(default_factory=list)
     days_remaining: list[str] = Field(default_factory=list)
     trained_days: list[str] = Field(default_factory=list)  # already active this week
+    # Days that already carry a swim, ride, run or brick. Distinct from
+    # trained_days, which counts a strength-only day — and a strength-only day is
+    # precisely where the spacing rule wants to put an endurance session.
+    endurance_days: list[str] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------

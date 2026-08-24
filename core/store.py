@@ -310,6 +310,21 @@ SCHEMA: list[str] = [
         value TEXT
     )
     """,
+    # Application log. Kept in the database rather than only on stderr because
+    # the one place an error actually matters is the hosted dashboard, where the
+    # message is redacted on screen and the container's log is behind another
+    # login. Warnings and above, plus deliberate milestones, land here and are
+    # readable on the Log page.
+    """
+    CREATE TABLE IF NOT EXISTS app_log (
+        id      INTEGER PRIMARY KEY AUTOINCREMENT,
+        at      TEXT NOT NULL,
+        level   TEXT NOT NULL,
+        logger  TEXT,
+        message TEXT NOT NULL,
+        context TEXT
+    )
+    """,
 ]
 
 

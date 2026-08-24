@@ -15,11 +15,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from typing import Any, Callable
 
-from core import strength
+from core import applog, strength
 from core.analysis import compute_activity_metrics
 from core.garmin_client import GarminClient, date_range
 from core.garmin_guard import GarminGuard
-from core.store import Store
+from core.store import Store, default_db
 
 log = logging.getLogger("aerobic_engine.sync")
 
@@ -537,6 +537,10 @@ def _sync_locked(
     stats["metrics"] = recompute_metrics(store, list(dict.fromkeys(recompute)))
     store.set_state("last_sync", datetime.now().isoformat(timespec="seconds"))
     log.info("Sync complete: %s", stats)
+    # Written to the database too: a scheduled sync has nobody watching stderr,
+    # and "when did this last actually work" is the first question after a gap.
+    applog.event(db or default_db(), "Garmin sync complete", **{
+        k: v for k, v in stats.items() if isinstance(v, (int, float))})
     store.close()
 
     if progress:

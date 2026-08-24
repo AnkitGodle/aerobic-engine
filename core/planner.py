@@ -19,7 +19,7 @@ from collections.abc import Sequence
 from datetime import date, timedelta
 from typing import Any
 
-from core import ai, strength
+from core import ai, rules as rules_mod, strength
 from core.analysis import (
     all_ef_trends,
     zone_bounds,
@@ -133,9 +133,10 @@ DAY_TEMPLATE: tuple[tuple[str, str, str, bool], ...] = (
 # whole reason it is scheduled there.
 SPACED_SPORTS = ("swim", "bike", "run", "brick")
 
-# Below this the week stops being training. Three endurance sessions is the
-# athlete's own floor.
-MIN_ENDURANCE_SESSIONS = 3
+# Below this the week stops being training. The athlete can raise or lower it on
+# the Rules page; this is the default, and core/rules.py owns it. At runtime the
+# value comes off the envelope, which was built from their setting.
+MIN_ENDURANCE_SESSIONS = rules_mod.DEFAULTS.min_endurance_sessions
 
 # What a session added to reach that floor is worth during a deload. Short
 # enough to keep the week genuinely reduced, long enough to be worth doing.
@@ -151,11 +152,12 @@ ACWR_CEILING = 1.3       # acute:chronic workload ratio
 BAD_HRV_STATUS = {"unbalanced", "low", "poor"}
 BAD_STATUS_WORDS = ("overreaching", "unproductive", "detraining", "strained")
 
-DELOAD_FACTOR = 0.65     # ~35% volume cut
-PROGRESSION_CAP_PCT = 10.0
+# Defaults, all overridable on the Rules page — see core/rules.py.
+DELOAD_FACTOR = 1.0 - rules_mod.DEFAULTS.deload_cut_pct / 100.0
+PROGRESSION_CAP_PCT = rules_mod.DEFAULTS.progression_cap_pct
 STARTING_WEEK_MIN = 360.0  # sane first week when there is no history
 ABSOLUTE_WEEK_CEILING = 900.0
-BLOCK_WEEKS = 4
+BLOCK_WEEKS = rules_mod.DEFAULTS.block_weeks
 
 
 # --------------------------------------------------------------------------
@@ -206,6 +208,17 @@ def build_facts(
         key=DAYS.index,
     )
 
+    endurance_days = sorted(
+        {
+            DAYS[date.fromisoformat(a["start_date"]).weekday()]
+            for a in activities
+            if ws <= date.fromisoformat(a["start_date"]) <= today
+            and (a.get("duration_s") or 0) > 0
+            and (a.get("sport") or "") in SPACED_SPORTS
+        },
+        key=DAYS.index,
+    )
+
     return PlannerFacts(
         week_start=ws,
         today=today,
@@ -216,6 +229,7 @@ def build_facts(
         recent_checkins=checkins,
         days_remaining=list(DAYS[today.weekday() :]),
         trained_days=trained,
+        endurance_days=endurance_days,
     )
 
 
@@ -296,8 +310,9 @@ def readiness_verdict(facts: PlannerFacts) -> dict[str, Any]:
     }
 
 
-def week_index(facts: PlannerFacts, store: Store | None = None) -> int:
-    """Position in the 4-week block, anchored on the first week of training."""
+def week_index(facts: PlannerFacts, store: Store | None = None,
+               block_weeks: int = BLOCK_WEEKS) -> int:
+    """Position in the block, anchored on the first week of training."""
     anchor: date | None = None
     if store is not None:
         raw = store.get_state("block_anchor")
@@ -314,7 +329,7 @@ def week_index(facts: PlannerFacts, store: Store | None = None) -> int:
             anchor = week_start_of(first) if first else facts.week_start
             store.set_state("block_anchor", anchor.isoformat())
     anchor = anchor or facts.week_start
-    return max(0, (facts.week_start - anchor).days // 7) % BLOCK_WEEKS
+    return max(0, (facts.week_start - anchor).days // 7) % max(1, block_weeks)
 
 
 def build_envelope(
@@ -335,16 +350,19 @@ def build_envelope(
     if targets is None and store is not None:
         targets = store.targets()
     targets = targets or {}
-    idx = week_index(facts, store)
+    settings = rules_mod.load(store) if store is not None else rules_mod.DEFAULTS
+    deload_factor = 1.0 - settings.deload_cut_pct / 100.0
+    idx = week_index(facts, store, settings.block_weeks)
     # Today's recovery signals govern today's week. They must NOT govern a week
     # that has not started: Training Readiness recovers overnight, so a plan for
     # next Monday built on tonight's trough would be permanently deloaded. The
     # scheduled 4-week deload still applies, and the real signals are re-checked
     # when the week arrives.
     triggers = deload_triggers(facts) if include_recovery_triggers else []
-    scheduled_deload = idx == BLOCK_WEEKS - 1
+    scheduled_deload = idx == settings.block_weeks - 1
     if scheduled_deload:
-        triggers.insert(0, f"scheduled deload (week {idx + 1} of {BLOCK_WEEKS})")
+        triggers.insert(0, f"scheduled deload (week {idx + 1} of "
+                           f"{settings.block_weeks})")
     deload = bool(triggers)
 
     recent = [w for w in facts.previous_weeks[-3:] if w.total_minutes > 0]
@@ -354,14 +372,16 @@ def build_envelope(
     verdict = (readiness_verdict(facts)["verdict"] if include_recovery_triggers
                else ("deload" if scheduled_deload else "hold"))
     if deload:
-        budget = (prev or typical or STARTING_WEEK_MIN) * DELOAD_FACTOR
+        budget = (prev or typical or STARTING_WEEK_MIN) * deload_factor
     elif prev < 120:
         # No meaningful history (new user, illness, holiday) — start sensibly
         # rather than applying a percentage to near-zero.
-        budget = min(STARTING_WEEK_MIN, max(typical * (1 + PROGRESSION_CAP_PCT / 100), 240))
+        budget = min(STARTING_WEEK_MIN,
+                     max(typical * (1 + settings.progression_cap_pct / 100), 240))
     else:
         # "hold" takes a conservative half-step; "build" takes the full cap.
-        step = PROGRESSION_CAP_PCT if verdict == "build" else PROGRESSION_CAP_PCT / 2
+        step = (settings.progression_cap_pct if verdict == "build"
+                else settings.progression_cap_pct / 2)
         budget = prev * (1 + step / 100)
     budget = round(min(budget, ABSOLUTE_WEEK_CEILING))
 
@@ -381,7 +401,7 @@ def build_envelope(
 
     # An explicit total target may lower the week but never raise it past the cap.
     if total_target > 0:
-        budget = round(min(budget, total_target * (DELOAD_FACTOR if deload else 1.0)))
+        budget = round(min(budget, total_target * (deload_factor if deload else 1.0)))
 
     # A sport the athlete has switched off is not planned at all — no sessions,
     # no minutes, no long-session requirement. Its share of the week goes to the
@@ -438,14 +458,22 @@ def build_envelope(
         deload_reasons=triggers,
         max_week_minutes=budget,
         prev_week_minutes=prev,
-        progression_cap_pct=PROGRESSION_CAP_PCT,
-        min_rest_days=2 if deload else 1,
+        progression_cap_pct=settings.progression_cap_pct,
+        # A deload week gets one rest day more than the athlete's floor: the
+        # point of the week is the recovery, not the sessions.
+        min_rest_days=settings.min_rest_days + (1 if deload else 0),
         strength_sessions=(
             0 if (only_sports is not None
                   and "strength" not in {str(sp).lower() for sp in only_sports})
-            else (1 if deload else 2)
+            else (max(0, settings.strength_sessions - 1) if deload
+                  else settings.strength_sessions)
         ),
-        brick_required=(not deload) and idx % 2 == 1,
+        brick_required=(not deload) and bool(settings.brick_every_weeks)
+        and idx % settings.brick_every_weeks == settings.brick_every_weeks - 1,
+        min_endurance_sessions=settings.min_endurance_sessions,
+        space_endurance=settings.space_endurance,
+        block_weeks=settings.block_weeks,
+        deload_cut_pct=settings.deload_cut_pct,
         max_quality_sessions=0 if deload else (2 if verdict == "build" else 1),
         readiness_verdict=verdict,
         build_signals=readiness_verdict(facts)["positives"],
@@ -782,7 +810,7 @@ def enforce(
     days = _ensure_minimum_endurance(days, facts, envelope, notes)
 
     # 9. Endurance sessions keep a clear day between them.
-    days = _space_endurance(days, facts, notes)
+    days = _space_endurance(days, facts, envelope, notes)
 
     # 10. Minimum rest days across the whole week.
     days = _ensure_rest_days(days, facts, envelope, notes)
@@ -848,8 +876,14 @@ def _ensure_minimum_endurance(
     floor_minutes = DELOAD_SESSION_MIN if envelope.deload else None
 
     order = {d: i for i, d in enumerate(DAYS)}
+    floor = envelope.min_endurance_sessions
     live = [d for d in days if d.sport in SPACED_SPORTS and d.duration_min > 0]
-    if len(live) >= MIN_ENDURANCE_SESSIONS:
+    # Sessions already done this week count. They are endurance sessions in the
+    # week the floor is about, and ignoring them added a fourth session on a
+    # Wednesday that already had three behind it.
+    done_days = [d for d in facts.endurance_days
+                 if d not in {x.day for x in live}]
+    if len(live) + len(done_days) >= floor:
         return days
 
     per_sport: dict[str, int] = {}
@@ -868,20 +902,30 @@ def _ensure_minimum_endurance(
     if not candidates:
         return days
 
-    used = {d.day for d in days if d.duration_min > 0}
+    used = {d.day for d in days if d.duration_min > 0} | set(facts.endurance_days)
     open_days = [day for day in (facts.days_remaining or DAYS) if day not in used]
     # Furthest from what is already scheduled, so the spacing step has to move
-    # as little as possible afterwards.
-    busy = sorted(order[d.day] for d in live if d.day in order)
+    # as little as possible afterwards. Completed sessions count as busy: adding
+    # a ride to a day that already had a run on it is the one thing the spacing
+    # rule exists to prevent, and this step runs before it.
+    busy = sorted({order[d.day] for d in live if d.day in order}
+                  | {order[d] for d in facts.endurance_days if d in order})
 
     def gap(day: str) -> int:
         i = order.get(day, 99)
         return min((abs(i - b) for b in busy), default=99)
 
+    if envelope.space_endurance:
+        spaced = [d for d in open_days if gap(d) > 1]
+        # Only if something is left. A floor of three on a Friday can be
+        # unsatisfiable with a clear day between every session, and a short
+        # session on a busy day beats no session — the spacing step will say so.
+        if spaced:
+            open_days = spaced
     open_days.sort(key=lambda d: (-gap(d), order.get(d, 99)))
 
     added = 0
-    while len(live) + added < MIN_ENDURANCE_SESSIONS and open_days:
+    while len(live) + len(done_days) + added < floor and open_days:
         sport = next((sp for sp in candidates if room(sp)), None)
         if sport is None:
             break
@@ -890,8 +934,7 @@ def _ensure_minimum_endurance(
         days.append(PlanDay(
             day=day, sport=sport, duration_min=minutes, target_zone="Z2",
             purpose=PURPOSE_FOR_ROLE.get("endurance", "aerobic base"),
-            why=f"the week needs at least {MIN_ENDURANCE_SESSIONS} endurance "
-                f"sessions",
+            why=f"the week needs at least {floor} endurance sessions",
         ))
         per_sport[sport] = per_sport.get(sport, 0) + 1
         added += 1
@@ -901,14 +944,15 @@ def _ensure_minimum_endurance(
         how = "deload-length " if envelope.deload else "short "
         notes.append(
             f"added {added} {how}session(s) to reach the "
-            f"{MIN_ENDURANCE_SESSIONS}-session floor; the week is now "
+            f"{floor}-session floor; the week is now "
             f"{planned} min against a {envelope.max_week_minutes:.0f} min budget"
         )
     return days
 
 
 def _space_endurance(
-    days: list[PlanDay], facts: PlannerFacts, notes: list[str]
+    days: list[PlanDay], facts: PlannerFacts, envelope: Envelope,
+    notes: list[str],
 ) -> list[PlanDay]:
     """Keep a clear day between endurance sessions.
 
@@ -921,14 +965,23 @@ def _space_endurance(
     go is dropped rather than stacked: two sessions on one day defeats the point
     of spacing them.
     """
+    if not envelope.space_endurance:
+        return days
+
     order = {d: i for i, d in enumerate(DAYS)}
 
     def idx(day: str) -> int:
         return order.get(day, 99)
 
+    # Both sources of "already happened": rows already marked completed on this
+    # plan, and the days the activities themselves land on. The second matters
+    # because completed rows are merged into the plan *after* enforce() runs — so
+    # without it this rule only ever spaced proposals against each other, and a
+    # ride could be scheduled onto a day that already had a run on it.
     done = [d for d in days if d.purpose == "completed"
             and d.sport in SPACED_SPORTS and d.duration_min > 0]
-    taken = {idx(d.day) for d in done}
+    taken = ({idx(d.day) for d in done}
+             | {idx(day) for day in facts.endurance_days})
 
     proposed = [d for d in days if d.purpose != "completed"
                 and d.sport in SPACED_SPORTS and d.duration_min > 0]
@@ -968,10 +1021,11 @@ def _space_endurance(
             days.remove(d)
 
     total = len(taken) + len(kept)
-    if total < MIN_ENDURANCE_SESSIONS:
+    if total < envelope.min_endurance_sessions:
         notes.append(
             f"only {total} endurance sessions fit against a floor of "
-            f"{MIN_ENDURANCE_SESSIONS}: a clear day between sessions caps a full "
+            f"{envelope.min_endurance_sessions}: a clear day between sessions "
+            f"caps a full "
             f"week at four, and fewer when days have already gone by"
         )
     return days
