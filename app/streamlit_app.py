@@ -104,6 +104,17 @@ log = logging.getLogger("aerobic_engine.ui")
 # matters. Idempotent, and it fails quietly if the table is unreachable.
 applog.install(default_db())
 if _reloaded:
+    # Reloading the modules is only half of it. st.cache_resource is keyed on a
+    # function's module and name rather than its identity, so the cached
+    # connection wrapper survives the reload — holding a Store built from the
+    # *previous* revision's class. The hosted app died on exactly that: new
+    # script calling s.activities(include_imported=True) against an old Store,
+    # which is a TypeError, reported as "could not open the database".
+    for cache in (st.cache_resource, st.cache_data):
+        try:
+            cache.clear()
+        except Exception as exc:  # noqa: BLE001 - never worth failing a page load
+            log.warning("Could not clear the %s cache: %s", cache, exc)
     # One row per deploy that actually needed the guard, with what moved.
     applog.event(default_db(), "Reloaded app modules after a deploy",
                  modules=", ".join(_reloaded))
