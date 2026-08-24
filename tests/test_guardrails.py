@@ -657,3 +657,52 @@ def test_all_three_sessions_build_without_raising():
         presc = strength.build_session([], session_index=index)
         steps = garmin_workout.build(presc, f"Legs {index}")
         assert steps["workoutSegments"][0]["workoutSteps"]
+
+
+def test_endurance_hr_target_is_parsed_from_the_plan_text():
+    """The plan carries "112-137 bpm"; the watch needs two numbers."""
+    from core import garmin_workout
+
+    assert garmin_workout.parse_hr_target("112-137 bpm") == (112, 137)
+    assert garmin_workout.parse_hr_target("Z2") is None
+    assert garmin_workout.parse_hr_target(None) is None
+    # Nonsense ranges are refused rather than sent to a watch that will buzz.
+    assert garmin_workout.parse_hr_target("300-400 bpm") is None
+    assert garmin_workout.parse_hr_target("137-112 bpm") is None
+
+
+def test_a_long_session_gets_a_warmup_and_a_short_one_does_not():
+    """Ten minutes of warm-up out of a twenty-minute run leaves nothing to warm
+    up for."""
+    from core import garmin_workout
+
+    long_steps = garmin_workout.build_endurance(
+        "bike", 70, "112-137 bpm", "Bike")["workoutSegments"][0]["workoutSteps"]
+    assert [s["stepType"]["stepTypeKey"] for s in long_steps] == [
+        "warmup", "interval", "cooldown"]
+    assert sum(s["endConditionValue"] for s in long_steps) == 70 * 60
+
+    short_steps = garmin_workout.build_endurance(
+        "run", 25, "112-137 bpm", "Run")["workoutSegments"][0]["workoutSteps"]
+    assert len(short_steps) == 1
+
+
+def test_the_hr_range_reaches_the_working_step_only():
+    """A warm-up held to the same ceiling is a warm-up you cannot do."""
+    from core import garmin_workout
+
+    steps = garmin_workout.build_endurance(
+        "run", 70, "112-137 bpm", "Run")["workoutSegments"][0]["workoutSteps"]
+    work = [s for s in steps if s["stepType"]["stepTypeKey"] == "interval"]
+    assert work[0]["targetValueOne"] == 112 and work[0]["targetValueTwo"] == 137
+    assert all(s["targetType"]["workoutTargetTypeKey"] == "no.target"
+               for s in steps if s["stepType"]["stepTypeKey"] != "interval")
+
+
+def test_swims_and_bricks_are_refused_rather_than_mangled():
+    """A Garmin swim workout is pool length and stroke, not minutes."""
+    from core import garmin_workout
+
+    for sport in ("swim", "brick", "strength"):
+        with pytest.raises(ValueError):
+            garmin_workout.build_endurance(sport, 30, "112-137 bpm", "x")

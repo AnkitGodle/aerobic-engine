@@ -478,6 +478,66 @@ def send_to_watch(prescriptions: list, day: date, label: str) -> None:
                  f"unchanged — log it by hand and nothing is lost.")
 
 
+def send_session_to_watch(day_plan: dict, day: date) -> None:
+    """Push a run or ride to the watch with its heart-rate range.
+
+    Time-based rather than distance-based, because the ceiling is the point:
+    chasing a distance is what turns an easy session into a moderate one.
+    """
+    sport = day_plan.get("sport")
+    if sport not in garmin_workout.ENDURANCE_SPORT:
+        if sport in ("swim", "brick"):
+            st.caption(
+                "Swims and bricks are not sent to the watch. A Garmin swim "
+                "workout is built from pool length and stroke rather than "
+                "minutes, and wrist heart rate in water is too unreliable to "
+                "target; a brick is two sports in one session, which is a "
+                "different kind of workout again.")
+        return
+
+    minutes = int(day_plan.get("duration_min") or 0)
+    target = day_plan.get("target_hr") or ""
+    if minutes <= 0:
+        return
+    band = garmin_workout.parse_hr_target(target)
+    key = f"workout_pushed_{sport}_{day.isoformat()}"
+    already = with_store(lambda st_: st_.get_state(key))
+    unlocked = writes_allowed()
+    label = f"{sport.title()} {minutes}m · Aerobic Engine"
+
+    if already:
+        st.caption(f"✓ Sent — “{label}” is on your watch under {sport} workouts.")
+        if not st.button("Send again", key=f"resend_{sport}_{day}",
+                         disabled=not unlocked):
+            return
+    elif not st.button(f"Send this {sport} to my watch", key=f"send_{sport}_{day}",
+                       disabled=not unlocked):
+        if not unlocked:
+            st.caption("🔒 Unlock with your PIN to send workouts to the watch.")
+        return
+    if not writes_allowed():
+        return
+
+    try:
+        with st.spinner("Sending…"):
+            created = garmin_workout.push_endurance(
+                GarminClient().connect(), sport, minutes, target, label,
+                purpose=day_plan.get("purpose") or "", on_date=day.isoformat())
+        with_store(lambda st_: st_.set_state(key, str(created.get("workoutId", ""))))
+        st.success(
+            f"Sent. On the watch: START → {sport.title()} → “{label}”. "
+            + (f"It will hold you to {band[0]}-{band[1]} bpm and buzz if you "
+               f"drift out." if band else
+               "No heart-rate range was set for this session, so it is timed only."))
+        refresh()
+    except GarminBlocked as exc:
+        st.warning(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Could not send the endurance workout")
+        st.error(f"Could not send it ({type(exc).__name__}). The session is "
+                 f"unchanged.")
+
+
 def strength_howto_block(exercise_ids: list[str], log_rows: list[dict],
                          session_index: int = 0) -> None:
     """The full session, with instructions, for the day it is scheduled."""
@@ -541,6 +601,8 @@ def page_today(data: dict, today: date) -> None:
                      if e in strength.EXERCISES]
             ui.today_card(d["sport"], " · ".join(bits) or "—",
                           "; ".join(names) if names else d.get("why", ""))
+            if d["sport"] != "strength":
+                send_session_to_watch(d, focus_day)
             for extra in todo[1:]:
                 st.caption(f"also today: {EMOJI.get(extra['sport'], '')} "
                            f"{extra['sport']} · {extra['duration_min']} min")
@@ -1743,12 +1805,22 @@ def page_about(data: dict, today: date) -> None:
         "plan, and next time's weights move up from what you actually did."
     )
     st.success(
-        "**Easiest route: let the app do it.** On a leg day, Today has a "
-        "**Send this session to my watch** button. It builds the session as a "
-        "Garmin workout — exercises named, sets, reps, holds and weights — and "
-        "schedules it for that day. On the watch: START → Strength → pick it. "
-        "Every set then arrives already named, so nothing needs assigning "
-        "afterwards and the weights progress on their own."
+        "**Easiest route: let the app do it.** Today has a **Send this "
+        "session to my watch** button on every leg, run and bike day.\n\n"
+        "- **Legs** go up as a named workout — exercises, sets, reps, holds and "
+        "weights — so every set arrives labelled and the weights progress on "
+        "their own.\n"
+        "- **Runs and rides** go up timed, with your heart-rate range attached. "
+        "The watch buzzes when you drift out of it, which is the whole point of "
+        "setting a ceiling. Sessions of 40 minutes or more get a 10-minute "
+        "warm-up and a 5-minute cool-down; shorter ones are a single block, "
+        "because ten minutes of warm-up out of a twenty-minute run leaves "
+        "nothing to warm up for.\n"
+        "- **Swims and bricks are not sent.** A Garmin swim workout is built "
+        "from pool length and stroke rather than minutes, and wrist heart rate "
+        "in water is too unreliable to hold you to; a brick is two sports in "
+        "one session, which is a different kind of workout again.\n\n"
+        "On the watch: START → the sport → pick the session."
     )
     st.markdown(
         "**One thing the watch cannot do on its own:** it counts reps well but often does "

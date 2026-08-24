@@ -24,6 +24,7 @@ coarser category plus readable text.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from core import strength
@@ -180,6 +181,111 @@ def build(prescriptions: list[Any], name: str) -> dict[str, Any]:
             "workoutSteps": steps,
         }],
     }
+
+
+# Endurance sports the watch can be sent a structured workout for. Swimming is
+# absent on purpose: a Garmin swim workout is built from pool length and stroke
+# rather than duration, and wrist heart rate in water is unreliable enough that a
+# heart-rate target there would be a target you cannot follow. Bricks are absent
+# because they are two sports in one session, which is a multisport workout and a
+# different shape again.
+ENDURANCE_SPORT = {
+    "run": {"sportTypeId": 1, "sportTypeKey": "running", "displayOrder": 1},
+    "bike": {"sportTypeId": 2, "sportTypeKey": "cycling", "displayOrder": 2},
+}
+
+# Verified against the live account: a custom bpm range on this target type
+# round-trips exactly, as targetValueOne and targetValueTwo.
+HR_TARGET = {"workoutTargetTypeId": 4, "workoutTargetTypeKey": "heart.rate.zone",
+             "displayOrder": 4}
+STEP_WARMUP = {"stepTypeId": 1, "stepTypeKey": "warmup", "displayOrder": 1}
+STEP_COOLDOWN = {"stepTypeId": 2, "stepTypeKey": "cooldown", "displayOrder": 2}
+
+# Below this a session is one block: ten minutes of warm-up out of a
+# twenty-minute easy run leaves nothing to warm up for.
+WARMUP_FLOOR_MIN = 40
+WARMUP_MIN = 10
+COOLDOWN_MIN = 5
+
+
+def parse_hr_target(text: str | None) -> tuple[int, int] | None:
+    """"112-137 bpm" -> (112, 137). None when there is no range to send."""
+    if not text:
+        return None
+    digits = re.findall(r"\d+", str(text))
+    if len(digits) < 2:
+        return None
+    low, high = int(digits[0]), int(digits[1])
+    return (low, high) if 60 <= low < high <= 220 else None
+
+
+def _endurance_step(order: int, kind: dict[str, Any], minutes: float,
+                    hr: tuple[int, int] | None, note: str) -> dict[str, Any]:
+    step: dict[str, Any] = {
+        "type": "ExecutableStepDTO", "stepOrder": order, "stepType": kind,
+        "endCondition": END_TIME, "endConditionValue": float(minutes) * 60.0,
+        "targetType": HR_TARGET if hr else NO_TARGET,
+        "description": note[:512],
+    }
+    if hr:
+        step["targetValueOne"] = float(hr[0])
+        step["targetValueTwo"] = float(hr[1])
+    return step
+
+
+def build_endurance(sport: str, minutes: int, target_hr: str | None,
+                    name: str, purpose: str = "") -> dict[str, Any]:
+    """A run or ride as a timed workout with the athlete's own bpm range.
+
+    Time rather than distance, because the plan is written in minutes and the
+    heart-rate ceiling is the point: holding a pace to hit a distance is what
+    turns an easy session into a moderate one.
+    """
+    sport_type = ENDURANCE_SPORT.get(sport)
+    if sport_type is None:
+        raise ValueError(f"{sport} cannot be sent as a structured workout")
+    if minutes <= 0:
+        raise ValueError("nothing to send: the session has no duration")
+
+    hr = parse_hr_target(target_hr)
+    band = f"{hr[0]}-{hr[1]} bpm" if hr else "easy"
+    steps: list[dict[str, Any]] = []
+    if minutes >= WARMUP_FLOOR_MIN:
+        main = minutes - WARMUP_MIN - COOLDOWN_MIN
+        steps.append(_endurance_step(
+            1, STEP_WARMUP, WARMUP_MIN, None,
+            "Easy. Let the heart rate come up on its own."))
+        steps.append(_endurance_step(
+            2, STEP_INTERVAL, main, hr,
+            f"{purpose or 'Aerobic base'} — hold {band}."))
+        steps.append(_endurance_step(
+            3, STEP_COOLDOWN, COOLDOWN_MIN, None, "Easy to finish."))
+    else:
+        steps.append(_endurance_step(
+            1, STEP_INTERVAL, minutes, hr,
+            f"{purpose or 'Aerobic base'} — hold {band}."))
+    return {
+        "sportType": sport_type,
+        "workoutName": name[:80],
+        "description": (f"Built by Aerobic Engine. Target {band}.")[:1024],
+        "workoutSegments": [{"segmentOrder": 1, "sportType": sport_type,
+                             "workoutSteps": steps}],
+    }
+
+
+def push_endurance(api: Any, sport: str, minutes: int, target_hr: str | None,
+                   name: str, purpose: str = "",
+                   on_date: str | None = None) -> dict[str, Any]:
+    payload = build_endurance(sport, minutes, target_hr, name, purpose)
+    created = api.upload_workout(payload) or {}
+    workout_id = created.get("workoutId")
+    if workout_id and on_date:
+        try:
+            api.schedule_workout(str(workout_id), on_date)
+        except Exception as exc:  # noqa: BLE001 - the workout still exists
+            log.warning("Uploaded %s but could not schedule it for %s: %s",
+                        workout_id, on_date, exc)
+    return created
 
 
 def push(api: Any, prescriptions: list[Any], name: str,
