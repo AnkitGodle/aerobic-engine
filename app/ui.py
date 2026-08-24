@@ -17,7 +17,7 @@ import html
 from contextlib import contextmanager
 from datetime import date, timedelta
 from itertools import count
-from typing import Iterable, Literal
+from typing import Any, Iterable, Literal
 
 import streamlit as st
 
@@ -573,17 +573,33 @@ def chart(fig, height: int = 260, date_axis: bool = False) -> None:
         # land on sub-day intervals when the span is short, and formatting those
         # to day precision printed "Wed 19 Aug" twice in a row — which reads as a
         # rendering bug rather than as two sessions.
-        # `is not None` rather than truthiness: a trace's x can be a numpy
-        # array or a pandas Series, and those raise on bool() rather than
-        # answering it.
+        # Only dates that actually carry a value. The database holds a wellness
+        # row per day whether or not the watch recorded anything, so a trace's x
+        # can run back weeks further than its y does — 47 rows from 9 July with
+        # every metric empty until 18 August. Ranging on x alone drew six weeks
+        # of blank axis before the first point, which reads as missing data
+        # rather than as data that does not exist yet.
+        #
+        # `is not None` rather than truthiness throughout: x and y are often
+        # numpy arrays or pandas Series, which raise on bool() instead of
+        # answering it. A zero is also a real value and must not be dropped.
+        def _blank(value: Any) -> bool:
+            if value is None:
+                return True
+            return value != value          # NaN, without importing numpy
+
         days = set()
         for trace in fig.data:
             xs = getattr(trace, "x", None)
             if xs is None:
                 continue
-            for x in xs:
-                if x is not None:
-                    days.add(str(x)[:10])
+            ys = getattr(trace, "y", None)
+            for i, x in enumerate(xs):
+                if x is None:
+                    continue
+                if ys is not None and i < len(ys) and _blank(ys[i]):
+                    continue
+                days.add(str(x)[:10])
         days = sorted(days)
         if 1 < len(days) <= 400:
             step = max(1, (len(days) + 7) // 8)
