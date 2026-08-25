@@ -196,8 +196,8 @@ CSS = """
         position: static; padding: .1rem 0 .3rem; margin-bottom: .7rem; }
     .ic-brand-sub { display: none; }
     .ic-brand { gap: .5rem; margin-bottom: .25rem; }
-    .ic-brand svg { width: 26px; height: 26px; }
-    .ic-brand-name { font-size: 1.15rem; }
+    .ic-brand svg { width: 27px; height: 27px; }
+    .ic-brand-name { font-size: 1.3rem; }
     /* One row that scrolls, rather than three that stack. */
     .st-key-topbar [data-testid="stButtonGroup"] {
         display: flex; flex-wrap: nowrap; overflow-x: auto;
@@ -212,12 +212,36 @@ CSS = """
 
   .ic-brand { display: flex; align-items: center; gap: .55rem;
               margin: 0 0 .3rem; }
-  .ic-brand svg { width: 26px; height: 26px; }
+  .ic-brand svg { width: 32px; height: 32px; }
   .ic-brand svg { flex: 0 0 auto; opacity: .95; }
-  .ic-brand-name { font-size: 1.22rem; font-weight: 680; line-height: 1.25;
-                   letter-spacing: -.01em; }
+  /* The wordmark carries the whole top bar, and at 1.22rem it read as a label
+     rather than a name. Sized up with the mark beside it. */
+  .ic-brand-name { font-size: 1.52rem; font-weight: 700; line-height: 1.2;
+                   letter-spacing: -.02em; }
   .ic-brand-sub { font-size: .8rem; opacity: .58; margin-top: .12rem; }
   .ic-sidebrand { display: none; }
+
+  /* Poster type. Used on About, which is a page someone reads once rather than
+     a dashboard they scan — so it gets a headline that behaves like one. */
+  .ic-hero { margin: .2rem 0 1.1rem; }
+  .ic-hero-kicker { font-size: .72rem; letter-spacing: .12em;
+                    text-transform: uppercase; opacity: .55; font-weight: 650; }
+  .ic-hero-head { font-size: 2.1rem; font-weight: 700; line-height: 1.16;
+                  letter-spacing: -.03em; margin: .3rem 0 .5rem;
+                  max-width: 26ch; }
+  .ic-hero-body { font-size: 1.02rem; line-height: 1.6; opacity: .8;
+                  max-width: 62ch; }
+  @media (max-width: 700px) { .ic-hero-head { font-size: 1.6rem; } }
+
+  .ic-pull { border-left: 3px solid var(--ic-good); padding: .1rem 0 .1rem 1rem;
+             margin: 1.1rem 0; font-size: 1.16rem; font-weight: 600;
+             line-height: 1.45; letter-spacing: -.01em; max-width: 46ch; }
+  .ic-pull-note { font-size: .84rem; font-weight: 400; opacity: .62;
+                  margin-top: .3rem; line-height: 1.5; }
+
+  .ic-prose { font-size: .95rem; line-height: 1.65; max-width: 66ch;
+              margin: 0 0 .9rem; }
+  .ic-prose b { font-weight: 640; }
 
   .ic-frame-title { font-size: .72rem; letter-spacing: .06em;
                     text-transform: uppercase; opacity: .55;
@@ -305,8 +329,31 @@ CSS = """
       padding: .3rem .75rem; font-size: .84rem; font-weight: 600;
       text-decoration: none !important; margin: .1rem 0 .35rem; }
   a.ic-linkchip:hover { filter: brightness(1.08); }
+  /* Mark only, where the brand is the label — three words of text each turned
+     the sidebar into a row of buttons that all read the same. */
+  a.ic-linkchip.mark { padding: .34rem; border-radius: 50%; }
   .ic-chiprow { display: flex; flex-wrap: wrap; gap: .4rem;
                 margin: .1rem 0 .35rem; }
+
+  /* A flow of steps. Streamlit renders no diagram of its own and mermaid needs a
+     component, so this is boxes and arrows in CSS — which also wraps on a phone,
+     where a fixed-width image would not. */
+  .ic-flow { display: flex; flex-wrap: wrap; align-items: stretch;
+             gap: .35rem; margin: .2rem 0 1.1rem; }
+  .ic-flow-step { flex: 1 1 8.5rem; min-width: 7.5rem;
+                  border: 1px solid var(--ic-line); border-radius: 12px;
+                  background: var(--ic-surface); padding: .6rem .7rem; }
+  .ic-flow-step.accent { border-color: var(--ic-good);
+                         background: rgba(63,182,139,.10); }
+  .ic-flow-step.guard { border-color: var(--ic-caution);
+                        background: rgba(224,163,62,.10); }
+  .ic-flow-icon { font-size: 1.15rem; line-height: 1.2; }
+  .ic-flow-name { font-size: .84rem; font-weight: 640; margin-top: .15rem; }
+  .ic-flow-note { font-size: .72rem; opacity: .62; line-height: 1.35;
+                  margin-top: .1rem; }
+  .ic-flow-arrow { align-self: center; opacity: .35; font-size: .95rem;
+                   padding: 0 .1rem; }
+  @media (max-width: 700px) { .ic-flow-arrow { display: none; } }
   .ic-chiprow a.ic-linkchip { margin: 0; }
 
   /* Chart panels */
@@ -326,6 +373,26 @@ CSS = """
   hr { margin: 1.2rem 0; opacity: .35; }
 </style>
 """
+
+
+# Brand marks for the outbound links, as inline SVG so the page makes no external
+# request for them (and a hosted page's CSP would block one anyway). Paths from
+# simple-icons, which publishes them for exactly this use.
+BRAND_ICONS: dict[str, str] = {
+    "strava": "M15.387 17.944l-2.089-4.116h-3.065L15.387 24l5.15-10.172h-3.066m-7.008-5.599l2.836 5.598h4.172L10.463 0l-7 13.828h4.169",
+    "instagram": "M7.0301.084c-1.2768.0602-2.1487.264-2.911.5634-.7888.3075-1.4575.72-2.1228 1.3877-.6652.6677-1.075 1.3368-1.3802 2.127-.2954.7638-.4956 1.6365-.552 2.914-.0564 1.2775-.0689 1.6882-.0626 4.947.0062 3.2586.0206 3.6671.0825 4.9473.061 1.2765.264 2.1482.5635 2.9107.308.7889.72 1.4573 1.388 2.1228.6679.6655 1.3365 1.0743 2.1285 1.38.7632.295 1.6361.4961 2.9134.552 1.2773.056 1.6884.069 4.9462.0627 3.2578-.0062 3.668-.0207 4.9478-.0814 1.28-.0607 2.147-.2652 2.9098-.5633.7889-.3086 1.4578-.72 2.1228-1.3881.665-.6682 1.0745-1.3378 1.3795-2.1284.2957-.7632.4966-1.636.552-2.9124.056-1.2809.0692-1.6898.063-4.948-.0063-3.2583-.021-3.6668-.0817-4.9465-.0607-1.2797-.264-2.1487-.5633-2.9117-.3084-.7889-.72-1.4568-1.3876-2.1228C21.2982 1.33 20.628.9208 19.8378.6165 19.074.321 18.2017.1197 16.9244.0645 15.6471.0093 15.236-.005 11.977.0014 8.718.0076 8.31.0215 7.0301.0839m.1402 21.6932c-1.17-.0509-1.8053-.2453-2.2287-.408-.5606-.216-.96-.4771-1.3819-.895-.422-.4178-.6811-.8186-.9-1.378-.1644-.4234-.3624-1.058-.4171-2.228-.0595-1.2645-.072-1.6442-.079-4.848-.007-3.2037.0053-3.583.0607-4.848.05-1.169.2456-1.805.408-2.2282.216-.5613.4762-.96.895-1.3816.4188-.4217.8184-.6814 1.3783-.9003.423-.1651 1.0575-.3614 2.227-.4171 1.2655-.06 1.6447-.072 4.848-.079 3.2033-.007 3.5835.005 4.8495.0608 1.169.0508 1.8053.2445 2.228.408.5608.216.96.4754 1.3816.895.4217.4194.6816.8176.9005 1.3787.1653.4217.3617 1.056.4169 2.2263.0602 1.2655.0739 1.645.0796 4.848.0058 3.203-.0055 3.5834-.061 4.848-.051 1.17-.245 1.8055-.408 2.2294-.216.5604-.4763.96-.8954 1.3814-.419.4215-.8181.6811-1.3783.9-.4224.1649-1.0577.3617-2.2262.4174-1.2656.0595-1.6448.072-4.8493.079-3.2045.007-3.5825-.006-4.848-.0608M16.953 5.5864A1.44 1.44 0 1 0 18.39 4.144a1.44 1.44 0 0 0-1.437 1.4424M5.8385 12.012c.0067 3.4032 2.7706 6.1557 6.173 6.1493 3.4026-.0065 6.157-2.7701 6.1506-6.1733-.0065-3.4032-2.771-6.1565-6.174-6.1498-3.403.0067-6.156 2.771-6.1496 6.1738M8 12.0077a4 4 0 1 1 4.008 3.9921A3.9996 3.9996 0 0 1 8 12.0077",
+    "github": "M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12",
+}
+
+
+def brand_icon(name: str, size: int = 14) -> str:
+    """One brand mark, inheriting the surrounding colour."""
+    path = BRAND_ICONS.get(name.lower())
+    if not path:
+        return ""
+    return (f'<svg viewBox="0 0 24 24" width="{size}" height="{size}" '
+            f'fill="currentColor" aria-hidden="true" '
+            f'style="flex:0 0 auto"><path d="{path}"/></svg>')
 
 
 def esc(value: object) -> str:
@@ -371,7 +438,7 @@ def brand(title: str, subtitle: str = "") -> None:
     moved to the sidebar.
     """
     st.markdown(
-        f'<div class="ic-brand">{logo(38)}'
+        f'<div class="ic-brand">{logo(44)}'
         f'<div><div class="ic-brand-name">{esc(title)}</div>'
         + (f'<div class="ic-brand-sub">{esc(subtitle)}</div>' if subtitle else "")
         + "</div></div>",
@@ -494,7 +561,8 @@ def rows(items: list[tuple]) -> None:
                 unsafe_allow_html=True)
 
 
-def link_chips(items: Iterable[tuple[str, str, str]]) -> None:
+def link_chips(items: Iterable[tuple[str, str, str]],
+               labels: bool = True) -> None:
     """Outbound links as chips, each in its destination's own colour.
 
     One markdown block for the row: Streamlit puts every call in its own block,
@@ -505,14 +573,69 @@ def link_chips(items: Iterable[tuple[str, str, str]]) -> None:
     and a new tab must not be handed a reference back to this one.
     """
     chips = "".join(
-        f'<a class="ic-linkchip" style="color:{esc(color)}" '
+        f'<a class="ic-linkchip{"" if labels else " mark"}" '
+        f'style="color:{esc(color)}" title="{esc(label)}" aria-label="{esc(label)}" '
         f'href="{esc(url)}" target="_blank" rel="noopener noreferrer">'
-        f"{esc(label)} ↗</a>"
+        + brand_icon(label, 15 if labels else 18)
+        + (f"{esc(label)} ↗" if labels else "")
+        + "</a>"
         for label, url, color in items if url
     )
     if chips:
         st.markdown(f'<div class="ic-chiprow">{chips}</div>',
                     unsafe_allow_html=True)
+
+
+def hero(kicker: str, headline: str, body: str = "") -> None:
+    """The top of a page that is read rather than scanned."""
+    st.markdown(
+        '<div class="ic-hero">'
+        + (f'<div class="ic-hero-kicker">{esc(kicker)}</div>' if kicker else "")
+        + f'<div class="ic-hero-head">{esc(headline)}</div>'
+        + (f'<div class="ic-hero-body">{esc(body)}</div>' if body else "")
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def pull(text: str, note: str = "") -> None:
+    """A line worth stopping on, with an optional line of detail under it."""
+    st.markdown(
+        f'<div class="ic-pull">{esc(text)}'
+        + (f'<div class="ic-pull-note">{esc(note)}</div>' if note else "")
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def prose(text: str) -> None:
+    """A paragraph, at a width that can be read. `text` may contain <b> tags."""
+    st.markdown(f'<div class="ic-prose">{text}</div>', unsafe_allow_html=True)
+
+
+def flow(steps: Iterable[tuple[str, str, str]], accent: str = "",
+         guard: str = "") -> None:
+    """A left-to-right flow of steps: (icon, name, note).
+
+    `accent` and `guard` name a step to colour — the one that does the thinking
+    and the one that checks it — because a flow where every box looks the same
+    says the layers are equal, and here they are deliberately not.
+    """
+    parts = []
+    for i, (icon, name, note) in enumerate(steps):
+        cls = "ic-flow-step"
+        if name == accent:
+            cls += " accent"
+        elif name == guard:
+            cls += " guard"
+        if i:
+            parts.append('<div class="ic-flow-arrow">→</div>')
+        parts.append(
+            f'<div class="{cls}"><div class="ic-flow-icon">{esc(icon)}</div>'
+            f'<div class="ic-flow-name">{esc(name)}</div>'
+            f'<div class="ic-flow-note">{esc(note)}</div></div>')
+    st.markdown(f'<div class="ic-flow">{"".join(parts)}</div>',
+                unsafe_allow_html=True)
 
 
 def banner(headline: str, body: str = "", tone: Tone = "neutral") -> None:

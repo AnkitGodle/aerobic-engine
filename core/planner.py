@@ -19,7 +19,7 @@ from collections.abc import Sequence
 from datetime import date, timedelta
 from typing import Any
 
-from core import ai, rules as rules_mod, strength
+from core import ai, goal as goal_mod, rules as rules_mod, strength
 from core.analysis import (
     all_ef_trends,
     zone_bounds,
@@ -357,6 +357,11 @@ def build_envelope(
     settings = rules_mod.load(store) if store is not None else rules_mod.DEFAULTS
     deload_factor = 1.0 - settings.deload_cut_pct / 100.0
     idx = week_index(facts, store, settings.block_weeks)
+    # Where this week sits between here and the race. With no race set this is
+    # "base" forever, which is what it was before goals existed.
+    goal = goal_mod.load(store) if store is not None else goal_mod.NO_GOAL
+    phase = goal.phase(facts.today)
+    shape = goal_mod.shape(phase)
     # Today's recovery signals govern today's week. They must NOT govern a week
     # that has not started: Training Readiness recovers overnight, so a plan for
     # next Monday built on tonight's trough would be permanently deloaded. The
@@ -387,7 +392,9 @@ def build_envelope(
         step = (settings.progression_cap_pct if verdict == "build"
                 else settings.progression_cap_pct / 2)
         budget = prev * (1 + step / 100)
-    budget = round(min(budget, ABSOLUTE_WEEK_CEILING))
+    # The phase scales the week, and a taper scales it hard. Applied before the
+    # absolute ceiling so it can only ever reduce the number a deload produced.
+    budget = round(min(budget * shape["volume"], ABSOLUTE_WEEK_CEILING))
 
     # A target's minutes decide how the week divides between sports; without
     # targets, fall back to the bike-heavy base-phase default.
@@ -444,7 +451,8 @@ def build_envelope(
             min_sessions=min_sessions,
             max_sessions=min(max_sessions, 7),
             max_minutes=round(budget * share * 1.15),
-            long_session_min=0.0 if (deload and sport != "bike") else round(long_floor * scale),
+            long_session_min=(0.0 if (deload and sport != "bike")
+                              else round(long_floor * scale * shape["long"])),
             notes=(
                 "bike is the aerobic volume tool and a race discipline"
                 if sport == "bike"
@@ -456,7 +464,9 @@ def build_envelope(
 
     return Envelope(
         week_start=facts.week_start,
-        phase="base",
+        phase=phase,
+        weeks_to_race=goal.weeks_to_go(facts.today),
+        race_name=goal.event or "",
         week_index=idx,
         deload=deload,
         deload_reasons=triggers,
@@ -465,7 +475,8 @@ def build_envelope(
         progression_cap_pct=settings.progression_cap_pct,
         # A deload week gets one rest day more than the athlete's floor: the
         # point of the week is the recovery, not the sessions.
-        min_rest_days=settings.min_rest_days + (1 if deload else 0),
+        min_rest_days=settings.min_rest_days + (1 if deload else 0)
+        + (1 if phase == goal_mod.TAPER and not deload else 0),
         strength_sessions=(
             0 if (only_sports is not None
                   and "strength" not in {str(sp).lower() for sp in only_sports})
@@ -478,7 +489,11 @@ def build_envelope(
         space_endurance=settings.space_endurance,
         block_weeks=settings.block_weeks,
         deload_cut_pct=settings.deload_cut_pct,
-        max_quality_sessions=0 if deload else (2 if verdict == "build" else 1),
+        # A phase may add hard sessions; a deload still removes them all. The
+        # backstop outranks the plan, whatever week of the block it is.
+        max_quality_sessions=(
+            0 if deload
+            else min(3, (2 if verdict == "build" else 1) + int(shape["quality"]))),
         readiness_verdict=verdict,
         build_signals=readiness_verdict(facts)["positives"],
         by_sport=by_sport,

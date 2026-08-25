@@ -45,8 +45,8 @@ _reloaded = purge_stale_modules(log=logging.getLogger("aerobic_engine.ui").info)
 
 import app.ui as ui  # noqa: E402
 from core import (  # noqa: E402
-    ai, applog, bugs as bugs_mod, insights, planner, rules as rules_mod,
-    strength, sync as sync_mod, visits as visits_mod,
+    ai, applog, bugs as bugs_mod, goal as goal_mod, insights, planner,
+    rules as rules_mod, strength, sync as sync_mod, visits as visits_mod,
 )
 from core.analysis import (  # noqa: E402
     ACWR_HIGH,
@@ -425,9 +425,14 @@ INSTAGRAM_PROFILE_URL = os.getenv(
 
 # Label, URL, brand colour. Instagram's mark is a gradient; its pink is the one
 # solid colour that still reads as Instagram at chip size.
+REPO_URL = "https://github.com/AnkitGodle/aerobic-engine"
+
 PROFILE_LINKS: tuple[tuple[str, str, str], ...] = (
     ("Strava", STRAVA_PROFILE_URL, "#FC5200"),
     ("Instagram", INSTAGRAM_PROFILE_URL, "#E1306C"),
+    # The repo belongs beside them: it is the same kind of link out, and the
+    # code being readable is part of what the page is claiming.
+    ("GitHub", REPO_URL, "#8C9AA8"),
 )
 EVENING_CUTOFF_HOUR = int(os.getenv("EVENING_CUTOFF_HOUR", "19"))
 
@@ -751,6 +756,156 @@ def strength_howto_block(exercise_ids: list[str], log_rows: list[dict],
             st.write("")
 
 
+@st.cache_data(show_spinner=False, ttl=1800)
+def route_points(stamp: float, activity_id: str,
+                 keep: int = 160) -> list[tuple[float, float]]:  # noqa: ARG001
+    """The route, thinned to something a browser can draw instantly.
+
+    A thousand GPS points is a thousand points more than a 300px outline needs.
+    Cached per activity, so opening the same session twice costs one query once.
+    """
+    try:
+        stream = with_store(lambda st_: st_.stream(str(activity_id)))
+    except Exception as exc:  # noqa: BLE001 - a missing route is not an error
+        log.info("Could not read the route for %s: %s", activity_id, exc)
+        return []
+    coords = [(float(r["lat"]), float(r["lon"])) for r in stream
+              if r.get("lat") is not None and r.get("lon") is not None]
+    if len(coords) <= keep:
+        return coords
+    step = len(coords) / keep
+    return [coords[int(i * step)] for i in range(keep)]
+
+
+def route_figure(coords: list[tuple[float, float]]):
+    """The shape of the route, as a line. No tiles, no WebGL, no map at all.
+
+    `st.map` renders through deck.gl, which pulls WebGL and a basemap and locked
+    the browser for several seconds on a page that might show six of them. The
+    outline is what identifies a route at a glance — the streets underneath it
+    are decoration you already know.
+    """
+    lats = [c[0] for c in coords]
+    lons = [c[1] for c in coords]
+    fig = go.Figure()
+    fig.add_scatter(x=lons, y=lats, mode="lines",
+                    line=dict(color=TONE["good"], width=2.4),
+                    hoverinfo="skip")
+    fig.add_scatter(x=[lons[0]], y=[lats[0]], mode="markers", name="start",
+                    marker=dict(size=9, color=TONE["good"]), hoverinfo="skip")
+    fig.add_scatter(x=[lons[-1]], y=[lats[-1]], mode="markers", name="finish",
+                    marker=dict(size=9, color=TONE["bad"]), hoverinfo="skip")
+    # Degrees of longitude shrink with latitude, so an unconstrained plot
+    # stretches a route east-west and it stops looking like the place you ran.
+    import math
+    fig.update_yaxes(scaleanchor="x",
+                     scaleratio=1.0 / max(math.cos(math.radians(lats[0])), 0.1))
+    fig.update_layout(showlegend=False, xaxis=dict(visible=False),
+                      yaxis=dict(visible=False), margin=dict(t=4, b=4, l=4, r=4),
+                      height=230, paper_bgcolor="rgba(0,0,0,0)",
+                      plot_bgcolor="rgba(0,0,0,0)")
+    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False,
+                                                  "staticPlot": True})
+
+
+def session_recap(act: dict, data: dict) -> None:
+    """What a finished session was: the numbers, the route, the splits.
+
+    On Today rather than only on the Log page, because the question "how did
+    that go" arrives about ten seconds after finishing, and making someone
+    navigate to a different page to answer it is how they stop asking.
+    """
+    minutes = (act.get("duration_s") or 0) / 60.0
+    km = (act.get("distance_m") or 0) / 1000.0
+    cells = [
+        {"label": "Time", "value": hm(minutes)},
+        {"label": "Distance", "value": f"{km:.2f} km" if km else "—"},
+        {"label": "Pace", "value": pace_str(act["sport"], act.get("distance_m"),
+                                            act.get("duration_s"))},
+        {"label": "Heart rate",
+         "value": f"{act['avg_hr']:.0f}" if act.get("avg_hr") else "—",
+         "note": f"max {act['max_hr']:.0f}" if act.get("max_hr") else ""},
+    ]
+    ceiling = data.get("aerobic_ceiling")
+    if act.get("avg_hr") and ceiling:
+        over = float(act["avg_hr"]) - float(ceiling)
+        cells.append({"label": "Against your ceiling",
+                      "value": f"{over:+.0f} bpm",
+                      "note": "easy" if over <= 0 else "harder than easy",
+                      "tone": "good" if over <= 0 else "caution"})
+    if act.get("training_load"):
+        cells.append({"label": "Load", "value": f"{act['training_load']:.0f}",
+                      "note": "Garmin's own"})
+    ui.figures(cells)
+
+    coords = route_points(db_stamp(), str(act["activity_id"]))
+    left, right = st.columns([1.25, 1], gap="medium")
+    with left:
+        if coords:
+            route_figure(coords)
+        else:
+            st.caption("No route for this one — indoors, or recorded before "
+                       "coordinates were stored.")
+    with right:
+        bands = (session_zone_minutes(db_stamp(), str(act["activity_id"]),
+                                      int(float(ceiling))) if ceiling else {})
+        if sum(bands.values()) > 0:
+            st.markdown("**Where the time went**")
+            ui.proportion_bar([(ZONE_LABELS[z], bands.get(z, 0), ZONE_COLOR[z])
+                               for z in range(1, 6)])
+        wx = (data.get("weather") or {}).get(str(act["activity_id"])) or {}
+        if wx.get("temp_c") is not None:
+            bits = [f"{wx['temp_c']:.0f}°C"]
+            if wx.get("dew_point_c") is not None:
+                bits.append(f"dew point {wx['dew_point_c']:.0f}°C")
+            if wx.get("condition"):
+                bits.append(str(wx["condition"]).lower())
+            st.caption(" · ".join(bits))
+        if act.get("decoupling_pct") is not None:
+            st.caption(f"Heart rate crept up {act['decoupling_pct']:.1f}% from "
+                       f"the first half to the second.")
+    laps = [l for l in (data.get("laps") or [])
+            if str(l.get("activity_id")) == str(act["activity_id"])]
+    if len(laps) >= 2:
+        drift = lap_drift(laps)
+        if drift.get("drift_bpm") is not None:
+            st.caption(drift["message"])
+
+
+def done_sessions_block(data: dict, today: date) -> None:
+    """Every session finished this week, each one openable.
+
+    The week strip says a day is done; this is where you find out how it went
+    without leaving the page.
+    """
+    start = week_start_of(today)
+    acts = [a for a in (data.get("activities") or [])
+            if a.get("start_date")
+            and start <= date.fromisoformat(str(a["start_date"])[:10]) <= today]
+    if not acts:
+        return
+    ui.section("How this week has gone",
+               "Pick a session for its numbers, its route and its splits.")
+    ordered = sorted(acts, key=lambda a: str(a.get("start_time") or ""),
+                     reverse=True)
+    labels = {}
+    for act in ordered:
+        when = date.fromisoformat(str(act["start_date"])[:10])
+        km = (act.get("distance_m") or 0) / 1000.0
+        labels[f"{EMOJI.get(act['sport'], '•')} {day_label(when.isoformat())}"
+               f" · {hm((act.get('duration_s') or 0) / 60)}"
+               + (f" · {km:.1f} km" if km else "")] = act
+    # A picker rather than a stack of expanders: Streamlit executes an
+    # expander's body whether or not it is open, so six sessions meant six
+    # stream reads and six charts built on every click of anything.
+    picked = st.pills("Session", list(labels), selection_mode="single",
+                      key="week_session", label_visibility="collapsed")
+    if picked:
+        session_recap(labels[picked], data)
+    else:
+        st.caption("Nothing selected, so nothing loaded — pick a day above.")
+
+
 def page_today(data: dict, today: date) -> None:
     acts, wl = data["activities"], data["wellness"]
     sig = recovery_signals(wl, acts, as_of=today) if wl else None
@@ -777,45 +932,6 @@ def page_today(data: dict, today: date) -> None:
     # on Today it sat below the session card, which made this the one page where
     # the reading you actually want was under the thing it was about.
     insight_banner("Overview", data, today)
-
-    # One column, not two. The right-hand stack of six cards was taller than the
-    # plan beside it, so whichever side was shorter left a third of the screen
-    # empty — first the right, then the left. The same six numbers read fine as a
-    # strip, and the session card gets the width it deserves.
-    tone = {"deload": "bad", "hold": "neutral", "build": "good"}[verdict["verdict"]]
-    wk = week_summaries(acts, weeks=1, as_of=today,
-                        strength_rows=data["strength"])[-1]
-    left_min = max(0.0, env.max_week_minutes - wk.total_minutes)
-    trained = len(facts.trained_days)
-    ui.figures([
-        {"label": "Verdict",
-         "value": {"deload": "Back off", "hold": "Hold", "build": "Build"}[
-             verdict["verdict"]],
-         "note": " · ".join(verdict["reasons"])[:60]
-                 or "nothing arguing either way", "tone": tone},
-        {"label": "Readiness",
-         "value": f"{sig.training_readiness:.0f}"
-                  if sig and sig.training_readiness else "—",
-         "note": (sig.training_status or "morning reading") if sig else "no data",
-         "tone": "bad" if sig and sig.training_readiness
-                 and sig.training_readiness < 35 else "neutral"},
-        {"label": "Resting HR",
-         "value": f"{sig.rhr_recent:.0f}" if sig and sig.rhr_recent else "—",
-         "note": f"{sig.rhr_delta:+.1f} vs 28-day"
-                 if sig and sig.rhr_delta is not None else "building a baseline",
-         "tone": "bad" if sig and sig.rhr_delta and sig.rhr_delta > 3
-                 else "neutral"},
-        {"label": "Load ratio", "value": f"{sig.acwr:.2f}" if sig and sig.acwr
-                                          else "—",
-         "note": acwr_note(sig), "tone": acwr_tone(sig)},
-        {"label": "Week so far", "value": hm(wk.total_minutes),
-         "note": f"{hm(left_min)} left of {hm(env.max_week_minutes)}",
-         "tone": "caution" if left_min <= 0 else "neutral"},
-        {"label": "Days trained", "value": f"{trained}/7",
-         "note": f"{wk.rest_days} rest "
-                 f"{'day' if wk.rest_days == 1 else 'days'} left",
-         "tone": "bad" if wk.rest_days == 0 else "neutral"},
-    ])
 
     heading = "Tomorrow" if rolled else "Today"
     ui.section(heading, f"It is past {EVENING_CUTOFF_HOUR}:00 — showing "
@@ -857,9 +973,50 @@ def page_today(data: dict, today: date) -> None:
                       "Rest is where the adaptation happens.")
     ask_block(data, today)
 
+    # One column, not two. The right-hand stack of six cards was taller than the
+    # plan beside it, so whichever side was shorter left a third of the screen
+    # empty — first the right, then the left. The same six numbers read fine as a
+    # strip, and the session card gets the width it deserves.
+    tone = {"deload": "bad", "hold": "neutral", "build": "good"}[verdict["verdict"]]
+    wk = week_summaries(acts, weeks=1, as_of=today,
+                        strength_rows=data["strength"])[-1]
+    left_min = max(0.0, env.max_week_minutes - wk.total_minutes)
+    trained = len(facts.trained_days)
+    ui.figures([
+        {"label": "Verdict",
+         "value": {"deload": "Back off", "hold": "Hold", "build": "Build"}[
+             verdict["verdict"]],
+         "note": " · ".join(verdict["reasons"])[:60]
+                 or "nothing arguing either way", "tone": tone},
+        {"label": "Readiness",
+         "value": f"{sig.training_readiness:.0f}"
+                  if sig and sig.training_readiness else "—",
+         "note": (sig.training_status or "morning reading") if sig else "no data",
+         "tone": "bad" if sig and sig.training_readiness
+                 and sig.training_readiness < 35 else "neutral"},
+        {"label": "Resting HR",
+         "value": f"{sig.rhr_recent:.0f}" if sig and sig.rhr_recent else "—",
+         "note": f"{sig.rhr_delta:+.1f} vs 28-day"
+                 if sig and sig.rhr_delta is not None else "building a baseline",
+         "tone": "bad" if sig and sig.rhr_delta and sig.rhr_delta > 3
+                 else "neutral"},
+        {"label": "Load ratio", "value": f"{sig.acwr:.2f}" if sig and sig.acwr
+                                          else "—",
+         "note": acwr_note(sig), "tone": acwr_tone(sig)},
+        {"label": "Week so far", "value": hm(wk.total_minutes),
+         "note": f"{hm(left_min)} left of {hm(env.max_week_minutes)}",
+         "tone": "caution" if left_min <= 0 else "neutral"},
+        {"label": "Days trained", "value": f"{trained}/7",
+         "note": f"{wk.rest_days} rest "
+                 f"{'day' if wk.rest_days == 1 else 'days'} left",
+         "tone": "bad" if wk.rest_days == 0 else "neutral"},
+    ])
+
     ui.section("This week",
                f"{hm(wk.total_minutes)} done of a {hm(env.max_week_minutes)} ceiling")
     ui.week_strip(week_cells(plan, today))
+
+    done_sessions_block(data, today)
 
     nxt = next_week_plan(today, data.get("scoped_to"))
     if nxt:
@@ -2060,20 +2217,33 @@ def page_plan(data: dict, today: date) -> None:
 
     tone = {"deload": "bad", "hold": "neutral", "build": "good"}[verdict["verdict"]]
     ui.banner(verdict["headline"], " · ".join(verdict["reasons"]), tone)
-    ui.stats_row([
+    # A band rather than four cards: this is context for the week below it, and
+    # 330px of bordered boxes before the plan itself is the wrong emphasis.
+    ui.figures([
+        {"label": "Phase", "value": env.phase.title(),
+         "note": (f"{env.weeks_to_race} weeks to go"
+                  if env.weeks_to_race is not None else "no race set"),
+         "tone": PHASE_TONE.get(env.phase, "neutral")},
         {"label": "Week ceiling", "value": hm(env.max_week_minutes),
          "note": "the most the rules allow"},
         {"label": "Done", "value": hm(facts.completed_this_week.total_minutes),
          "note": f"{len(facts.trained_days)} days trained"},
         {"label": "Left", "value": hm(planner.remaining_budget(facts, env)),
          "note": "still available"},
-        {"label": "Hard sessions", "value": env.max_quality_sessions,
+        {"label": "Hard sessions", "value": f"{env.max_quality_sessions}",
          "note": "allowed this week"},
     ])
 
 
-    ui.section("How do you feel?", "This shapes the week, within what the rules allow. "
-                                   "Deload triggers come from data, not mood.")
+    # The week is what this page is for, so it is drawn first — into a container
+    # opened here and filled once the plan is known. A slot rather than a
+    # reordering of the code: the check-in below can rebuild the plan, and code
+    # that renders before it runs would be showing the previous answer.
+    week_slot = st.container()
+
+    ui.section("How do you feel?", "This shapes the week, within what the rules "
+                                   "allow. Deload triggers come from data, not "
+                                   "mood.")
     with st.form("checkin"):
         c = st.columns(4, wrap=True)
         sleep = c[0].slider("Sleep", 1, 5, 3)
@@ -2120,14 +2290,16 @@ def page_plan(data: dict, today: date) -> None:
               "ai": "suggested by the AI, inside the rules",
               "ai_repaired": "AI suggestion, corrected by the rules",
               "manual": "your own plan"}.get(stored.get("source", "rules"), "")
-    ui.section("Your week", origin)
-    ui.week_strip(week_cells(stored, today))
-    for f in stored.get("flags", []):
-        st.caption(("🤖 " if f.startswith("AI:") else "⚠ ") + f)
-    if stored.get("adjustments_made"):
-        with st.expander(f"What the rules changed ({len(stored['adjustments_made'])})"):
-            for a in stored["adjustments_made"]:
-                st.markdown(f"- {a}")
+    with week_slot:
+        ui.section("Your week", origin)
+        ui.week_strip(week_cells(stored, today))
+        for f in stored.get("flags", []):
+            st.caption(("🤖 " if f.startswith("AI:") else "⚠ ") + f)
+        if stored.get("adjustments_made"):
+            with st.expander(
+                    f"What the rules changed ({len(stored['adjustments_made'])})"):
+                for a in stored["adjustments_made"]:
+                    st.markdown(f"- {a}")
 
     done_rows = [d for d in stored.get("week_plan", [])
                  if d.get("purpose") == "completed"]
@@ -2248,12 +2420,96 @@ def page_plan(data: dict, today: date) -> None:
 # --------------------------------------------------------------------------
 
 
+PHASE_TONE = {"base": "neutral", "build": "good", "peak": "caution",
+              "taper": "good"}
+
+
+def goal_block(today: date, unlocked: bool) -> None:
+    """The race, and the shape of the weeks between here and it.
+
+    First on the page because it changes everything below it: with a date set,
+    the growth cap, the hard-session allowance and the long sessions all move
+    with how close the race is.
+    """
+    with Store(db_path()) as s:
+        goal = goal_mod.load(s)
+    ui.section("What you are training for",
+               "Set a date and the plan stops treating every week the same.")
+    if goal.set:
+        weeks = goal.weeks_to_go(today) or 0
+        phase = goal.phase(today)
+        cells = [
+            {"label": "Race", "value": goal.event or "your race",
+             "note": day_label(goal.day.isoformat(), year=True)},
+            {"label": "Weeks to go", "value": f"{max(weeks, 0)}",
+             "note": "this week" if weeks <= 0 else ""},
+            {"label": "Phase now", "value": phase.title(),
+             "note": goal_mod.PHASE_NOTES[phase][:44],
+             "tone": PHASE_TONE.get(phase, "neutral")},
+        ]
+        if goal.distance_km:
+            cells.append({"label": "Distance",
+                          "value": f"{goal.distance_km:g} km",
+                          "note": f"{goal.taper_weeks()}-week taper"})
+        ui.figures(cells)
+        rows = goal.timeline(today)
+        if rows:
+            ui.rows([
+                (("→ " if r["current"] else "") + r["phase"].title(),
+                 (f"{r['from_weeks']} to {r['to_weeks']} weeks out"
+                  if r["from_weeks"] != r["to_weeks"]
+                  else f"{r['to_weeks']} weeks out"),
+                 r["note"])
+                for r in rows
+            ])
+    else:
+        st.caption("No race set, so every week is a base week — easy volume, "
+                   "intensity on a leash. That is the right answer while you are "
+                   "building an engine, and the wrong one eight weeks out.")
+
+    with st.expander("Set the race" if not goal.set else "Change the race"):
+        with st.form("goal"):
+            c = st.columns([2, 1.4, 1, 1], vertical_alignment="bottom")
+            event = c[0].text_input("Race", value=goal.event,
+                                    placeholder="Pune Half Marathon")
+            when = c[1].date_input(
+                "Date", value=goal.day or (today + timedelta(weeks=12)),
+                min_value=today - timedelta(days=365),
+                format="DD-MM-YYYY")
+            sport = c[2].selectbox("Sport", ["run", "bike", "swim", "triathlon"],
+                                   index=["run", "bike", "swim",
+                                          "triathlon"].index(goal.sport)
+                                   if goal.sport in ("run", "bike", "swim",
+                                                     "triathlon") else 0)
+            distance = c[3].number_input("km", 0.0, 300.0,
+                                         float(goal.distance_km or 0.0), step=0.5)
+            b = st.columns(2)
+            save = b[0].form_submit_button("Save the race", type="primary",
+                                           width="stretch", disabled=not unlocked)
+            drop = b[1].form_submit_button("No race for now", width="stretch",
+                                           disabled=not unlocked)
+        if (save or drop) and writes_allowed():
+            with Store(db_path()) as s:
+                if drop:
+                    goal_mod.clear(s)
+                else:
+                    goal_mod.save(s, event, when, sport=sport,
+                                  distance_km=distance or None)
+            refresh()
+            st.rerun()
+        st.caption("The distance sets the taper: three weeks for a marathon, two "
+                   "for a half, one for anything shorter. A race in the past is "
+                   "ignored, and no race means base phase.")
+
+
 def page_rules(data: dict, today: date) -> None:
     unlocked = writes_allowed()
     with Store(db_path()) as s:
         current = rules_mod.load(s)
         facts = planner.build_facts(s, today=today)
         env = planner.build_envelope(facts, s)
+
+    goal_block(today, unlocked)
 
     changed = rules_mod.changed_from_default(current)
     if changed:
@@ -2274,6 +2530,10 @@ def page_rules(data: dict, today: date) -> None:
         {"label": "Week ceiling", "value": hm(env.max_week_minutes),
          "note": f"{env.progression_cap_pct:.0f}% over "
                  f"{hm(env.prev_week_minutes)} last week"},
+        {"label": "Phase", "value": env.phase.title(),
+         "note": (f"{env.weeks_to_race} weeks to {env.race_name or 'the race'}"
+                  if env.weeks_to_race is not None else "no race set"),
+         "tone": PHASE_TONE.get(env.phase, "neutral")},
         {"label": "Block week", "value": f"{env.week_index + 1}/{env.block_weeks}",
          "note": "last week of a block is a deload",
          "tone": "caution" if env.deload else "neutral"},
@@ -2703,11 +2963,9 @@ def page_lifetime(data: dict, today: date) -> None:
     insight_banner("Lifetime", data, today)
     if imported:
         st.caption(
-            f"The totals and calendar below include {len(imported)} session(s) "
-            f"imported from a Strava export — the record from before the watch. "
-            f"The written summary above and every chart on this page are Garmin "
-            f"only: imported sessions carry no heart rate, and Strava's terms "
-            f"keep their data out of anything an AI reads.")
+            f"Totals and the calendar include {len(imported)} imported "
+            f"session(s) from before the watch. The charts need heart rate, so "
+            f"they show the Garmin record only.")
 
     ui.figures([
         {"label": "Sessions", "value": f"{tot['sessions']:,}"},
@@ -2802,213 +3060,117 @@ def page_lifetime(data: dict, today: date) -> None:
         chart_ai_note("lifetime_recovery", data.get("notes"))
 
 
-def page_about(data: dict, today: date) -> None:  # noqa: ARG001
-    """What this is, in the order someone actually asks it.
+def page_about(data: dict, today: date) -> None:
+    """A poster: one idea, a diagram, and the numbers inside it.
 
-    Restructured once already: it used to answer "what may the AI do" twice, in
-    two tables that disagreed about wording, and hid the page tour in the middle
-    where nobody arriving for the first time would look. It now goes what it is,
-    the loop, where things are, then the detail — and the caveats stay where they
-    change what you would do.
+    Four rewrites got here. The first read as documentation, the second as a
+    spec sheet of tables and stat cards, the third said the same things at three
+    times the length. This one keeps the claim, the picture and the proof, and
+    cuts the rest — every figure still read live from the database, so it stays
+    a description of what the app has done rather than a brochure.
     """
-    # No brand block here: the sticky header already carries the name, and
-    # printing it twice on the one page that talks about the app looks like a
-    # mistake.
-    ceiling = data.get("aerobic_ceiling")
-    ceiling_txt = f"{int(float(ceiling))} bpm" if ceiling else "your own ceiling"
-    # Unfiltered on purpose: this page describes the app, not the current view.
     counts = data.get("counts_all") or data.get("counts") or {}
+    history = data.get("history") or data.get("activities") or []
+    tot = totals(history) if history else {}
+    notes = data.get("notes") or {}
+    chart_notes = len([k for k in notes if str(k).startswith("chart:")])
+    ceiling = data.get("aerobic_ceiling")
+    ceiling_txt = f"{int(float(ceiling))} bpm" if ceiling else "a ceiling you set"
+    with Store(db_path()) as s:
+        goal = goal_mod.load(s)
+    phase = goal.phase(today)
+    weeks = goal.weeks_to_go(today)
 
-    st.markdown(
-        "### AI plans your week. The plan goes to your watch.\n\n"
-        "Your watch collects the data. This reads it, works out whether your "
-        "fitness is rising while your heart rate falls, and builds the week that "
-        "follows — swim, bike, run and leg strength as one plan, not four apps. "
-        "Then it sends each session back to the watch, and reads what you "
-        "actually did."
-    )
+    ui.hero(
+        "Aerobic Engine",
+        "An AI coach that cannot talk you into a stupid week.",
+        f"It reads your Garmin, works out whether you are getting fitter or "
+        f"just getting tired, and writes the week that follows — swim, bike, "
+        f"run and leg strength as one plan. Then it sends each session to your "
+        f"watch. {tot.get('sessions', 0):,} sessions on record, "
+        f"{tot.get('km', 0):,.0f} km.")
 
-    ui.figures([
-        {"label": "It plans", "value": "4 sports",
-         "note": "as one week, together"},
-        {"label": "It sends", "value": "to your watch",
-         "note": "named sets, or a bpm range"},
-        {"label": "Easy means", "value": ceiling_txt,
-         "note": "your number, not Garmin's"},
-        {"label": "Every limit", "value": "checked in code",
-         "note": "after the model answers"},
-        {"label": "On record", "value": f"{counts.get('activities', 0)} sessions",
-         "note": f"{counts.get('daily_wellness', 0)} days of recovery data, "
-                 f"Garmin and imported history together"},
+    ui.flow([
+        ("⌚", "Your watch", "what you actually did"),
+        ("📥", "Sync", f"{counts.get('hr_streams', 0):,} heart-rate samples"),
+        ("📊", "Analysis", "efficiency, drift, load — arithmetic"),
+        ("🤖", "The AI", "volume, intensity, which day"),
+        ("🛡", "The rules", "every limit re-checked in code"),
+        ("⌚", "Back to the watch", "named sets, or a bpm range"),
+    ], accent="The AI", guard="The rules")
+
+    ui.pull(
+        "A model asked how your training should go will agree with you.",
+        "Say you feel strong and it offers a bigger week. That is why its "
+        "answer is checked again by code that cannot be flattered.")
+
+    left, right = st.columns(2, gap="large")
+    with left:
+        ui.section("The AI decides")
+        st.markdown(
+            f"- **Which day** the long ride lands on\n"
+            f"- **How long** each session runs, inside the cap\n"
+            f"- **Why**, in one line per session\n"
+            f"- **What the charts say** — {chart_notes} readings written on the "
+            f"last sync\n"
+            f"- **Your questions**, answered from your own data")
+    with right:
+        ui.section("The rules decide")
+        st.markdown(
+            f"- **Easy** means {ceiling_txt} — your number\n"
+            f"- **Growth** never more than the weekly cap\n"
+            f"- **Deloads** come from recovery data, not mood\n"
+            f"- **Exercises** from a fixed {len(strength.EXERCISES)}, never "
+            f"invented\n"
+            f"- **Weights** rise one rep, then one step, when clean")
+
+    if goal.set and weeks is not None and weeks >= 0:
+        ui.pull(f"{goal.event or 'Your race'} in {weeks} weeks — {phase} phase.",
+                goal_mod.PHASE_NOTES[phase])
+    else:
+        ui.pull("No race set, so every week is a base week.",
+                "Right while you build an engine, wrong eight weeks out from "
+                "something. Set a date on the Rules page.")
+
+    ui.section("A Monday, from the inside")
+    ui.prose(
+        "The top of the page says <b>strength, 18 minutes</b> — cut down "
+        "because readiness came in at 31. One tap puts it on your watch with "
+        "every set named. You lift, the watch counts, the next sync reads the "
+        "sets back and works out what weight comes next. The workout deletes "
+        "itself because it is done. Tuesday's ride arrives with a heart-rate "
+        "range, and the watch buzzes if you drift above it.")
+
+    ui.pull("Free to run, end to end.",
+            "Streamlit hosting, Neon Postgres, Gemini with Groq behind it — "
+            "every one a free tier. Switch the AI off and the rules still write "
+            "a full week.")
+
+    ui.section("Where to look")
+    ui.flow([
+        ("📍", "Today", "what to do now"),
+        ("📈", "Progress", "is it working"),
+        ("🗓", "Plan", "the week, and how to change it"),
+        ("⚙️", "Rules", "your race, your limits"),
+        ("🏔", "Lifetime", "how far you have come"),
+        ("📚", "Log", "every session, every bug"),
     ])
 
-    ui.section("The loop", "Five steps, all of which already work.")
-    ui.rows([
-        ("1. It plans the week", "AI",
-         "inside limits it is not allowed to cross"),
-        ("2. You send it to the watch", "one tap",
-         "named exercises, or a heart-rate range"),
-        ("3. You train", "the watch guides",
-         "it buzzes when you drift out of the range"),
-        ("4. It reads what happened", "on Refresh",
-         "marks the session done, rebuilds the rest of the week, and clears the "
-         "finished workout off the watch"),
-        ("5. You ask it anything", "Ask the coach",
-         "answered from your own numbers, on Today"),
-    ])
-
-    ui.section("Where things are", "Six pages, in the order you would use them.")
-    ui.rows([
-        ("Today", "what to do now",
-         "the session, a written reading, this week at a glance, and a coach you "
-         "can ask"),
-        ("Progress", "is it working",
-         "heart rate at your usual pace, intensity mix, load ramp, cadence, "
-         "aerobic drift, heat"),
-        ("Plan", "the week",
-         "check in, see the week, edit any row, send it to the watch"),
-        ("Rules", "your settings",
-         "session floors, growth cap, deload cadence, zones, targets — and the "
-         "limits you cannot move"),
-        ("Lifetime", "how far you have come",
-         "totals, race predictions, records, and every day you showed up"),
-        ("Log", "the record",
-         "sessions and splits, leg work, raw tables, and the app's own errors"),
-    ])
-
-    ui.section("What goes to the watch",
-               "On the watch: START → the sport → pick the session.")
+    ui.section("Logging leg work", "The one thing it cannot do for you.")
     st.markdown(
-        "- **Runs and rides** — timed, with your heart-rate range attached. The "
-        "watch holds you to it, which is the whole point of setting a ceiling.\n"
-        "- **Leg sessions** — every exercise, set, rep, hold and weight, named. "
-        "Sets come back matched to the exercise, and the weights move up on "
-        "their own.\n"
-        "- **Nothing lingers.** Once a session is logged, the next sync takes it "
-        "off the watch and off the Garmin calendar, so START offers tomorrow's "
-        "session rather than a fortnight of history.\n"
-        "- **Swims and bricks stay off the watch.** Garmin builds swim workouts "
-        "from pool length and stroke rather than minutes, and wrist heart rate "
-        "in water is not reliable enough to hold you to."
-    )
+        "- **Send it from Today**, then START → Strength → pick it. Reps "
+        "counted, sets named.\n"
+        "- **Or log it on the watch** — turn on rep counting first. Name any "
+        "stray sets on the Log page.\n"
+        "- **Or type it in** on the Log page.")
+    ui.prose(
+        "Any of the three. None of them is not: a session the watch never saw "
+        "counts as a rest day, and tomorrow's plan is built on a week that did "
+        "not happen.")
 
-    ui.section("What the AI may and may not do",
-               "Worth spelling out, because the limits are the whole point.")
-    ui.rows([
-        ("Adjust volume, intensity and which day", "yes",
-         "inside the envelope the rules set"),
-        ("Write the reason for each session", "yes", "one line, plain language"),
-        ("Read a chart for you", "yes",
-         "a sentence under each one, so the charts are optional"),
-        ("Answer a question about your data", "yes",
-         "from your sessions, signals and plan — nothing else"),
-        ("Exceed the weekly volume cap", "no",
-         "re-checked in code after it answers"),
-        ("Overrule a deload", "no", "your recovery data decides that, not mood"),
-        ("Invent an exercise", "no", "it picks from a fixed 22"),
-        ("Choose a heart-rate number", "no", "those come from your own zones"),
-        ("Decide how much weight", "no", "one rep, then one step, when clean"),
-    ])
-    st.caption(
-        "Ask a chatbot how your training should go and it will agree with you. "
-        "Say you feel strong and it offers a bigger week; say you are tired and "
-        "it cancels everything. So every limit is checked again in code after it "
-        "answers, and the week says so when that changed something. Your own "
-        "edits beat both: a week you save by hand is kept exactly as you typed it."
-    )
-
-    ui.section("Logging your leg sessions",
-               "Any of three ways, but do one of them.")
-    st.markdown(
-        "**Send it from Today**, then on the watch **START → Strength → pick "
-        "it**. Reps are counted for you and every set arrives named.\n\n"
-        "**Or record it yourself:** START → Strength → lift → save. Turn on rep "
-        "counting and rest detection in that activity's settings first. Sets "
-        "arrive counted but sometimes unnamed, and the Log page lets you assign "
-        "them — an assignment sticks, and nothing derived overwrites it.\n\n"
-        "**Or by hand** on the Log page, if the watch never came.\n\n"
-        "A leg session the watch never saw counts as a rest day, and then "
-        "tomorrow's readiness — and this plan — are built on a week that did not "
-        "happen."
-    )
-
-    with st.expander("Why not just use Garmin?"):
-        st.caption("Garmin's numbers are good. This does the parts it does not.")
-        ui.rows([
-            ("Your watch has no triathlon coach", "so",
-             "nothing plans four sports"),
-            ("Garmin's easy zone is fixed", "so",
-             f"yours is {ceiling_txt}, and every target follows it"),
-            ("Garmin logs strength", "but", "it does not decide the weights"),
-            ("Garmin shows the weather", "but",
-             "it does not say a humid day explains your heart rate"),
-            ("Garmin waits 28 days for a trend", "this",
-             "answers in about two"),
-            ("Garmin keeps every workout you send", "this",
-             "removes the ones you have done"),
-        ])
-
-    with st.expander("Where the numbers come from"):
-        st.caption("All of it is your own data, pulled once and kept.")
-        ui.rows([
-            ("Sessions, streams, zones", "Garmin",
-             "heart rate downsampled per session, so drift can be recomputed"),
-            ("Recovery", "Garmin",
-             "resting heart rate, overnight HRV, readiness, sleep, battery"),
-            ("Splits and weather", "Garmin",
-             "per-lap pace and heart rate; temperature and dew point"),
-            ("Leg sessions", "the watch's strength mode",
-             "sets mapped into the exercise library and logged"),
-            ("History before the watch", "a Strava export",
-             "imported once, and kept out of the planner and every AI prompt"),
-            ("How you feel", "you",
-             "sleep, soreness, motivation, time, free text"),
-        ])
-
-    ui.section("Straight answers")
-    st.markdown(
-        "- **Your real easy limit** is whatever heart rate you can still talk in "
-        "full sentences at. No watch knows that; the number here is a starting "
-        "point you can change on the Rules page.\n"
-        "- **Efficiency needs three steady sessions per sport** before it means "
-        "anything. Until then it says how many more you need rather than drawing "
-        "a trend through two points.\n"
-        "- **A missing session is worse than a bad one.** An unlogged week makes "
-        "every number that follows it wrong, and the plan with them.\n"
-        "- **Not medical advice.** Tendon pain that keeps coming back is a "
-        "physio, not a training problem."
-    )
-
-    ui.section("Your data")
-    ui.rows([
-        ("Where it lives", "one database", "shared with nobody"),
-        ("Garmin sign-in", "never from the web",
-         "a saved session, copied across by hand"),
-        ("Changing anything", "needs your PIN",
-         "stored scrambled, never as text"),
-        ("Reading", "open if you share the link",
-         "closeable with a second PIN"),
-        ("When something breaks", "written down",
-         "errors land in the database and read back on the Log page"),
-    ])
-    st.markdown(
-        "Code: [github.com/AnkitGodle/aerobic-engine]"
-        "(https://github.com/AnkitGodle/aerobic-engine). Your training data is "
-        "not in it."
-    )
     ui.link_chips(PROFILE_LINKS)
-    if STRAVA_PROFILE_URL:
-        st.caption(
-            "Links only. Nothing is read from Strava and nothing is sent to it: "
-            "their terms forbid using their data with a language model, and the "
-            "planning here is one. The one exception is a bulk export you "
-            "download yourself, imported once for the history before the watch — "
-            "and even that is kept away from the AI. Garmin is the live source."
-        )
-    st.caption(
-        "Built on the unofficial Garmin Connect API for personal use. Not "
-        "connected to Garmin. Not medical advice."
-    )
+    st.caption("Not medical advice. Tendon pain that keeps coming back is a "
+               "physio, not a training problem.")
 
 
 def page_log(data: dict, today: date) -> None:
@@ -3503,13 +3665,17 @@ def bug_form() -> None:
     """
     counts = with_store(bugs_mod.counts)
     open_count = counts.get(bugs_mod.OPEN, 0)
-    label = f"Report a bug ({open_count} open)" if open_count else "Report a bug"
+    # "Or suggest something": most of what gets typed in here is not a bug, and
+    # a box labelled only for bugs quietly discourages the other half.
+    label = (f"Report a bug or suggest something ({open_count} open)"
+             if open_count else "Report a bug or suggest something")
     with st.expander(label):
         with st.form("bug_report", clear_on_submit=True):
             text = st.text_area(
-                "What went wrong?", height=110, label_visibility="collapsed",
-                placeholder="What you saw, and what you expected instead. The "
-                            "page you are on is recorded for you.")
+                "What happened, or what would help?", height=110,
+                label_visibility="collapsed",
+                placeholder="Something broken, or something you wish it did. "
+                            "The page you are on is recorded for you.")
             sent = st.form_submit_button("Send", type="primary")
         if sent:
             bug_id = with_store(lambda s: bugs_mod.report(
@@ -3557,17 +3723,32 @@ def sidebar(data: dict) -> None:
         # No logo or app name here: the top bar carries both, and a third copy
         # in the sidebar is just noise.
         st.subheader(data["name"] or "Athlete", anchor=False)
-        # At the top, in each service's own colour: these are the only links
-        # out of the app, and at the foot of the sidebar nobody found them.
-        ui.link_chips(PROFILE_LINKS)
+        # Marks only here. The logos say which is which, and the labels were
+        # three words each on the narrowest column in the app.
+        ui.link_chips(PROFILE_LINKS, labels=False)
         # Which store is in use, always visible. Neon is the real database and
         # the SQLite file is a local fallback, and the two cost a whole evening
         # once already: the CLI wrote to the file while the dashboard read Neon
         # and nothing errored, the numbers just disagreed.
         on_neon = is_postgres(db_path())
+        backends = os.getenv("AI_BACKEND", ai.DEFAULT_CHAIN)
+        ready = ai.available()
+        # The phase came from a hardcoded "Base" until races existed, which was
+        # true for as long as nothing knew about a date and wrong the moment one
+        # was set. And the AI line was a caption at the foot of the sidebar: it
+        # is the thing that makes this more than a dashboard, so it belongs in
+        # the table with everything else that says what you are working with.
+        with Store(db_path()) as _s:
+            goal = goal_mod.load(_s)
+        phase = goal.phase(date.today()).title()
+        weeks = goal.weeks_to_go(date.today())
         ui.rows([
             ("Watch", "Forerunner 265"),
-            ("Phase", "Base"),
+            ("Phase", phase,
+             f"{weeks} weeks to {goal.event or 'race'}"
+             if weeks is not None and weeks >= 0 else "no race set"),
+            ("AI", backends if ready else "off",
+             "planning and summaries" if ready else "rules-only plan"),
             ("Database", "Neon Postgres" if on_neon else "local file",
              "" if on_neon else "not the hosted store"),
             ("Last synced",
@@ -3602,10 +3783,7 @@ def sidebar(data: dict) -> None:
                 ("This week", f"{seen['recent']:,}"),
                 ("Today", f"{seen['today']:,}"),
             ])
-            st.caption("Counted here rather than by an analytics company: one "
-                       "visit per browser session, and no addresses kept.")
-        st.caption(f"AI: {os.getenv('AI_BACKEND', 'anthropic')} "
-                   f"({'ready' if ai.available() else 'off'})")
+
         st.caption("Not medical advice. Persistent tendon pain is a physio visit.")
 
 

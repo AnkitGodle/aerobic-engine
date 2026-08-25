@@ -239,6 +239,46 @@ Nothing under `core/` imports Streamlit, and only `core/ai.py` knows a language
 model exists. That is what makes the training logic testable at all — the
 guardrail suite drives the planner directly, with no UI in the way.
 
+## A race, and the phases before it
+
+Set a date on the Rules page and the envelope stops treating every week the same:
+
+| Phase | When | What changes |
+| --- | --- | --- |
+| **Base** | until 13 weeks out | easy volume, intensity on a leash |
+| **Build** | 12 → 5 weeks out | a hard session earns its way in, long sessions grow 10% |
+| **Peak** | 4 → 3 weeks out | the hardest weeks; volume holds rather than rising |
+| **Taper** | last 1–3 weeks | volume cut 45%, sharpness kept, an extra rest day |
+
+The taper length comes from the distance — three weeks for a marathon, two for a
+half, one for anything shorter — because that is what a taper is for.
+
+Two things it will not do. A phase never lifts a safety rule: a deload triggered
+by recovery data still strips the quality out of a peak week, which a test
+asserts directly. And with no race set, every week is a base week — the behaviour
+before goals existed, and the right answer while you are building an engine.
+
+## A message when you wake up
+
+`scripts/notify.py` sends the day's session — what, how long, the heart-rate
+range, and why — composed from the plan that already exists, so it costs no
+model call. `NOTIFY_BACKEND` picks how it leaves the machine:
+
+- **`telegram`** — a bot token and a chat id. Ten minutes end to end, no
+  approval, no message window.
+- **`whatsapp`** — Meta's Cloud API with your own number. Note the shape of it
+  before wiring it up: a free-form message only sends inside 24 hours of *you*
+  messaging the number, and outside that window it must be an approved template
+  (`WHATSAPP_TEMPLATE`). Meta retired the 1,000-free-conversations model in July
+  2025; what is free now is the service window, not a monthly quota.
+- **`callmebot`** — WhatsApp without a Meta app at all, at the cost of a third
+  party handling the text of your training.
+- **`none`** — the default. Nothing is sent.
+
+```bash
+python scripts/notify.py --dry-run     # print it, send nothing
+```
+
 ## What goes back to the watch
 
 The plan is not a suggestion you then re-enter by hand:

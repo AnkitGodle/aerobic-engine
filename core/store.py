@@ -416,6 +416,11 @@ COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("activities", "steps", "REAL"),
     ("hr_streams", "cadence", "REAL"),
     ("hr_streams", "stride_length_cm", "REAL"),
+    # Where you were. Garmin sends coordinates in the same detail payload as the
+    # heart rate, and storing them costs nothing on top of a stream already being
+    # fetched — but it is what turns a finished session into a map.
+    ("hr_streams", "lat", "REAL"),
+    ("hr_streams", "lon", "REAL"),
 ]
 
 
@@ -770,13 +775,14 @@ class Store:
                 # violation on Postgres but pass silently on SQLite.
                 "INSERT INTO hr_streams"
                 "(activity_id, t_s, hr, speed_mps, power_w, altitude_m,"
-                " cadence, stride_length_cm)"
-                " VALUES (?,?,?,?,?,?,?,?) "
+                " cadence, stride_length_cm, lat, lon)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(activity_id, t_s) DO UPDATE SET"
                 " hr=excluded.hr, speed_mps=excluded.speed_mps,"
                 " power_w=excluded.power_w, altitude_m=excluded.altitude_m,"
                 " cadence=excluded.cadence,"
-                " stride_length_cm=excluded.stride_length_cm",
+                " stride_length_cm=excluded.stride_length_cm,"
+                " lat=excluded.lat, lon=excluded.lon",
                 [
                     (
                         activity_id,
@@ -787,6 +793,8 @@ class Store:
                         s.get("altitude_m"),
                         s.get("cadence"),
                         s.get("stride_length_cm"),
+                        s.get("lat"),
+                        s.get("lon"),
                     )
                     for s in samples
                     if s.get("t_s") is not None
@@ -797,7 +805,7 @@ class Store:
     def stream(self, activity_id: str) -> list[dict[str, Any]]:
         return self.query(
             "SELECT t_s, hr, speed_mps, power_w, altitude_m, cadence,"
-            " stride_length_cm FROM hr_streams "
+            " stride_length_cm, lat, lon FROM hr_streams "
             "WHERE activity_id = ? ORDER BY t_s",
             (activity_id,),
         )
@@ -1231,6 +1239,28 @@ class Store:
                   r.get("vertical_ratio"), r.get("stride_length_cm"),
                   str(r["activity_id"])] for r in rows])
         return len(rows)
+
+    def activities_missing_route(self, sports: Sequence[str],
+                                limit: int = 25) -> list[dict[str, Any]]:
+        """Outdoor sessions whose stored stream has no coordinates yet.
+
+        Separate from `activities_missing_streams` because the stream is already
+        there — it was fetched before coordinates were stored — and re-fetching
+        it is the only way to fill them in. Indoor sessions never get any, so a
+        session with no distance is left alone rather than asked about forever.
+        """
+        if not sports:
+            return []
+        marks = ",".join("?" for _ in sports)
+        return self.query(
+            f"SELECT activity_id, sport, start_date FROM activities"
+            f" WHERE sport IN ({marks})"
+            f" AND COALESCE(is_multisport_parent, 0) = 0"
+            f" AND COALESCE(distance_m, 0) > 500"
+            f"{GARMIN_ONLY}"
+            f" AND activity_id NOT IN (SELECT DISTINCT activity_id FROM hr_streams"
+            f"                         WHERE lat IS NOT NULL)"
+            f" ORDER BY start_date DESC LIMIT ?", [*sports, int(limit)])
 
     def activities_missing_form(self, limit: int = 25) -> list[dict[str, Any]]:
         """Runs with no ground-contact figure yet, newest first.

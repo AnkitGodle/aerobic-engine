@@ -1017,6 +1017,10 @@ def parse_stream(details: Any, max_points: int = 600) -> list[dict[str, Any]]:
                 "cadence": pick(row, "directDoubleCadence", "directRunCadence",
                                 "directBikeCadence"),
                 "stride_length_cm": pick(row, "directStrideLength"),
+                # In the same payload as the heart rate, so a stream fetch that
+                # was going to happen anyway also brings home the route.
+                "lat": pick(row, "directLatitude", "directLat"),
+                "lon": pick(row, "directLongitude", "directLon"),
             }
         )
     # directTimestamp is epoch-ms; rebase to seconds from the start.

@@ -670,6 +670,19 @@ def _sync_locked(
         lap_rows += store.upsert_laps(client.fetch_laps(a["activity_id"]))
     stats["laps"] = lap_rows
 
+    # Routes for sessions whose stream predates coordinates being stored. Same
+    # endpoint as the stream, so this is the price of one re-fetch each, once.
+    if progress:
+        progress("Fetching routes…")
+    route_rows = 0
+    for a in store.activities_missing_route(sorted(LAP_SPORTS),
+                                            limit=max(1, stream_limit)):
+        samples = client.fetch_stream(a["activity_id"])
+        if samples and any(x.get("lat") is not None for x in samples):
+            store.replace_stream(a["activity_id"], samples)
+            route_rows += 1
+    stats["routes"] = route_rows
+
     # Running form. One request per run and only for runs that have none, so the
     # cost is a handful once and nothing thereafter.
     if progress:

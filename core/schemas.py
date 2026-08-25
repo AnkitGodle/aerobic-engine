@@ -127,8 +127,12 @@ class Envelope(BaseModel):
     """The rules backstop. Produced deterministically; the AI cannot widen it."""
 
     week_start: date
-    phase: str = "base"
-    week_index: int = 0  # position in the 4-week block
+    phase: str = "base"          # base | build | peak | taper
+    # Weeks until the race, and its name. None when no race is set, which is when
+    # every week is a base week — the behaviour before goals existed.
+    weeks_to_race: int | None = None
+    race_name: str = ""
+    week_index: int = 0  # position in the block
     deload: bool = False
     deload_reasons: list[str] = Field(default_factory=list)
     max_week_minutes: float = 0.0
