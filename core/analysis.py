@@ -447,6 +447,21 @@ def rolling(
     return fmean(vals) if vals else None
 
 
+def clean_status(value: object) -> str | None:
+    """A Garmin status string, or None when it is one of its placeholders.
+
+    Belt and braces with the parser: 47 wellness rows were already stored with
+    "NO_STATUS_2" in them before that was recognised as a sentinel, and the
+    dashboard was showing it as the athlete's training status.
+    """
+    text = str(value or "").strip()
+    low = text.lower()
+    if not text or low in ("none", "unknown", "not_set") or low.startswith(
+            ("no_status", "unknown")):
+        return None
+    return text
+
+
 def recovery_signals(
     wellness: Sequence[dict[str, Any]],
     activities: Sequence[dict[str, Any]] | None = None,
@@ -479,8 +494,10 @@ def recovery_signals(
 
     latest = _latest_with(wellness, ("hrv_status",))
     sig.hrv_status = (latest or {}).get("hrv_status")
-    sig.training_status = (_latest_with(wellness, ("training_status",)) or {}).get(
-        "training_status"
+    sig.training_status = clean_status(
+        (_latest_with(wellness, ("training_status",)) or {}).get(
+            "training_status"
+        )
     )
     sig.training_readiness = _r(rolling(wellness, "training_readiness", 3, as_of))
     sig.sleep_score = _r(rolling(wellness, "sleep_score", recent_days, as_of))

@@ -412,6 +412,22 @@ and does lock accounts. Every request therefore goes through `core/garmin_guard.
 All of that state lives in the database, so a restart or a redeploy does not reset
 it. 12 tests cover it.
 
+## Reporting a bug from inside the app
+
+The sidebar has a box for it. A report lands in a `bug_reports` table with the
+page it was sent from, and the other half lives on the command line:
+
+```bash
+python scripts/bugs.py                  # what is open
+python scripts/bugs.py --all            # everything, with what was done
+python scripts/bugs.py --fix 3 "Line from two points upwards"
+python scripts/bugs.py --wontfix 4 "Garmin builds swim workouts from pool length"
+```
+
+The point is that a fix session starts with the list, in the words the problem
+was noticed in, rather than with trying to remember what was annoying last week.
+"Not fixing", with a reason, is a real answer and kept separately from "open".
+
 ## Counting visitors without a tracker
 
 The sidebar shows visits and devices, counted in the app's own database. There is

@@ -45,8 +45,8 @@ _reloaded = purge_stale_modules(log=logging.getLogger("aerobic_engine.ui").info)
 
 import app.ui as ui  # noqa: E402
 from core import (  # noqa: E402
-    ai, applog, insights, planner, rules as rules_mod, strength,
-    sync as sync_mod, visits as visits_mod,
+    ai, applog, bugs as bugs_mod, insights, planner, rules as rules_mod,
+    strength, sync as sync_mod, visits as visits_mod,
 )
 from core.analysis import (  # noqa: E402
     ACWR_HIGH,
@@ -478,7 +478,15 @@ def day_label(iso: object, year: bool = False) -> str:
 
 
 def fmt_stamp(raw: object) -> str:
-    """An ISO timestamp as "24-08-2026, 9:05 am". Falls back to the raw text."""
+    """An ISO timestamp as "24-08-2026, 9:05 am", in your timezone.
+
+    A timestamp with an offset is converted; one without is assumed to be local
+    already. That split is what makes the sidebar honest: a sync run from
+    Streamlit Cloud records UTC and a sync run from a laptop in India records
+    IST, and read literally the same moment looked five and a half hours apart.
+    Anything stored before that was fixed is naive and was written locally, so
+    leaving those alone is also correct.
+    """
     text = str(raw or "").strip()
     if not text:
         return "never"
@@ -486,6 +494,8 @@ def fmt_stamp(raw: object) -> str:
         when = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         return text[:16].replace("T", " ")
+    if when.tzinfo is not None:
+        when = when.astimezone(LOCAL_TZ).replace(tzinfo=None)
     # The year is dropped in the current year. On a sync timestamp it is almost
     # always noise — you know what year it is — and it only earns its space when
     # the reading is genuinely old.
@@ -1863,7 +1873,10 @@ def training_hr_block(acts: list[dict], today: date,
     field = "hr_at_reference" if normalised else "avg_hr"
 
     fig = go.Figure()
-    drawn, notes = False, []
+    # `trend_notes`, not `notes`: the old name shadowed the stored-notes argument,
+    # so the AI caption for this chart — the headline chart of the whole page —
+    # was being handed a list of trend strings and quietly rendered nothing.
+    drawn, trend_notes = False, []
     for sport in shown_sports():
         pts = [p for p in hr_points(acts, sport) if p.get(field)]
         if not pts:
@@ -1878,8 +1891,11 @@ def training_hr_block(acts: list[dict], today: date,
         mins = [sum(q["minutes"] for q in by_day[d]) for d in days]
         raws = [sum(q["avg_hr"] for q in by_day[d]) / len(by_day[d]) for d in days]
         drawn = True
-        # A line through two points implies a trend that is not there.
-        mode = "lines+markers" if len(days) >= 3 else "markers"
+        # Two points get a line too. Three bike sessions on two days were drawn
+        # as loose dots beside a run line, which reads as missing data rather
+        # than as a sport with fewer sessions; the markers still show where the
+        # actual sessions are.
+        mode = "lines+markers" if len(days) >= 2 else "markers"
         fig.add_scatter(
             x=days, y=ys, mode=mode, name=sport,
             line=dict(color=SPORT_COLOR[sport], width=2),
@@ -1890,7 +1906,7 @@ def training_hr_block(acts: list[dict], today: date,
                           f"<extra>{sport}</extra>")
         t = hr_trend(acts, sport, as_of=today, steady_only=False)
         if t["normalised_change_bpm"] is not None:
-            notes.append(f"{sport} {t['normalised_change_bpm']:+.1f} bpm")
+            trend_notes.append(f"{sport} {t['normalised_change_bpm']:+.1f} bpm")
     # The ceiling drawn on the chart, because it is the line the whole page is
     # asking about: below it was an easy session, above it was not, and without
     # the line the reader has to hold the number in their head.
@@ -1929,9 +1945,9 @@ def training_hr_block(acts: list[dict], today: date,
     fig.update_layout(yaxis_title="bpm")
     ui.chart(fig, 200, date_axis=True)
     chart_ai_note("training_hr", notes)
-    if notes:
-        st.caption("Change at the same pace: " + " · ".join(notes)
-                   + " (negative is progress).")
+    if trend_notes:
+        st.caption("Change at the same pace: " + " · ".join(trend_notes)
+                   + " (going down is progress).")
     elif normalised:
         st.caption("Power-based bike sessions are excluded here: watts per beat "
                    "has no pace equivalent.")
@@ -2113,8 +2129,19 @@ def page_plan(data: dict, today: date) -> None:
             for a in stored["adjustments_made"]:
                 st.markdown(f"- {a}")
 
-    ui.section("Change it", "Edit any row, add sessions, delete what you do not want. "
-                            "Saving keeps exactly what you enter.")
+    done_rows = [d for d in stored.get("week_plan", [])
+                 if d.get("purpose") == "completed"]
+    ui.section("Change it", "Edit any row, add sessions, delete what you do not "
+                            "want. Saving keeps exactly what you enter.")
+    if done_rows:
+        # Said out loud rather than just left out of the table: a session missing
+        # from the editor looks like a bug until you know it is finished.
+        st.caption(
+            "Already done and not editable: "
+            + ", ".join(f"{d['day']} {d['sport']} {d['duration_min']}′"
+                        for d in done_rows)
+            + ". Those are what the watch recorded, so they are the one part of "
+              "the week that is not up for discussion.")
     editable = [d for d in stored.get("week_plan", [])
                 if d.get("purpose") != "completed"]
     seed = pd.DataFrame([{"Day": d["day"], "Sport": d["sport"],
@@ -2985,7 +3012,7 @@ def page_about(data: dict, today: date) -> None:  # noqa: ARG001
 
 
 def page_log(data: dict, today: date) -> None:
-    tabs = st.tabs(["Sessions", "Strength", "Data", "App log"])
+    tabs = st.tabs(["Sessions", "Strength", "Data", "App log", "Bugs"])
     with tabs[0]:
         log_sessions(data, today)
     with tabs[1]:
@@ -2994,10 +3021,47 @@ def page_log(data: dict, today: date) -> None:
         log_data(data)
     with tabs[3]:
         log_app(data)
+    with tabs[4]:
+        log_bugs()
 
 
 LOG_TONE = {"ERROR": "bad", "CRITICAL": "bad", "WARNING": "caution",
             "EVENT": "good", "INFO": "neutral"}
+
+
+def log_bugs() -> None:
+    """Everything reported, and what happened to it."""
+    counts = with_store(bugs_mod.counts)
+    ui.figures([
+        {"label": "Open", "value": f"{counts.get(bugs_mod.OPEN, 0)}",
+         "note": "waiting to be fixed",
+         "tone": "caution" if counts.get(bugs_mod.OPEN) else "good"},
+        {"label": "Fixed", "value": f"{counts.get(bugs_mod.FIXED, 0)}"},
+        {"label": "Not fixing", "value": f"{counts.get(bugs_mod.WONTFIX, 0)}",
+         "note": "looked at and left"},
+    ])
+    picked = st.segmented_control(
+        "Status", ["Open", "Fixed", "Not fixing", "All"], default="Open",
+        key="bug_status", label_visibility="collapsed") or "Open"
+    status = {"Open": bugs_mod.OPEN, "Fixed": bugs_mod.FIXED,
+              "Not fixing": bugs_mod.WONTFIX, "All": None}[picked]
+    rows = with_store(lambda s: bugs_mod.listing(s, status=status, limit=200))
+    if not rows:
+        st.caption("Nothing here. Report one from the sidebar when something "
+                   "looks wrong.")
+        return
+    table(pd.DataFrame([{
+        "#": r["id"],
+        "reported": fmt_stamp(r["reported_at"]),
+        "page": r["page"] or "",
+        "what happened": r["text"],
+        "status": r["status"],
+        "fixed": fmt_stamp(r["resolved_at"]) if r.get("resolved_at") else "",
+        "what was done": r.get("resolution") or "",
+    } for r in rows]))
+    st.caption("Reports are fixed from the command line — `python scripts/bugs.py` "
+               "lists them and marks them done — so the note about what was done "
+               "is written by whoever fixed it.")
 
 
 def log_app(data: dict) -> None:  # noqa: ARG001 - symmetry with the other tabs
@@ -3430,6 +3494,39 @@ def log_data(data: dict) -> None:
 # --------------------------------------------------------------------------
 
 
+def bug_form() -> None:
+    """Report something broken, from wherever you noticed it.
+
+    In the sidebar rather than on a page of its own because that is where you
+    are when something looks wrong, and it records which page you were on so the
+    report does not have to say.
+    """
+    counts = with_store(bugs_mod.counts)
+    open_count = counts.get(bugs_mod.OPEN, 0)
+    label = f"Report a bug ({open_count} open)" if open_count else "Report a bug"
+    with st.expander(label):
+        with st.form("bug_report", clear_on_submit=True):
+            text = st.text_area(
+                "What went wrong?", height=110, label_visibility="collapsed",
+                placeholder="What you saw, and what you expected instead. The "
+                            "page you are on is recorded for you.")
+            sent = st.form_submit_button("Send", type="primary")
+        if sent:
+            bug_id = with_store(lambda s: bugs_mod.report(
+                s, text, page=st.session_state.get("page")))
+            if bug_id:
+                st.success(f"Saved as #{bug_id}. It stays in the database until "
+                           f"it is fixed.")
+            else:
+                st.caption("Nothing to save." if not (text or "").strip()
+                           else "Could not save that — try again in a moment.")
+        if open_count:
+            for row in with_store(lambda s: bugs_mod.listing(s, limit=5)):
+                st.caption(f"#{row['id']} · {fmt_stamp(row['reported_at'])}"
+                           + (f" · {row['page']}" if row["page"] else "")
+                           + f" — {row['text'][:90]}")
+
+
 def count_visit() -> dict[str, int]:
     """Record this session once, and return the running totals.
 
@@ -3491,6 +3588,7 @@ def sidebar(data: dict) -> None:
         if st.button("Reload page data", width="stretch"):
             refresh()
             st.rerun()
+        bug_form()
         seen = count_visit()
         if seen.get("visits"):
             # All three spans, each labelled. One number with "12 today" beside

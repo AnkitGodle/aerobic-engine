@@ -316,6 +316,19 @@ SCHEMA: list[str] = [
         value TEXT
     )
     """,
+    # Bugs, reported from the sidebar in the words they were noticed in. A fix
+    # session starts by reading this rather than a note on somebody's phone.
+    """
+    CREATE TABLE IF NOT EXISTS bug_reports (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        reported_at TEXT NOT NULL,
+        page        TEXT,
+        text        TEXT NOT NULL,
+        status      TEXT NOT NULL DEFAULT 'open',
+        resolved_at TEXT,
+        resolution  TEXT
+    )
+    """,
     # Who opened the page, counted here rather than by an analytics vendor.
     # One row per browser session — Streamlit re-runs the script on every click,
     # so counting runs would count slider movements. No raw identifiers: the

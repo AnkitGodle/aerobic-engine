@@ -136,6 +136,16 @@ def _find_scalar(obj: Any, key_lower: str, cast: Callable[[Any], Any] | None) ->
 # Garmin writes these where a real status has not been established yet — the
 # 265 reports "NONE" for HRV status during its multi-week onboarding period.
 GARMIN_NULL_STRINGS = {"none", "unknown", "not_set", "no_status", ""}
+# And numbered variants: training status came back as NO_STATUS_1 and NO_STATUS_2
+# on consecutive days, which the dashboard then printed as the athlete's status.
+# Whatever the number means to Garmin, it means "nothing to report" here.
+GARMIN_NULL_PREFIXES = ("no_status", "unknown")
+
+
+def is_null_string(value: object) -> bool:
+    """True when Garmin means "no value" rather than a status."""
+    text = str(value or "").strip().lower()
+    return text in GARMIN_NULL_STRINGS or text.startswith(GARMIN_NULL_PREFIXES)
 
 
 def dig_str(obj: Any, *keys: str) -> str | None:
@@ -143,7 +153,7 @@ def dig_str(obj: Any, *keys: str) -> str | None:
     if v is None:
         return None
     text = str(v).strip()
-    return None if text.lower() in GARMIN_NULL_STRINGS else text
+    return None if is_null_string(text) else text
 
 
 def _stamp(entry: dict[str, Any], keys: tuple[str, ...]) -> str:

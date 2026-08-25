@@ -12,7 +12,7 @@ import logging
 import os
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
 from core import applog, strength
@@ -219,7 +219,8 @@ def generate_ai_notes(db: str | None = None, today: date | None = None) -> int:
                      failed, len(jobs))
 
         written = store.set_notes(rows)
-        store.set_state("ai_notes_at", datetime.now().isoformat(timespec="seconds"))
+        store.set_state("ai_notes_at",
+                        datetime.now(timezone.utc).isoformat(timespec="seconds"))
         log.info("Wrote %d AI summaries", written)
         return written
     finally:
@@ -763,7 +764,12 @@ def _sync_locked(
     if stats.get("multisport_legs"):
         recompute += [a["activity_id"] for a in store.activities()]
     stats["metrics"] = recompute_metrics(store, list(dict.fromkeys(recompute)))
-    store.set_state("last_sync", datetime.now().isoformat(timespec="seconds"))
+    # Timezone-aware, because this is read on a page that formats it in the
+    # athlete's timezone. Written naive, a sync from Streamlit Cloud (UTC) and
+    # one from a laptop in India recorded the same moment five and a half hours
+    # apart, and the sidebar believed both.
+    store.set_state("last_sync",
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"))
     log.info("Sync complete: %s", stats)
     # Written to the database too: a scheduled sync has nobody watching stderr,
     # and "when did this last actually work" is the first question after a gap.

@@ -227,7 +227,11 @@ def build_facts(
         recovery=recovery_signals(wellness, activities, as_of=today),
         ef_trends=all_ef_trends(activities, as_of=today),
         recent_checkins=checkins,
-        days_remaining=list(DAYS[today.weekday() :]),
+        # Days still to plan. A day that already has a session on it is not one
+        # of them: the athlete has done the work, and offering to re-plan it is
+        # how a finished Monday came back as something else after a re-plan.
+        # Today counts as available only if nothing has been logged yet.
+        days_remaining=[d for d in DAYS[today.weekday():] if d not in trained],
         trained_days=trained,
         endurance_days=endurance_days,
     )

@@ -1270,3 +1270,29 @@ def test_a_day_already_gone_is_not_prescribed_for(healthy):
     ], source="manual")
     filled, _ = planner.enrich_manual(plan, healthy, today=TODAY)  # a Wednesday
     assert filled.week_plan[0].exercise_ids == []
+
+
+def test_a_day_already_trained_is_not_planned_again(healthy):
+    """Re-planning used to hand a finished Monday a different session. The
+    athlete has done the work; the plan has no business rewriting it."""
+    from core import planner
+
+    facts = planner.build_facts(healthy, today=TODAY)
+    assert facts.trained_days, "the fixture week has sessions behind it"
+    assert not set(facts.days_remaining) & set(facts.trained_days)
+    # And today is still available when nothing has been logged on it.
+    quiet = planner.build_facts(healthy, today=TODAY + timedelta(days=1))
+    assert DAYS[(TODAY + timedelta(days=1)).weekday()] in quiet.days_remaining \
+        or DAYS[(TODAY + timedelta(days=1)).weekday()] in quiet.trained_days
+
+
+def test_replanning_leaves_finished_sessions_alone(healthy):
+    from core import planner
+
+    facts = planner.build_facts(healthy, today=TODAY)
+    plan = planner.plan_week(healthy, today=TODAY, use_ai=False, save=False)
+    planned_days = {d.day for d in plan.week_plan
+                    if d.purpose != "completed" and d.duration_min > 0}
+    assert not planned_days & set(facts.trained_days), (
+        f"planned on days already trained: "
+        f"{sorted(planned_days & set(facts.trained_days))}")
