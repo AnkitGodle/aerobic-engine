@@ -99,6 +99,17 @@ Check before pushing that `.env`, `data/*.db`, `.garmin_tokens/` and
    `.streamlit/secrets.toml.example`, filled in with your real values.
 4. Deploy.
 
+After that, a push to `main` redeploys on its own — there is no build step and
+nothing to click.
+
+**Your name and links are not secrets and do not go here.** They live in
+`profile.toml`, which is committed, precisely because a deploy is a git pull:
+anything that lives only in `.env` is absent on the host, and a sidebar with no
+name and no links is what that absence looks like. Edit that file, push, done.
+Secrets keep to what is actually secret — Garmin credentials, `DATABASE_URL`,
+API keys, PIN hashes — and any of them can still override `profile.toml` if you
+would rather keep a link private.
+
 Keep the app **private** in Streamlit's sharing settings if you would rather the
 page not be public at all. If you do share it publicly, also set
 a read PIN with `python scripts/set_pin.py --read` — the write PIN protects
