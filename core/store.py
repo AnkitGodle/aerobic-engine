@@ -810,6 +810,157 @@ class Store:
             (activity_id,),
         )
 
+    def sample_minutes(
+        self,
+        bounds: dict[int, tuple[int, int | None]],
+        since: date | None = None,
+        sports: Sequence[str] | None = None,
+        activity_id: str | None = None,
+    ) -> dict[int, float]:
+        """Minutes per heart-rate zone, counted in SQL.
+
+        The Python version pulled every stored sample into the process — 3,223 of
+        them today, and one dict each — to produce five numbers, then cached the
+        lot. This does the bucketing in the database and returns the five
+        numbers: less memory, less transfer, and the same arithmetic.
+
+        Each sample is worth `duration / samples` minutes of that activity, the
+        same weighting as before: streams are thinned to a few hundred points, so
+        one sample stands for a different slice of time in a short run than in a
+        long ride.
+
+        The boundaries are interpolated rather than bound because they are part
+        of the CASE structure, not values — they come from our own zone rows and
+        are cast to int on the way in.
+        """
+        if not bounds:
+            return {}
+        cases, where, params = self._zone_case(bounds, since, sports, activity_id)
+        rows = self._zone_rows(cases, where, params, with_date=False)
+        out = {int(z): 0.0 for z in bounds}
+        for row in rows:
+            out[int(row["zone"])] = round(float(row["minutes"] or 0), 1)
+        return out
+
+    def sample_minutes_by_date(
+        self,
+        bounds: dict[int, tuple[int, int | None]],
+        since: date | None = None,
+        sports: Sequence[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """The same buckets, one row per day and zone.
+
+        Enough for the weekly zone chart: 54 activities become at most a few
+        hundred rows, which the caller groups into weeks. The alternative —
+        bucketing by week in SQL — needs `date_trunc` on Postgres and `strftime`
+        on SQLite, and a Monday-start week is easier to agree on in Python than
+        across two dialects.
+        """
+        if not bounds:
+            return []
+        cases, where, params = self._zone_case(bounds, since, sports, None)
+        return [{"day": str(r["day"])[:10], "zone": int(r["zone"]),
+                 "minutes": round(float(r["minutes"] or 0), 1)}
+                for r in self._zone_rows(cases, where, params, with_date=True)]
+
+    def _zone_case(
+        self,
+        bounds: dict[int, tuple[int, int | None]],
+        since: date | None,
+        sports: Sequence[str] | None,
+        activity_id: str | None,
+    ) -> tuple[list[str], list[str], list[Any]]:
+        """The CASE arms and the WHERE clause shared by the two zone queries."""
+        cases = []
+        for number in sorted(bounds):
+            low, high = bounds[number]
+            test = f"h.hr >= {int(low)}"
+            if high is not None:
+                test += f" AND h.hr <= {int(high)}"
+            cases.append(f"WHEN {test} THEN {int(number)}")
+        where = ["h.hr IS NOT NULL", "COALESCE(a.is_multisport_parent, 0) = 0"]
+        params: list[Any] = []
+        if since is not None:
+            where.append("a.start_date >= ?")
+            params.append(since.isoformat())
+        if sports:
+            where.append(f"a.sport IN ({','.join('?' for _ in sports)})")
+            params.extend(sports)
+        if activity_id:
+            where.append("h.activity_id = ?")
+            params.append(str(activity_id))
+        return cases, where, params
+
+    def _zone_rows(self, cases: list[str], where: list[str], params: list[Any],
+                   with_date: bool) -> list[dict[str, Any]]:
+        keys = "p.day AS day, p.zone AS zone" if with_date else "p.zone AS zone"
+        group = "p.day, p.zone" if with_date else "p.zone"
+        sql = (
+            "WITH picked AS ("
+            " SELECT h.activity_id, a.duration_s, a.start_date AS day,"
+            f" CASE {' '.join(cases)} ELSE NULL END AS zone"
+            " FROM hr_streams h JOIN activities a"
+            "   ON a.activity_id = h.activity_id"
+            f" WHERE {' AND '.join(where)}"
+            "), totals AS ("
+            " SELECT activity_id, COUNT(*) AS samples FROM picked GROUP BY activity_id"
+            ")"
+            f" SELECT {keys},"
+            " SUM((COALESCE(p.duration_s, 0) / 60.0) / totals.samples) AS minutes"
+            " FROM picked p JOIN totals ON totals.activity_id = p.activity_id"
+            f" WHERE p.zone IS NOT NULL GROUP BY {group}"
+        )
+        return self.query(sql, params)
+
+    def sample_split(
+        self,
+        ceiling: int,
+        hard_floor: int,
+        since: date | None = None,
+        sports: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
+        """Easy / moderate / hard sample counts against the athlete's ceiling.
+
+        Counted in SQL for the same reason as `sample_minutes`, and counted
+        rather than duration-weighted — streams are sampled at a constant
+        interval within an activity, so each sample stands for the same slice of
+        time inside it.
+        """
+        where = ["h.hr IS NOT NULL", "COALESCE(a.is_multisport_parent, 0) = 0"]
+        params: list[Any] = []
+        if since is not None:
+            where.append("a.start_date >= ?")
+            params.append(since.isoformat())
+        if sports:
+            where.append(f"a.sport IN ({','.join('?' for _ in sports)})")
+            params.extend(sports)
+        row = dict(self.execute(
+            "SELECT"
+            f" SUM(CASE WHEN h.hr <= {int(ceiling)} THEN 1 ELSE 0 END) AS easy,"
+            f" SUM(CASE WHEN h.hr > {int(ceiling)} AND h.hr < {int(hard_floor)}"
+            "          THEN 1 ELSE 0 END) AS moderate,"
+            f" SUM(CASE WHEN h.hr >= {int(hard_floor)} THEN 1 ELSE 0 END) AS hard,"
+            " COUNT(DISTINCT h.activity_id) AS activities"
+            " FROM hr_streams h JOIN activities a"
+            "   ON a.activity_id = h.activity_id"
+            f" WHERE {' AND '.join(where)}", params).fetchone() or {})
+        easy = int(row.get("easy") or 0)
+        moderate = int(row.get("moderate") or 0)
+        hard = int(row.get("hard") or 0)
+        total = easy + moderate + hard
+        if not total:
+            return {"easy": 0.0, "moderate": 0.0, "hard": 0.0, "samples": 0,
+                    "activities": 0, "ceiling": int(ceiling),
+                    "hard_floor": int(hard_floor)}
+        return {
+            "easy": round(easy / total * 100, 1),
+            "moderate": round(moderate / total * 100, 1),
+            "hard": round(hard / total * 100, 1),
+            "samples": total,
+            "activities": int(row.get("activities") or 0),
+            "ceiling": int(ceiling), "hard_floor": int(hard_floor),
+        }
+
     def activities_missing_streams(self, sports: Sequence[str]) -> list[dict[str, Any]]:
         """Activities that should have an HR stream stored but don't.
 

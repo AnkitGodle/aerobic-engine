@@ -49,9 +49,11 @@ CSS = """
   :root {
     /* The page background, needed explicitly: a sticky bar has to paint over
        what scrolls under it, and transparent inherits nothing useful. Streamlit
-       exposes no CSS variable for its own theme background, so these are its
-       documented light and dark defaults, matched below by media query. */
-    --ic-page: #ffffff;
+       exposes no CSS variable for its own theme background, so this is the one
+       set in .streamlit/config.toml. The app is dark for everyone, so this is a
+       constant rather than a media query — as a query it painted a white bar
+       over a dark page for any viewer whose browser preferred light. */
+    --ic-page: #0e1117;
     --ic-good: #3FB68B; --ic-caution: #E0A33E; --ic-bad: #DB5F5A;
     --ic-line: rgba(140,158,176,.28);
     --ic-surface: rgba(140,158,176,.09);
@@ -174,10 +176,6 @@ CSS = """
       margin-bottom: 1.35rem; }
   /* The popover panel has to clear the bar it hangs from. */
   .stMain .st-key-topbar [data-testid="stPopoverBody"] { z-index: 95; }
-
-  @media (prefers-color-scheme: dark) {
-    :root { --ic-page: #0e1117; }
-  }
 
   /* Phones. Measured at 390x844 before this: the bar was 420px, half the
      viewport, with the title wrapping, the subtitle wrapping under it and six
@@ -351,6 +349,27 @@ CSS = """
   .ic-flow-name { font-size: .84rem; font-weight: 640; margin-top: .15rem; }
   .ic-flow-note { font-size: .72rem; opacity: .62; line-height: 1.35;
                   margin-top: .1rem; }
+  /* Splits, in the shape everyone already knows from Strava: the kilometre, the
+     pace, a bar as long as that pace was quick, and what it cost in heartbeats.
+     A table of divs rather than a chart — it is a list, and a list renders
+     instantly. */
+  .ic-splits { margin: .2rem 0 .9rem; font-variant-numeric: tabular-nums; }
+  .ic-split { display: grid; grid-template-columns: 2.6rem 3.4rem 1fr 4.2rem 3.4rem;
+              align-items: center; gap: .55rem; padding: .3rem .1rem;
+              border-bottom: 1px solid var(--ic-line); font-size: .84rem; }
+  .ic-split.head { font-size: .68rem; letter-spacing: .07em; opacity: .5;
+                   text-transform: uppercase; border-bottom-width: 1px; }
+  .ic-split-bar { height: 9px; border-radius: 5px; background: var(--ic-surface);
+                  overflow: hidden; }
+  .ic-split-bar span { display: block; height: 100%; border-radius: 5px; }
+  .ic-split-hr { text-align: right; font-weight: 600; }
+  .ic-split-elev { text-align: right; opacity: .55; font-size: .78rem; }
+  .ic-split-num { opacity: .55; }
+  @media (max-width: 700px) {
+    .ic-split { grid-template-columns: 2.2rem 3.2rem 1fr 3.8rem; }
+    .ic-split-elev { display: none; }
+  }
+
   .ic-flow-arrow { align-self: center; opacity: .35; font-size: .95rem;
                    padding: 0 .1rem; }
   @media (max-width: 700px) { .ic-flow-arrow { display: none; } }
@@ -675,6 +694,41 @@ def proportion_bar(parts: Iterable[tuple[str, float, str]]) -> None:
     )
     st.markdown(f'<div class="ic-bar">{segs}</div>'
                 f'<div class="ic-legend">{legend}</div>', unsafe_allow_html=True)
+
+
+def splits(rows: list[dict], unit: str = "km") -> None:
+    """rows: [{label, pace, bar (0-1), bar_color, hr, hr_color, elev}]
+
+    The bar is proportional to speed, not to time, so the longest bar is the
+    quickest split — which is the way Strava draws it and the way people already
+    read it.
+    """
+    rows = [r for r in rows if r]
+    if not rows:
+        return
+    head = ('<div class="ic-split head"><div>' + esc(unit) + "</div><div>pace</div>"
+            "<div></div><div class='ic-split-hr'>bpm</div>"
+            "<div class='ic-split-elev'>elev</div></div>")
+    body = []
+    for row in rows:
+        width = max(4.0, min(100.0, float(row.get("bar") or 0) * 100))
+        colour = row.get("bar_color") or TONE_COLOR["neutral"]
+        hr = row.get("hr")
+        hr_colour = row.get("hr_color") or ""
+        body.append(
+            '<div class="ic-split">'
+            f'<div class="ic-split-num">{esc(row.get("label", ""))}</div>'
+            f'<div>{esc(row.get("pace", "—"))}</div>'
+            f'<div class="ic-split-bar"><span style="width:{width:.1f}%;'
+            f'background:{esc(colour)}"></span></div>'
+            f'<div class="ic-split-hr"'
+            + (f' style="color:{esc(hr_colour)}"' if hr_colour else "")
+            + f">{esc(f'{hr:.0f}' if hr else '—')}</div>"
+            f'<div class="ic-split-elev">'
+            + (esc(row["elev"]) if row.get("elev") else "")
+            + "</div></div>")
+    st.markdown(f'<div class="ic-splits">{head}{"".join(body)}</div>',
+                unsafe_allow_html=True)
 
 
 def week_strip(days: list[dict], key: bool = True) -> None:

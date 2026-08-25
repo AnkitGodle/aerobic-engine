@@ -16,3 +16,14 @@ fileWatcherType = "auto"
 
 [browser]
 gatherUsageStats = false
+
+[theme]
+# Dark, for everyone, always. This is a training dashboard read early and late,
+# mostly on a phone; the charts, the zone colours and the heart-rate palette were
+# all chosen against a dark page. The light variant was never designed, only
+# tolerated, and it showed. Set here rather than left to the browser so a viewer
+# whose system is light still gets the app as built.
+base = "dark"
+backgroundColor = "#0e1117"
+secondaryBackgroundColor = "#1a1f2b"
+textColor = "#e6e8ec"

@@ -18,14 +18,14 @@ import threading
 import time
 import zlib
 from uuid import uuid4
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import pandas as pd  # noqa: E402
-import plotly.express as px  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
 import streamlit as st  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
@@ -59,10 +59,10 @@ from core.analysis import (  # noqa: E402
     ramp_verdict,
     streak,
     weather_effect,
-    weekly_zone_minutes_from_streams,
+    weekly_zone_minutes_from_rows,
     zone_bounds,
     zone_bounds_with_ceiling,
-    zone_distribution_from_streams,
+    zone_of,
     baseline_trend,
     hr_points,
     hr_trend,
@@ -72,7 +72,6 @@ from core.analysis import (  # noqa: E402
     ef_data_status,
     ef_points,
     polarisation,
-    polarisation_from_streams,
     recovery_signals,
     totals,
     volume_forecast,
@@ -162,17 +161,56 @@ DROP_COLS = {
 DATE_COLUMNS = {"start_date", "day", "date", "achieved_at", "start_time"}
 
 
-def table(df: pd.DataFrame, **kw) -> None:
-    out = df.drop(columns=[c for c in df.columns if c in DROP_COLS])
-    # Formatted here, once, rather than at each call site: every table that
-    # shows a date was showing 2026-08-24, and the ISO form is the storage
+def rolling_mean(values: Sequence[float | None], window: int,
+                 min_periods: int) -> list[float | None]:
+    """A trailing average that skips gaps, like pandas' rolling mean.
+
+    The only arithmetic the wellness chart needed pandas for. Missing days are
+    ignored rather than treated as zero — a day with no HRV reading must not pull
+    the average down — and a window with too few readings returns nothing rather
+    than a number built from one measurement.
+    """
+    out: list[float | None] = []
+    for i in range(len(values)):
+        seen = [v for v in values[max(0, i - window + 1):i + 1] if v is not None]
+        out.append(sum(seen) / len(seen) if len(seen) >= min_periods else None)
+    return out
+
+
+def table(rows: Sequence[Mapping[str, Any]], **kw) -> None:
+    """A table from plain rows.
+
+    Rows rather than a DataFrame, because pandas was costing 57 MB of resident
+    memory — measured — and building these was the only reason this module
+    imported it. Streamlit still converts internally wherever a table is on
+    screen, so the pages that show one pay for it; the pages that do not, which
+    includes the one the app opens on, no longer do.
+    """
+    rows = list(rows or [])
+    if not rows:
+        return
+    # Union of keys, first-seen order: a later row may carry a field the first
+    # one happened to be missing, and dropping it silently would be worse than
+    # a blank cell.
+    keys: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in keys and key not in DROP_COLS:
+                keys.append(key)
+    # Dates formatted here, once, rather than at each call site: every table that
+    # showed a date was showing 2026-08-24, and the ISO form is the storage
     # format, not the reading format.
-    for column in out.columns:
-        if column in DATE_COLUMNS:
-            out[column] = out[column].map(
-                lambda v: day_label(v) if v is not None and str(v).strip() else "")
-    out = out.rename(columns={c: COLUMN_NAMES.get(c, c.replace("_", " ").capitalize())
-                              for c in out.columns})
+    labels = {k: COLUMN_NAMES.get(k, k.replace("_", " ").capitalize()) for k in keys}
+    out = []
+    for row in rows:
+        clean = {}
+        for key in keys:
+            value = row.get(key)
+            if key in DATE_COLUMNS:
+                value = (day_label(value)
+                         if value is not None and str(value).strip() else "")
+            clean[labels[key]] = value
+        out.append(clean)
     st.dataframe(out, width="stretch", hide_index=True, **kw)
 
 
@@ -267,7 +305,11 @@ def db_stamp() -> float:
     return p.stat().st_mtime if p.exists() else 0.0
 
 
-@st.cache_data(show_spinner=False)
+# Two entries, not unbounded: the key is the database fingerprint, so a sync
+# during a session used to leave the previous snapshot resident for the life of
+# the container — every activity, every lap, every zone row, twice over. Two is
+# enough to keep the page that is mid-render working while the new one loads.
+@st.cache_data(show_spinner=False, ttl=1800, max_entries=2)
 def load(stamp: float) -> dict:  # noqa: ARG001 - stamp is the cache key
     def read(s: Store) -> dict:
         state = s.get_states(("last_sync", "athlete_name", "threshold_hr",
@@ -828,7 +870,7 @@ def strength_howto_block(exercise_ids: list[str], log_rows: list[dict],
             st.write("")
 
 
-@st.cache_data(show_spinner=False, ttl=1800)
+@st.cache_data(show_spinner=False, ttl=1800, max_entries=3)
 def week_routes(stamp: float, ids: tuple[str, ...]) -> dict:  # noqa: ARG001
     """Every route for the week, in one query, cached until the data changes.
 
@@ -936,10 +978,54 @@ def session_recap(act: dict, data: dict, routes: dict | None = None) -> None:
                        f"the first half to the second.")
     laps = [l for l in (data.get("laps") or [])
             if str(l.get("activity_id")) == str(act["activity_id"])]
-    if len(laps) >= 2:
+    rows = split_rows(act, laps, data.get("zones") or [], ceiling)
+    if rows:
+        st.markdown("**Splits**")
+        ui.splits(rows, unit="100 m" if act.get("sport") == "swim" else "km")
         drift = lap_drift(laps)
         if drift.get("drift_bpm") is not None:
             st.caption(drift["message"])
+
+
+def split_rows(act: dict, laps: list[dict], zones: list[dict],
+               ceiling: float | None) -> list[dict]:
+    """One row per lap: pace, a bar as long as it was quick, and the heart rate.
+
+    The heart rate is coloured by the zone it fell in — against the athlete's own
+    easy ceiling, not Garmin's — because the number climbing down the column is
+    the thing worth seeing, and a colour says it before the digits do.
+    """
+    rows = sorted((l for l in laps
+                   if str(l.get("activity_id")) == str(act["activity_id"])),
+                  key=lambda l: l.get("lap_index") or 0)
+    if len(rows) < 2:
+        return []
+    bounds = zone_bounds_with_ceiling(zone_bounds(zones or []),
+                                     float(ceiling) if ceiling else None)
+    swim = act.get("sport") == "swim"
+    speeds = [float(l["avg_speed_mps"]) for l in rows if l.get("avg_speed_mps")]
+    quickest = max(speeds) if speeds else 0.0
+    out = []
+    for i, lap in enumerate(rows, 1):
+        speed = float(lap.get("avg_speed_mps") or 0)
+        if speed > 0:
+            secs = (100.0 if swim else 1000.0) / speed
+            pace = f"{int(secs // 60)}:{int(secs % 60):02d}"
+        else:
+            pace = "—"
+        hr = lap.get("avg_hr")
+        zone = zone_of(float(hr), bounds) if hr and bounds else None
+        gain = lap.get("elevation_gain_m")
+        out.append({
+            "label": f"{i}",
+            "pace": pace,
+            "bar": (speed / quickest) if quickest else 0,
+            "bar_color": SPORT_COLOR.get(act.get("sport"), TONE["neutral"]),
+            "hr": float(hr) if hr else None,
+            "hr_color": ZONE_COLOR.get(zone or 0, ""),
+            "elev": f"{gain:+.0f} m" if gain else "",
+        })
+    return out
 
 
 def session_bands(data: dict, act: dict, ceiling: float | None) -> dict[int, float]:
@@ -1147,7 +1233,7 @@ def page_today(data: dict, today: date) -> None:
 
 
 
-@st.cache_data(show_spinner=False, ttl=900)
+@st.cache_data(show_spinner=False, ttl=900, max_entries=3)
 def _next_week_plan(stamp: float, iso_today: str,
                     sports: tuple[str, ...] = ()) -> dict | None:  # noqa: ARG001
     """Computed on demand and cached: it is a preview, not a saved plan.
@@ -1224,7 +1310,7 @@ def acwr_tone(sig) -> str:
     return "good"
 
 
-@st.cache_data(show_spinner=False, ttl=300)
+@st.cache_data(show_spinner=False, ttl=300, max_entries=4)
 def _week_context(stamp: float, iso_today: str,
                   sports: tuple[str, ...]) -> tuple[dict, dict, dict]:  # noqa: ARG001
     """This week's facts, envelope and verdict — one read, cached on the data.
@@ -1710,7 +1796,7 @@ def drift_block(acts: list[dict], laps: list[dict] | None = None) -> None:
     if rows:
         st.caption("Only kilometres you ran at the same pace are compared, so a "
                    "rise here means the session got harder, not faster.")
-        table(pd.DataFrame([{
+        table([{
             "start_date": r["act"]["start_date"],
             "sport": r["act"]["sport"],
             "Heart rate rise": f"+{r['drift']['drift_bpm']:.0f} bpm",
@@ -1718,7 +1804,7 @@ def drift_block(acts: list[dict], laps: list[dict] | None = None) -> None:
             "Kilometres compared": r["drift"]["laps_compared"],
             "How even the pace was": (f"{r['spread']:.1f}% apart"
                                       if r["spread"] else "—"),
-        } for r in rows]))
+        } for r in rows])
         worst = max(rows, key=lambda r: r["drift"]["drift_bpm"])
         tone = {"flat": "good", "mild": "caution", "steep": "bad"}[
             worst["drift"]["verdict"]]
@@ -1730,12 +1816,19 @@ def drift_block(acts: list[dict], laps: list[dict] | None = None) -> None:
             st.caption("Needs one session with at least three kilometres of "
                        "three minutes or more, or a session of an hour.")
         return
-    df = pd.DataFrame([{"Date": a["start_date"], "Sport": a["sport"],
-                        "Drift": round(a["decoupling_pct"], 2)} for a in drift])
-    fig = px.bar(df, x="Date", y="Drift", color="Sport",
-                 color_discrete_map=SPORT_COLOR)
+    # One bar trace per sport, built by hand rather than through plotly.express.
+    # px is the only thing here that wanted a DataFrame, and importing it costs
+    # 22 MB of resident memory — measured — for a grouped bar chart that
+    # graph_objects draws in six lines.
+    fig = go.Figure()
+    for sport in sorted({a["sport"] for a in drift}):
+        mine = [a for a in drift if a["sport"] == sport]
+        fig.add_bar(x=[a["start_date"] for a in mine],
+                    y=[round(a["decoupling_pct"], 2) for a in mine],
+                    name=sport, marker_color=SPORT_COLOR.get(sport))
     fig.add_hline(y=5, line_dash="dot", annotation_text="5%")
-    fig.update_layout(yaxis_title="% drift")
+    fig.update_layout(yaxis_title="% drift", barmode="group",
+                      legend_title_text="")
     ui.chart(fig, 200, date_axis=True)
 
 
@@ -1946,7 +2039,7 @@ def weather_block(data: dict, today: date, notes: dict | None = None) -> None:
     chart_ai_note("heat", notes)
 
 
-@st.cache_data(show_spinner=False, ttl=1800)
+@st.cache_data(show_spinner=False, ttl=1800, max_entries=12)
 def _ask_answer(stamp: float, iso_today: str, question: str) -> str:  # noqa: ARG001
     """Cached on the question and the data, so a rerun costs nothing."""
     try:
@@ -2078,7 +2171,9 @@ def race_block(race: list[dict], notes: dict | None = None) -> None:
     chart_ai_note("race", notes)
 
 
-def lap_block(activity_id: str, laps: list[dict], sport: str) -> None:
+def lap_block(activity_id: str, laps: list[dict], sport: str,
+              zones: list[dict] | None = None,
+              ceiling: float | None = None) -> None:
     """Per-lap pace with heart rate over it, for one session.
 
     The single most useful chart for the problem this athlete actually has: the
@@ -2119,6 +2214,10 @@ def lap_block(activity_id: str, laps: list[dict], sport: str) -> None:
     fig.update_layout(xaxis_title="lap", hovermode="x unified", barmode="overlay")
     with ui.frame():
         ui.chart(fig, 240)
+    table_rows = split_rows({"activity_id": activity_id, "sport": sport},
+                            rows, zones or [], ceiling)
+    if table_rows:
+        ui.splits(table_rows, unit="100 m" if sport == "swim" else "km")
     drift = lap_drift(rows)
     spread = lap_pace_spread(rows)
     bits = []
@@ -2260,8 +2359,7 @@ def trend_chart(wl: list[dict], today: date) -> None:
     if not wl:
         st.caption("No wellness data yet.")
         return
-    df = pd.DataFrame(wl)
-    df["day"] = pd.to_datetime(df["day"])
+    days = [r.get("day") for r in wl]
     metric = st.radio(
         "Metric",
         ["Resting HR", "HRV", "Readiness", "Sleep", "Stress", "Respiration",
@@ -2280,18 +2378,20 @@ def trend_chart(wl: list[dict], today: date) -> None:
         "Blood oxygen": ("spo2_avg", "#7FB6DC"),
         "Steps": ("steps", "#B79A6B"),
     }[metric]
-    if col not in df or not df[col].notna().any():
+    raw = [r.get(col) for r in wl]
+    if not any(v is not None for v in raw):
         st.caption(f"No {metric.lower()} recorded yet.")
         return
-    y = df[col] / 3600.0 if col == "sleep_seconds" else df[col]
+    y = [None if v is None else (float(v) / 3600.0 if col == "sleep_seconds"
+                                else float(v)) for v in raw]
     fig = go.Figure()
-    fig.add_scatter(x=df["day"], y=y, mode="markers", name="daily",
+    fig.add_scatter(x=days, y=y, mode="markers", name="daily",
                     marker=dict(size=6, color=color, opacity=.35),
                     hovertemplate="%{x|%a %d-%m-%Y}<br>%{y:.1f}<extra></extra>")
-    fig.add_scatter(x=df["day"], y=y.rolling(7, min_periods=2).mean(), mode="lines",
+    fig.add_scatter(x=days, y=rolling_mean(y, 7, 2), mode="lines",
                     name="7-day average", line=dict(color=color, width=2.5))
-    if y.notna().sum() >= 20:
-        fig.add_scatter(x=df["day"], y=y.rolling(28, min_periods=5).mean(),
+    if sum(v is not None for v in y) >= 20:
+        fig.add_scatter(x=days, y=rolling_mean(y, 28, 5),
                         mode="lines", name="28-day baseline",
                         line=dict(color=color, width=1.5, dash="dot"))
     fig.update_layout(yaxis_title="hours" if col == "sleep_seconds" else None)
@@ -2343,7 +2443,7 @@ def volume_chart(data: dict, today: date,
              "strength": w.strength_sessions} for w in weeks if w.total_minutes > 0]
     if rows:
         with st.expander("Week by week"):
-            table(pd.DataFrame(rows).iloc[::-1])
+            table(rows[::-1])
 
 
 # --------------------------------------------------------------------------
@@ -2459,13 +2559,15 @@ def page_plan(data: dict, today: date) -> None:
               "the week that is not up for discussion.")
     editable = [d for d in stored.get("week_plan", [])
                 if d.get("purpose") != "completed"]
-    seed = pd.DataFrame([{"Day": d["day"], "Sport": d["sport"],
-                          "Minutes": d["duration_min"],
-                          "Zone": d.get("target_zone") or "Z2",
-                          "Target HR": d.get("target_hr") or "",
-                          "Note": (d.get("why") or "")[:80]} for d in editable]
-                        or [{"Day": "Mon", "Sport": "bike", "Minutes": 60,
-                             "Zone": "Z2", "Target HR": "", "Note": ""}])
+    # A list of rows, not a DataFrame: the editor hands back what it was given,
+    # so this is one fewer reason for the app to import pandas.
+    seed = [{"Day": d["day"], "Sport": d["sport"],
+             "Minutes": d["duration_min"],
+             "Zone": d.get("target_zone") or "Z2",
+             "Target HR": d.get("target_hr") or "",
+             "Note": (d.get("why") or "")[:80]} for d in editable] \
+        or [{"Day": "Mon", "Sport": "bike", "Minutes": 60,
+             "Zone": "Z2", "Target HR": "", "Note": ""}]
     edited = st.data_editor(
         seed, num_rows="dynamic", hide_index=True, width="stretch",
         key="plan_editor", disabled=not unlocked,
@@ -2492,7 +2594,7 @@ def page_plan(data: dict, today: date) -> None:
         legs_before = {d["day"]: list(d.get("exercise_ids") or [])
                        for d in stored.get("week_plan", [])
                        if d.get("sport") == "strength"}
-        for n, r in edited.iterrows():
+        for n, r in enumerate(edited):
             try:
                 days.append(PlanDay(
                     day=str(r["Day"]), sport=str(r["Sport"]),
@@ -2926,7 +3028,7 @@ def pr_value(row: dict) -> str:
     return f"{float(v):,.0f}"
 
 
-@st.cache_data(show_spinner=False, ttl=900)
+@st.cache_data(show_spinner=False, ttl=900, max_entries=4)
 def _conformed_plan(stamp: float, iso_today: str, raw: str,
                     sports: tuple[str, ...] = ()) -> tuple[dict, bool]:  # noqa: ARG001
     """Push a stored plan back through the current rules. Cached on its content."""
@@ -2974,58 +3076,55 @@ def conformed_plan(plan: dict | None, today: date,
                            tuple(sorted(sports or ())))
 
 
-@st.cache_data(show_spinner=False, ttl=900)
+@st.cache_data(show_spinner=False, ttl=900, max_entries=24)
 def session_zone_minutes(stamp: float, activity_id: str,
                          ceiling: int) -> dict:  # noqa: ARG001
     """One session's minutes per zone, against the athlete's own zone 2 top."""
     try:
         def read(s: Store) -> dict:
-            acts = [a for a in s.activities(include_parents=True)
-                    if str(a.get("activity_id")) == str(activity_id)]
             bounds = zone_bounds_with_ceiling(zone_bounds(s.zones()), ceiling)
-            return zone_distribution_from_streams(
-                {str(activity_id): s.stream(activity_id)}, acts, bounds)
+            return s.sample_minutes(bounds, activity_id=str(activity_id))
         return {int(k): v for k, v in (with_store(read) or {}).items()}
     except Exception as exc:  # noqa: BLE001
         log.warning("Session zone minutes failed: %s", exc)
         return {}
 
 
-@st.cache_data(show_spinner=False, ttl=900)
+@st.cache_data(show_spinner=False, ttl=900, max_entries=12)
 def stream_zone_minutes(stamp: float, iso_today: str, ceiling: int,
                         sport: str = "", days: int = 28) -> dict:  # noqa: ARG001
     """Minutes per zone from the stored samples, against the athlete's ceiling.
 
-    Cached: it reads every stream, which is the heaviest query on the page.
+    Bucketed in SQL. The Python version pulled every stored sample into the
+    process to produce five numbers — 588ms and a few thousand dicts, measured,
+    against 64ms and five rows for the same answer.
     """
     try:
         def read(s: Store) -> dict:
-            acts = s.activities()
-            streams = {a["activity_id"]: s.stream(a["activity_id"]) for a in acts}
             bounds = zone_bounds_with_ceiling(zone_bounds(s.zones()), ceiling)
-            return zone_distribution_from_streams(
-                streams, acts, bounds, sport=sport or None,
-                since=date.fromisoformat(iso_today) - timedelta(days=days))
+            return s.sample_minutes(
+                bounds, since=date.fromisoformat(iso_today) - timedelta(days=days),
+                sports=[sport] if sport else None)
         return with_store(read)
     except Exception as exc:  # noqa: BLE001 - fall back to Garmin's own buckets
         log.warning("Stream zone minutes failed: %s", exc)
         return {}
 
 
-@st.cache_data(show_spinner=False, ttl=900)
+@st.cache_data(show_spinner=False, ttl=900, max_entries=4)
 def stream_zone_weeks(stamp: float, iso_today: str, ceiling: int, weeks: int = 8,
                       sports: tuple[str, ...] = ()) -> list:  # noqa: ARG001
-    """Minutes per zone per week, against the athlete's ceiling. Cached: it reads
-    every stored heart-rate stream, the same heavy query as the 28-day version."""
+    """Minutes per zone per week, against the athlete's ceiling. Bucketed in SQL,
+    like the 28-day version: a few hundred rows back instead of every sample."""
     try:
         def read(s: Store) -> list:
-            acts = [a for a in s.activities()
-                    if not sports or a.get("sport") in set(sports)]
-            streams = {a["activity_id"]: s.stream(a["activity_id"]) for a in acts}
             bounds = zone_bounds_with_ceiling(zone_bounds(s.zones()), ceiling)
-            rows = weekly_zone_minutes_from_streams(
-                streams, acts, bounds, weeks=weeks,
-                as_of=date.fromisoformat(iso_today))
+            as_of = date.fromisoformat(iso_today)
+            start = as_of - timedelta(days=as_of.weekday(), weeks=weeks - 1)
+            rows = weekly_zone_minutes_from_rows(
+                s.sample_minutes_by_date(bounds, since=start,
+                                         sports=list(sports) or None),
+                weeks=weeks, as_of=as_of)
             # Dates out, ISO strings back: the cache stores what this returns.
             return [{**r, "week_start": r["week_start"].isoformat()} for r in rows]
         return with_store(read) or []
@@ -3034,28 +3133,26 @@ def stream_zone_weeks(stamp: float, iso_today: str, ceiling: int, weeks: int = 8
         return []
 
 
-@st.cache_data(show_spinner=False, ttl=900)
+@st.cache_data(show_spinner=False, ttl=900, max_entries=8)
 def stream_polarisation(stamp: float, iso_today: str, ceiling: int,
                         hard_floor: int,
                         sports: tuple[str, ...] = ()) -> dict:  # noqa: ARG001
     """Easy/moderate/hard from the stored HR samples rather than Garmin's zone
-    rows. Cached, because it reads every stream — the one genuinely heavy query
-    on the page."""
+    rows, counted in SQL so the samples never leave the database."""
     try:
         def read(s: Store) -> dict:
-            acts = [a for a in s.activities()
-                    if not sports or a.get("sport") in set(sports)]
-            streams = {a["activity_id"]: s.stream(a["activity_id"]) for a in acts}
-            return polarisation_from_streams(
-                streams, acts, ceiling=ceiling, hard_floor=hard_floor or None,
-                since=date.fromisoformat(iso_today) - timedelta(days=28))
+            floor = hard_floor or int(ceiling * 1.18)
+            return s.sample_split(
+                int(ceiling), int(floor),
+                since=date.fromisoformat(iso_today) - timedelta(days=28),
+                sports=list(sports) or None)
         return with_store(read)
     except Exception as exc:  # noqa: BLE001 - fall back to Garmin's own buckets
         log.warning("Stream polarisation failed: %s", exc)
         return {}
 
 
-@st.cache_data(show_spinner=False, ttl=900)
+@st.cache_data(show_spinner=False, ttl=900, max_entries=4)
 def _suggested_targets(stamp: float, iso_today: str,
                        sports: tuple[str, ...] = ()) -> dict:  # noqa: ARG001
     try:
@@ -3351,7 +3448,7 @@ def log_bugs() -> None:
         st.caption("Nothing here. Report one from the sidebar when something "
                    "looks wrong.")
         return
-    table(pd.DataFrame([{
+    table([{
         "#": r["id"],
         "reported": fmt_stamp(r["reported_at"]),
         "page": r["page"] or "",
@@ -3359,7 +3456,7 @@ def log_bugs() -> None:
         "status": r["status"],
         "fixed": fmt_stamp(r["resolved_at"]) if r.get("resolved_at") else "",
         "what was done": r.get("resolution") or "",
-    } for r in rows]))
+    } for r in rows])
     st.caption("Reports are fixed from the command line — `python scripts/bugs.py` "
                "lists them and marks them done — so the note about what was done "
                "is written by whoever fixed it.")
@@ -3390,12 +3487,12 @@ def log_app(data: dict) -> None:  # noqa: ARG001 - symmetry with the other tabs
         st.caption("Nothing logged yet. Warnings, errors and milestones land "
                    "here; ordinary page loads do not.")
         return
-    table(pd.DataFrame([{
+    table([{
         "when": fmt_stamp(r["at"]), "level": r["level"],
         "where": (r["logger"] or "").replace("aerobic_engine.", ""),
         "message": r["message"],
         "detail": (r["context"] or "")[:300],
-    } for r in rows]))
+    } for r in rows])
     st.caption(f"Newest first, {len(rows)} shown. The table keeps the most "
                f"recent {applog.KEEP_ROWS} entries and prunes itself.")
 
@@ -3412,7 +3509,7 @@ def log_sessions(data: dict, today: date) -> None:
     chosen = st.multiselect("Sport", sports, default=sports,
                             label_visibility="collapsed")
     view = [a for a in acts if a["sport"] in chosen]
-    table(pd.DataFrame([{
+    table([{
         "start_date": day_label(a["start_date"]), "sport": a["sport"],
         "name": a.get("name") or "", "minutes": round((a.get("duration_s") or 0) / 60),
         "km": round((a.get("distance_m") or 0) / 1000, 2),
@@ -3422,7 +3519,7 @@ def log_sessions(data: dict, today: date) -> None:
         "is_steady": "yes" if a.get("is_steady") else "no",
         "steady_reason": "" if a.get("is_steady") else (a.get("steady_reason") or ""),
         "source": a.get("source") or "garmin",
-    } for a in view]).iloc[::-1])
+    } for a in view][::-1])
 
     if not view:
         return
@@ -3523,9 +3620,13 @@ def log_sessions(data: dict, today: date) -> None:
     with Store(db_path()) as s:
         stream = s.stream(aid)
     if stream:
-        sdf = pd.DataFrame(stream)
-        sdf["minutes"] = sdf["t_s"] / 60.0
-        has_alt = "altitude_m" in sdf and sdf["altitude_m"].notna().any()
+        minutes = [(r.get("t_s") or 0) / 60.0 for r in stream]
+
+        def column(name: str) -> list:
+            return [r.get(name) for r in stream]
+
+        alts = [v for v in column("altitude_m") if v is not None]
+        has_alt = bool(alts)
 
         # Elevation as a filled area behind the traces, not another line. It is
         # context for the other two rather than a measurement in its own right:
@@ -3534,25 +3635,27 @@ def log_sessions(data: dict, today: date) -> None:
         fig = go.Figure()
         if has_alt:
             fig.add_scatter(
-                x=sdf["minutes"], y=sdf["altitude_m"], name="Elevation (m)",
+                x=minutes, y=column("altitude_m"), name="Elevation (m)",
                 mode="lines", line=dict(width=0.8, color="rgba(140,158,176,.55)"),
                 fill="tozeroy", fillcolor="rgba(140,158,176,.13)", yaxis="y3",
                 hovertemplate="%{y:.0f} m<extra>elevation</extra>")
         for col, nm, colr in (("hr", "Heart rate", TONE["bad"]),
                               ("speed_mps", "Speed (m/s)", "#7FB6DC"),
                               ("power_w", "Power (W)", TONE["caution"])):
-            if col in sdf and sdf[col].notna().any():
-                fig.add_scatter(x=sdf["minutes"], y=sdf[col], mode="lines", name=nm,
+            values = column(col)
+            if any(v is not None for v in values):
+                fig.add_scatter(x=minutes, y=values, mode="lines", name=nm,
                                 line=dict(width=1.6, color=colr),
                                 yaxis="y" if col == "hr" else "y2")
         # Zone bands behind the trace, against this athlete's own ceiling. The
         # zone bar above says how long was spent in each; this says *when*, which
         # is the difference between a steady session and a fast start.
-        if "hr" in sdf and sdf["hr"].notna().any():
+        beats = [v for v in column("hr") if v is not None]
+        if beats:
             bands = zone_bounds_with_ceiling(
                 zone_bounds(data["zones"]),
                 float(ceiling) if ceiling else None)
-            top = float(sdf["hr"].max())
+            top = float(max(beats))
             for number, (low, high) in sorted(bands.items()):
                 if low > top:
                     continue
@@ -3566,7 +3669,7 @@ def log_sessions(data: dict, today: date) -> None:
         if has_alt:
             # Squeezed into the bottom third and unlabelled, so the terrain reads
             # as a backdrop instead of competing with heart rate.
-            lo, hi = float(sdf["altitude_m"].min()), float(sdf["altitude_m"].max())
+            lo, hi = float(min(alts)), float(max(alts))
             pad = max(4.0, (hi - lo) * 0.25)
             layout["yaxis3"] = dict(overlaying="y", side="right",
                                     range=[lo - pad, lo + (hi - lo + pad) * 3.2],
@@ -3576,12 +3679,12 @@ def log_sessions(data: dict, today: date) -> None:
         with ui.frame():
             ui.chart(fig, 280)
         if has_alt:
-            gain = float(sdf["altitude_m"].diff().clip(lower=0).sum())
+            gain = sum(max(0.0, float(b) - float(a))
+                       for a, b in zip(alts, alts[1:]))
             st.caption(
                 f"Climbed about {gain:.0f} m across the session "
-                f"({float(sdf['altitude_m'].min()):.0f}–"
-                f"{float(sdf['altitude_m'].max()):.0f} m). Heart rate rising on a "
-                f"climb is terrain, not fatigue.")
+                f"({float(min(alts)):.0f}–{float(max(alts)):.0f} m). Heart rate "
+                f"rising on a climb is terrain, not fatigue.")
         elif act.get("elevation_gain_m"):
             st.caption(
                 f"{float(act['elevation_gain_m']):.0f} m of climbing in total. "
@@ -3592,7 +3695,8 @@ def log_sessions(data: dict, today: date) -> None:
             f"Your heart rate crept up {act['decoupling_pct']:.1f}% between the "
             f"first half of this session and the second, at the same effort. "
             f"Under 5% means you held it together well.")
-    lap_block(aid, data.get("laps") or [], act["sport"])
+    lap_block(aid, data.get("laps") or [], act["sport"],
+              zones=data.get("zones") or [], ceiling=data.get("aerobic_ceiling"))
 
 
 def assign_sets_block(unmapped: list[dict], unlocked: bool) -> None:
@@ -3738,10 +3842,10 @@ def log_strength(data: dict, today: date) -> None:
                 st.caption(f"Why it matters: {drill['why']}")
     if log_rows:
         with st.expander("History"):
-            h = pd.DataFrame(log_rows)[["day", "exercise_id", "sets", "reps", "hold_s",
-                                        "load_kg", "clean", "pain"]].copy()
-            h["day"] = h["day"].map(day_label)
-            table(h.iloc[::-1])
+            table([{k: r.get(k) for k in
+                    ("day", "exercise_id", "sets", "reps", "hold_s",
+                     "load_kg", "clean", "pain")}
+                   for r in log_rows][::-1])
 
 
 def log_data(data: dict) -> None:
@@ -3771,23 +3875,18 @@ def log_data(data: dict) -> None:
     ])
     if data["wellness"]:
         with st.expander("Daily wellness"):
-            w = pd.DataFrame(data["wellness"])
-            keep = [c for c in ("day", "resting_hr", "hrv_last_night",
-                                "training_readiness", "vo2max_run", "sleep_seconds",
-                                "training_status") if c in w]
-            w = w[keep].copy()
-            if "sleep_seconds" in w:
-                w["sleep_hours"] = (w.pop("sleep_seconds") / 3600).round(1)
-            w["day"] = w["day"].map(day_label)
-            table(w.iloc[::-1])
+            keep = ("day", "resting_hr", "hrv_last_night", "training_readiness",
+                    "vo2max_run", "training_status")
+            table([{**{k: r.get(k) for k in keep},
+                    "sleep_hours": (round(r["sleep_seconds"] / 3600, 1)
+                                    if r.get("sleep_seconds") else None)}
+                   for r in data["wellness"]][::-1])
     if data["checkins"]:
         with st.expander("Your check-ins"):
-            c = pd.DataFrame(data["checkins"])
-            c["day"] = c["day"].map(day_label)
-            table(c)
+            table(data["checkins"])
     if data["sets"]:
         with st.expander("Watch-recorded strength sets"):
-            table(pd.DataFrame(data["sets"]))
+            table(data["sets"])
 
 
 # --------------------------------------------------------------------------

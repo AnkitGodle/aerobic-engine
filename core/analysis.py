@@ -1468,6 +1468,51 @@ def weekly_zone_minutes_from_streams(
     return out
 
 
+def weekly_zone_minutes_from_rows(
+    rows: Sequence[Mapping[str, Any]],
+    weeks: int = 8,
+    as_of: date | None = None,
+) -> list[dict[str, Any]]:
+    """The same weekly table, built from day-and-zone rows already bucketed.
+
+    `weekly_zone_minutes_from_streams` needs every sample in the process to
+    produce this. The database can do the bucketing and hand back a few hundred
+    rows instead of a few thousand samples, and this turns those rows into the
+    same shape — so the chart is unchanged and the memory is not spent. The
+    stream version stays as the reference the tests compare against.
+    """
+    as_of = as_of or date.today()
+    this_week = as_of - timedelta(days=as_of.weekday())
+    first_week = this_week - timedelta(weeks=weeks - 1)
+    buckets: dict[date, dict[int, float]] = {}
+    for row in rows or ():
+        day = _as_date(row.get("day"))
+        if day is None:
+            continue
+        week = day - timedelta(days=day.weekday())
+        if week < first_week or week > this_week:
+            continue
+        zone = row.get("zone")
+        if zone is None:
+            continue
+        bucket = buckets.setdefault(week, {})
+        bucket[int(zone)] = bucket.get(int(zone), 0.0) + float(row.get("minutes") or 0)
+
+    out = []
+    for week in sorted(buckets):
+        entry: dict[str, Any] = {"week_start": week}
+        total = 0.0
+        for zone in range(1, 6):
+            minutes = round(buckets[week].get(zone, 0.0), 1)
+            entry[f"z{zone}"] = minutes
+            total += minutes
+        entry["total"] = round(total, 1)
+        entry["easy_pct"] = (round((entry["z1"] + entry["z2"]) / total * 100, 1)
+                             if total > 0 else None)
+        out.append(entry)
+    return out
+
+
 def consistency(
     activities: Sequence[dict[str, Any]],
     as_of: date | None = None,
