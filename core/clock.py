@@ -20,7 +20,19 @@ DEFAULT_TZ = "Asia/Kolkata"
 
 
 def zone(name: str | None = None) -> ZoneInfo:
-    return ZoneInfo(name or os.getenv("LOCAL_TZ", DEFAULT_TZ))
+    """The athlete's zone: `LOCAL_TZ`, else profile.toml, else the default.
+
+    Read through core/profile.py so the whole app agrees on one answer — a
+    dashboard whose dates and whose "what is today" disagreed would be worse
+    than either being wrong.
+    """
+    if name:
+        return ZoneInfo(name)
+    from core import profile          # noqa: PLC0415 - avoids an import cycle
+    try:
+        return ZoneInfo(profile.timezone() or DEFAULT_TZ)
+    except Exception:  # noqa: BLE001 - a bad zone name must not stop the app
+        return ZoneInfo(os.getenv("LOCAL_TZ_FALLBACK", DEFAULT_TZ))
 
 
 def now(tz: str | None = None) -> datetime:

@@ -160,11 +160,15 @@ flowchart TD
         AU["auth.py<br/>read + write PINs"]
         AL["applog.py<br/>errors into the database"]
         SI["strava_import.py<br/>history, walled off<br/>from the AI"]
+        WA["whatsapp.py<br/>a message in,<br/>an answer out"]
+        NO["notify.py<br/>the day's session<br/>to a phone"]
+        PR["profile.py<br/>name · timezone · links"]
     end
 
     EXT["Gemini / Groq"]
 
-    SA --> ST & AN & PL & GW & AU & AL
+    SA --> ST & AN & PL & GW & AU & AL & PR
+    WA --> PL & AN & NO
     FR -.->|"reload after a deploy"| SA
     GC --> GG
     GC --> ST
@@ -277,7 +281,55 @@ model call. `NOTIFY_BACKEND` picks how it leaves the machine:
 
 ```bash
 python scripts/notify.py --dry-run     # print it, send nothing
+python scripts/notify.py --week        # the week instead of today
+python scripts/notify.py --report      # recovery, fitness and load
 ```
+
+## Writing back
+
+The message goes both ways. `core/whatsapp.py` turns a line of text into one of
+the things the dashboard already does, and `scripts/whatsapp_webhook.py` is the
+small HTTP server Meta delivers incoming messages to.
+
+| You send | You get |
+| --- | --- |
+| `today` | today's session, the range, and why |
+| `week` | the week, one line a day, done sessions ticked |
+| `report` | resting HR, HRV, readiness, load ratio, VO2max |
+| `sleep 3, sore 4, 40 min` | a check-in, and the rest of the week re-planned |
+| `tired, knee feels off` | the same, in your own words |
+| `replan` | build the week again from your last check-in |
+| anything ending in `?` | the question, put to the coach |
+
+Three things about it that are deliberate:
+
+- **No new decisions live in the message layer.** A check-in sent by message
+  goes through `planner.plan_week()` exactly as one typed into the app does,
+  guardrails and all. Say "feeling great, give me a hard session" during a
+  deload and you get the deload, because the trigger is in code and the model
+  never sees a vote. Otherwise there would be two coaches, one of them
+  unaudited.
+- **The endpoint is closed.** Meta signs every delivery and the signature is
+  required — no secret configured means nothing is accepted, rather than
+  everything. Only numbers on `WHATSAPP_CONTACT` are answered, an empty list
+  answers nobody, and a delivery id is never processed twice, because Meta
+  retries and a retry must not re-plan the week again.
+- **A reply is never worth an exception.** Anything that breaks comes back as a
+  sentence, so the phone does not silently stop answering.
+
+Set-up is about ten minutes and needs a public HTTPS URL for the webhook:
+
+```bash
+python scripts/whatsapp_webhook.py --say "today"   # no server, just the answer
+python scripts/whatsapp_webhook.py                 # listen on :8787
+cloudflared tunnel --url http://localhost:8787     # free, no account
+```
+
+Then give Meta `https://…/webhook` and your `WHATSAPP_VERIFY_TOKEN`. The full
+sequence is the docstring at the top of `scripts/whatsapp_webhook.py`. Telegram
+is the same engine with a tenth of the set-up — a bot token and a chat id, no
+templates, no approval, no 24-hour window — and is the honest recommendation for
+anyone who does not specifically need WhatsApp.
 
 ## What goes back to the watch
 
@@ -308,11 +360,46 @@ re-import.
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env          # add your Garmin credentials
+python scripts/setup.py       # asks for name, timezone, Garmin, keys, links
 python scripts/set_pin.py     # PIN for write actions
 python scripts/fetch.py --days 45
 streamlit run app/streamlit_app.py
 ```
+
+`scripts/setup.py` writes `.env` for you, one question at a time, and skips
+anything you press enter on. Nothing in it is required — no AI key gives you the
+rules-only plan, no `DATABASE_URL` gives you a local SQLite file, no links give
+you a sidebar without chips. `python scripts/setup.py --check` prints what is
+configured and what is off, and running it again keeps everything you do not
+change.
+
+### Making it yours
+
+Nothing personal is hardcoded. Six lines in `.env` cover it, and each one is
+optional:
+
+| | |
+| --- | --- |
+| `ATHLETE_NAME` | the name in the sidebar |
+| `LOCAL_TZ` | the zone every date is shown in — not the server's |
+| `STRAVA_PROFILE_URL` | a chip in the sidebar; a link out, nothing is read |
+| `INSTAGRAM_PROFILE_URL` | the same |
+| `GITHUB_PROFILE_URL` | yours, or blank to link to this project |
+| `WHATSAPP_CONTACT` | digits with country code — the chip, and where messages go |
+
+`core/profile.py` reads them and returns only what is set, so an unconfigured
+instance has no chips rather than a row of dead icons or somebody else's
+profile. Hosting it: the same values go in Streamlit Cloud's secrets, because
+`.env` is gitignored and never deployed.
+
+### Which version am I looking at
+
+The sidebar carries the version, the commit and when the code last changed —
+`v1.0.0 · 3c0a2ce · updated 26-08, 1:19 am`. `core/version.py` reads the version
+from the `VERSION` file, the commit out of `.git` without running git (a hosted
+container often has the checkout and not the binary), and the timestamp from the
+newest source file, which is the honest answer for a deploy that is a git pull
+rather than a build. Bump `VERSION` when you want the number to mean something.
 
 The fetch needs a Garmin login and runs locally. The dashboard is read-only
 against the database.

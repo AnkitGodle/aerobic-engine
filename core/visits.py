@@ -49,6 +49,46 @@ def device_hash(user_agent: str | None) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
+# Not people. A headless browser is a test run, a screenshot or a crawler, and
+# counting those turned "devices, all time" into a number in the thousands on a
+# dashboard one person reads: every automated page load during development
+# arrived with a fresh session and was counted as a new visitor. Matched on the
+# user agent, which is the only thing here to match on, and which every one of
+# these announces itself in.
+NOT_A_VISITOR = ("headlesschrome", "playwright", "puppeteer", "phantomjs",
+                 "selenium", "python-requests", "python-urllib", "httpx",
+                 "curl/", "wget/", "bot", "crawler", "spider", "monitoring",
+                 "uptime", "pingdom", "lighthouse", "chrome-lighthouse")
+
+
+def counting() -> bool:
+    """Is counting switched on at all?
+
+    `VISIT_COUNTING=off` turns it off for a whole server, which is the only
+    reliable way to keep a development run out of the numbers: Chrome's newer
+    headless mode sends the same user agent as the desktop browser on the same
+    machine, so the string cannot tell a screenshot script from the person whose
+    dashboard it is. Set it when running the app locally to test.
+    """
+    return os.getenv("VISIT_COUNTING", "on").strip().lower() not in (
+        "off", "0", "false", "no")
+
+
+def is_automated(user_agent: str | None) -> bool:
+    """Is this a test run or a crawler rather than somebody reading the page?
+
+    An empty user agent counts as automated: a real browser always sends one,
+    and what does not is something calling the URL directly. This catches the
+    honest ones — curl, requests, crawlers, older headless Chrome. It cannot
+    catch a headless browser that copies a real user agent, which is what
+    `VISIT_COUNTING=off` is for.
+    """
+    agent = (user_agent or "").strip().lower()
+    if not agent:
+        return True
+    return any(mark in agent for mark in NOT_A_VISITOR)
+
+
 def record(store: Any, session_key: str, user_agent: str | None = None,
            url: str | None = None) -> None:
     """Count one visit. Safe to call on every rerun of the same session.
@@ -56,7 +96,7 @@ def record(store: Any, session_key: str, user_agent: str | None = None,
     The first call for a session inserts a row; later calls only bump its view
     count and the last-seen time, which is what keeps a visit a visit.
     """
-    if not session_key:
+    if not session_key or not counting() or is_automated(user_agent):
         return
     try:
         now = datetime.now().isoformat(timespec="seconds")

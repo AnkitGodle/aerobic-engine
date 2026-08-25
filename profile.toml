@@ -1,0 +1,44 @@
+# Who this dashboard belongs to.
+#
+# This is the file to edit if you have cloned the repo: your name, your timezone,
+# your links. It is committed on purpose, because none of it is secret and
+# because .env is not deployed — a hosted app is a git pull, so anything that
+# lives only in .env is missing there, and a sidebar with no name and no links is
+# what that looks like.
+#
+# Secrets do not go here. Garmin credentials, database URLs and API keys belong
+# in .env locally and in your host's secrets panel when deployed.
+#
+# Environment variables override every line below, so a fork can change any of
+# it without editing a tracked file:
+#   ATHLETE_NAME, LOCAL_TZ, WHATSAPP_CONTACT,
+#   STRAVA_PROFILE_URL, INSTAGRAM_PROFILE_URL, GITHUB_PROFILE_URL
+#
+# `python scripts/setup.py --check` prints what is picked up.
+
+# Shown in the sidebar. Blank falls back to the name on your Garmin profile.
+name = "Ankit Godle"
+
+# Every user-facing date is in this zone rather than the server's. Streamlit
+# Cloud runs on UTC, which is five and a half hours wrong for an evening in
+# India — and that is not a cosmetic difference: it decides which day "today" is.
+timezone = "Asia/Kolkata"
+
+# Digits, country code first, no plus. Used for the sidebar's WhatsApp chip, as
+# the allowlist for incoming messages, and as the number the daily push goes to.
+whatsapp_contact = "919940173970"
+
+# Where the source lives. Used for the GitHub chip when no personal profile is
+# set below, and for the link on the About page.
+repo = "https://github.com/AnkitGodle/aerobic-engine"
+
+[links]
+# Links out and nothing more: no API, no import, no data crossing in either
+# direction. Delete a line and its chip disappears rather than becoming a dead
+# icon. Strava's terms forbid their data being used with a language model and
+# every planning decision here goes through one, which is why theirs stays a
+# link and never a connector.
+strava = "https://www.strava.com/athletes/71829400"
+instagram = "https://www.instagram.com/ankitgodle/"
+github = "https://github.com/AnkitGodle"
+# whatsapp = "https://wa.me/919940173970"   # built from whatsapp_contact above

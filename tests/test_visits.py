@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+import pytest
+
 from core import visits
 from core.store import Store
 
@@ -140,3 +142,64 @@ def test_the_same_device_tomorrow_is_a_second_visit(tmp_path):
     assert out["today"] == 1
     assert out["devices"] == 1
     store.close()
+
+
+# --------------------------------------------------------------------------
+# Not everything that opens the page is a person
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("agent", [
+    "Mozilla/5.0 (Macintosh) HeadlessChrome/140.0.0.0 Safari/537.36",
+    "curl/8.4.0",
+    "python-requests/2.32",
+    "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+    "Chrome-Lighthouse",
+    "",
+    None,
+])
+def test_a_script_is_not_a_visitor(agent):
+    assert visits.is_automated(agent) is True
+
+
+@pytest.mark.parametrize("agent", [
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 "
+    "Version/17.5 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:127.0) Gecko/20100101 Firefox/127.0",
+])
+def test_a_browser_is_a_visitor(agent):
+    assert visits.is_automated(agent) is False
+
+
+def test_an_automated_hit_is_not_counted(tmp_path):
+    store = _store(tmp_path)
+    visits.record(store, "bot-1", user_agent="python-requests/2.32")
+    visits.record(store, "bot-2", user_agent="")
+    visits.record(store, "person", user_agent="Chrome on a laptop")
+    out = visits.summary(store)
+    assert out["visits"] == 1 and out["devices"] == 1
+    store.close()
+
+
+def test_counting_can_be_switched_off_entirely(tmp_path, monkeypatch):
+    """The only reliable way to keep a development run out of the numbers:
+    headless Chrome now sends the same user agent as the desktop browser."""
+    monkeypatch.setenv("VISIT_COUNTING", "off")
+    store = _store(tmp_path)
+    visits.record(store, "s1", user_agent="Chrome on a laptop")
+    assert visits.summary(store)["visits"] == 0
+    monkeypatch.setenv("VISIT_COUNTING", "on")
+    visits.record(store, "s2", user_agent="Chrome on a laptop")
+    assert visits.summary(store)["visits"] == 1
+    store.close()
+
+
+@pytest.mark.parametrize("value,on", [
+    ("on", True), ("ON", True), ("yes", True), ("anything", True),
+    ("off", False), ("OFF", False), ("0", False), ("false", False), ("no", False),
+])
+def test_the_switch_reads_the_obvious_words(monkeypatch, value, on):
+    monkeypatch.setenv("VISIT_COUNTING", value)
+    assert visits.counting() is on

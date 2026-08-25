@@ -69,12 +69,23 @@ aerobic-engine/
     garmin_guard.py          # request pacing, budgets, breaker, sync lock
     garmin_workout.py        # push a planned session to the watch
     strength.py              # fixed exercise library + deterministic progression
+    notify.py                # the day's session to a phone: whatsapp/telegram/callmebot
+    whatsapp.py              # the other direction: a message in, an answer out
+    profile.py               # whose dashboard this is — name, timezone, links
+    version.py               # which build is running, read from VERSION and .git
+    clock.py                 # the athlete's date, never the server's
     schemas.py               # pydantic models for payloads
   scripts/fetch.py           # the incremental sync (local / scheduled)
+  scripts/setup.py           # ask once, write .env — the whole set-up for a fork
+  scripts/notify.py          # send today, the week, or a report
+  scripts/whatsapp_webhook.py  # receive messages; signed, allowlisted, deduped
   scripts/migrate_to_postgres.py  # copy a local SQLite file into Postgres
   scripts/set_pin.py         # generate a read or write PIN salt + hash
   scripts/export_tokens.py   # export the Garmin session for a hosted deploy
+  scripts/bugs.py            # read what was reported from the app, and close it
   tests/                     # guardrail + analysis regression suite
+  profile.toml               # committed: name, timezone, links. Not secrets.
+  VERSION                    # one line, shown in the sidebar
   data/aerobic_engine.db         # gitignored
   .env                       # gitignored — Garmin, database and AI keys
 ```

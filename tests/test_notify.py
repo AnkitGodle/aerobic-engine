@@ -104,7 +104,7 @@ def test_the_closed_window_error_explains_itself(monkeypatch):
 
 def test_the_message_says_what_to_do_today(healthy):
     """Composed from the plan that already exists — no model call at 6am."""
-    from scripts.notify import compose
+    from core.whatsapp import compose_today as compose
 
     goal_mod.save(healthy, "Pune Half", TODAY.replace(month=12, day=6),
                   distance_km=21.1)
@@ -118,7 +118,7 @@ def test_the_message_says_what_to_do_today(healthy):
 
 
 def test_a_rest_day_is_stated_rather_than_left_blank(healthy):
-    from scripts.notify import compose
+    from core.whatsapp import compose_today as compose
 
     text = compose(healthy, today=date(2026, 8, 29))   # a Saturday, nothing on it
     assert "Rest day" in text or "min" in text
