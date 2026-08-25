@@ -316,6 +316,21 @@ SCHEMA: list[str] = [
         value TEXT
     )
     """,
+    # Who opened the page, counted here rather than by an analytics vendor.
+    # One row per browser session — Streamlit re-runs the script on every click,
+    # so counting runs would count slider movements. No raw identifiers: the
+    # device hash is a salted digest of the user agent and, where the host
+    # provides one, the forwarding address.
+    """
+    CREATE TABLE IF NOT EXISTS page_visits (
+        session_key TEXT PRIMARY KEY,
+        first_seen  TEXT NOT NULL,
+        last_seen   TEXT NOT NULL,
+        views       INTEGER DEFAULT 1,
+        device_hash TEXT,
+        url         TEXT
+    )
+    """,
     # Application log. Kept in the database rather than only on stderr because
     # the one place an error actually matters is the hosted dashboard, where the
     # message is redacted on screen and the container's log is behind another

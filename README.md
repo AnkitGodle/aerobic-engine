@@ -412,6 +412,28 @@ and does lock accounts. Every request therefore goes through `core/garmin_guard.
 All of that state lives in the database, so a restart or a redeploy does not reset
 it. 12 tests cover it.
 
+## Counting visitors without a tracker
+
+The sidebar shows visits and devices, counted in the app's own database. There is
+no analytics vendor involved, for a reason that starts as a technical limit and
+ends as a design one:
+
+- **Streamlit strips `<script>` out of `st.markdown`** — verified in a browser,
+  the tag lands in the DOM and never runs — so Google Analytics, Plausible and
+  every other JS snippet are simply inert.
+- The two things that *would* work are both worse. An `<img>` hit-counter badge
+  tells that service every time the page is opened, and a `components.html`
+  iframe runs scripts but only measures the iframe.
+- Sending anything about a page of somebody's health data to an analytics
+  company, to learn a number this database can count itself, is a bad trade.
+
+So `core/visits.py` records **one row per browser session** — not per script run,
+because Streamlit re-executes everything on each click and that would count
+slider movements. The device fingerprint is a salted SHA-256 of the user agent
+and, where the host provides one, the forwarding address; neither is stored raw.
+`VISIT_SALT` makes the hashes unguessable. Every function swallows its own
+failures: a counter is the least important thing on the page.
+
 ## Security
 
 Writes are PIN-gated (salted PBKDF2-SHA256, constant-time comparison, lockout with

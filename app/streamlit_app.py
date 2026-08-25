@@ -17,6 +17,7 @@ import sqlite3
 import threading
 import time
 import zlib
+from uuid import uuid4
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -45,7 +46,7 @@ _reloaded = purge_stale_modules(log=logging.getLogger("aerobic_engine.ui").info)
 import app.ui as ui  # noqa: E402
 from core import (  # noqa: E402
     ai, applog, insights, planner, rules as rules_mod, strength,
-    sync as sync_mod,
+    sync as sync_mod, visits as visits_mod,
 )
 from core.analysis import (  # noqa: E402
     ACWR_HIGH,
@@ -3429,6 +3430,33 @@ def log_data(data: dict) -> None:
 # --------------------------------------------------------------------------
 
 
+def count_visit() -> dict[str, int]:
+    """Record this session once, and return the running totals.
+
+    Once per session, not once per rerun: Streamlit re-executes the script on
+    every interaction, and counting those would report how often a slider moved.
+    Streamlit strips <script> out of markdown — verified in a browser — so a
+    third-party analytics snippet would not run anyway, and an image-based hit
+    counter would tell someone else's server every time this page is opened.
+    """
+    if "visit_counted" not in st.session_state:
+        st.session_state["visit_counted"] = True
+        try:
+            headers = dict(st.context.headers or {})
+        except Exception:  # noqa: BLE001 - no request context in a headless run
+            headers = {}
+        key = st.session_state.get("visit_key") or uuid4().hex
+        st.session_state["visit_key"] = key
+        with_store(lambda s: visits_mod.record(
+            s, key,
+            user_agent=headers.get("User-Agent"),
+            # Community Cloud sits behind a proxy, so this is usually absent;
+            # the user agent alone still separates one device from another.
+            address=headers.get("X-Forwarded-For") or headers.get("X-Real-Ip"),
+            url=str(getattr(st.context, "url", "") or "")))
+    return with_store(lambda s: visits_mod.summary(s))
+
+
 def sidebar(data: dict) -> None:
     with st.sidebar:
         # No logo or app name here: the top bar carries both, and a third copy
@@ -3465,6 +3493,19 @@ def sidebar(data: dict) -> None:
         if st.button("Reload page data", width="stretch"):
             refresh()
             st.rerun()
+        seen = count_visit()
+        if seen.get("visits"):
+            # Page loads are deliberately not shown: the visit is recorded once
+            # per session, so that number would only ever equal the visit count
+            # and look like a second, more precise measurement.
+            ui.rows([
+                ("Visits", f"{seen['visits']:,}",
+                 f"{seen['today']} today" if seen["today"] else "none today"),
+                ("Devices", f"{seen['devices']:,}",
+                 f"{seen['recent']} this week"),
+            ])
+            st.caption("Counted here rather than by an analytics company: one "
+                       "visit per browser session, and no addresses kept.")
         st.caption(f"AI: {os.getenv('AI_BACKEND', 'anthropic')} "
                    f"({'ready' if ai.available() else 'off'})")
         st.caption("Not medical advice. Persistent tendon pain is a physio visit.")

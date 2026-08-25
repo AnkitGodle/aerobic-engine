@@ -60,6 +60,7 @@ aerobic-engine/
     planner.py               # facts + rules envelope + enforcement + calls ai
     rules.py                 # the editable rules: stored, clamped, shown on the Rules page
     applog.py                # warnings and milestones into the database, readable in the app
+    visits.py                # counts visits in our own database, no third-party tracker
     ai.py                    # plan_week(payload) -> plan ; JSON contract
     insights.py              # deterministic page/chart readings, then prose
     sync.py                  # the sync itself, shared by CLI and dashboard
