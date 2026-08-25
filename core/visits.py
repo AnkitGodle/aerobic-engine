@@ -36,14 +36,21 @@ log = logging.getLogger("aerobic_engine.visits")
 SALT = os.getenv("VISIT_SALT", "aerobic-engine")
 
 
-def device_hash(user_agent: str | None, address: str | None = None) -> str:
-    """A short, salted fingerprint of a device. Not reversible, not identifying."""
-    raw = f"{SALT}|{(user_agent or '').strip()}|{(address or '').strip()}"
+def device_hash(user_agent: str | None) -> str:
+    """A short, salted fingerprint of a browser. Not reversible, not identifying.
+
+    The user agent and nothing else. The first version mixed in the forwarding
+    address, which on Streamlit Community Cloud changes from one websocket
+    connection to the next — so one person opening the page in the morning was
+    counted as five devices. A browser string is stable, and being unable to tell
+    two identical browsers on different networks apart is the better failure.
+    """
+    raw = f"{SALT}|{(user_agent or '').strip()}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def record(store: Any, session_key: str, user_agent: str | None = None,
-           address: str | None = None, url: str | None = None) -> None:
+           url: str | None = None) -> None:
     """Count one visit. Safe to call on every rerun of the same session.
 
     The first call for a session inserts a row; later calls only bump its view
@@ -60,7 +67,7 @@ def record(store: Any, session_key: str, user_agent: str | None = None,
             " ON CONFLICT(session_key) DO UPDATE SET"
             " last_seen = excluded.last_seen, views = page_visits.views + 1",
             [str(session_key)[:64], now, now,
-             device_hash(user_agent, address), (url or "")[:200]],
+             device_hash(user_agent), (url or "")[:200]],
         )
         store.conn.commit()
     except Exception as exc:  # noqa: BLE001 - a counter must never break a page
@@ -68,15 +75,27 @@ def record(store: Any, session_key: str, user_agent: str | None = None,
 
 
 def summary(store: Any, days: int = 7) -> dict[str, int]:
-    """Visits, devices and page views. Zeros if the table cannot be read."""
+    """Visits, devices and page loads. Zeros if the table cannot be read.
+
+    A visit is one device on one day, not one session. Streamlit opens a session
+    per websocket connection and reconnects on its own, so the first version
+    counted four visits for one person opening the page twice — two of them
+    against its internal `/~/+` path. Counting device-days is immune to that and
+    is what "visits" means to anyone reading it.
+    """
     empty = {"visits": 0, "today": 0, "recent": 0, "devices": 0, "views": 0}
     try:
         today = date.today().isoformat()
         since = (date.today() - timedelta(days=days - 1)).isoformat()
+        # SUBSTR rather than a date function: this SQL runs on both SQLite and
+        # Postgres, and the stored timestamp is an ISO string in both.
         row = dict(store.execute(
-            "SELECT COUNT(*) AS visits,"
-            " SUM(CASE WHEN first_seen >= ? THEN 1 ELSE 0 END) AS today,"
-            " SUM(CASE WHEN first_seen >= ? THEN 1 ELSE 0 END) AS recent,"
+            "SELECT"
+            " COUNT(DISTINCT device_hash || SUBSTR(first_seen, 1, 10)) AS visits,"
+            " COUNT(DISTINCT CASE WHEN first_seen >= ? THEN device_hash END)"
+            "   AS today,"
+            " COUNT(DISTINCT CASE WHEN first_seen >= ?"
+            "   THEN device_hash || SUBSTR(first_seen, 1, 10) END) AS recent,"
             " COUNT(DISTINCT device_hash) AS devices,"
             " SUM(views) AS views"
             " FROM page_visits", [today, since]).fetchone() or {})

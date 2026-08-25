@@ -427,12 +427,25 @@ ends as a design one:
 - Sending anything about a page of somebody's health data to an analytics
   company, to learn a number this database can count itself, is a bad trade.
 
-So `core/visits.py` records **one row per browser session** — not per script run,
-because Streamlit re-executes everything on each click and that would count
-slider movements. The device fingerprint is a salted SHA-256 of the user agent
-and, where the host provides one, the forwarding address; neither is stored raw.
-`VISIT_SALT` makes the hashes unguessable. Every function swallows its own
-failures: a counter is the least important thing on the page.
+So `core/visits.py` counts it here, and a **visit is one browser on one day**.
+Two earlier versions of that definition were both wrong, and measuring showed it:
+
+- *Per script run* counts slider movements — Streamlit re-executes everything on
+  every click.
+- *Per session* counts websocket connections. One person opening the deployed app
+  at 06:21 produced four sessions, two of them against Streamlit's internal
+  `/~/+` path.
+
+The fingerprint is a salted SHA-256 of the user agent, truncated, and nothing
+else. It deliberately excludes the forwarding address: on Community Cloud that
+changes between connections, which turned that same visitor into five devices.
+Being unable to separate two identical browsers on different networks is the
+better failure. `VISIT_SALT` makes the hashes unguessable, nothing is stored raw,
+and every function swallows its own failures — a counter is the least important
+thing on the page.
+
+Verified: one browser opening the page three times reads 1 visit, 1 device; a
+second browser makes it 2 and 2, from five underlying sessions.
 
 ## Security
 

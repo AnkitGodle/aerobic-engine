@@ -3447,12 +3447,10 @@ def count_visit() -> dict[str, int]:
             headers = {}
         key = st.session_state.get("visit_key") or uuid4().hex
         st.session_state["visit_key"] = key
+        # The user agent only. The forwarding address changes per websocket
+        # connection on Community Cloud, which counted one visitor as five.
         with_store(lambda s: visits_mod.record(
-            s, key,
-            user_agent=headers.get("User-Agent"),
-            # Community Cloud sits behind a proxy, so this is usually absent;
-            # the user agent alone still separates one device from another.
-            address=headers.get("X-Forwarded-For") or headers.get("X-Real-Ip"),
+            s, key, user_agent=headers.get("User-Agent"),
             url=str(getattr(st.context, "url", "") or "")))
     return with_store(lambda s: visits_mod.summary(s))
 
@@ -3495,14 +3493,16 @@ def sidebar(data: dict) -> None:
             st.rerun()
         seen = count_visit()
         if seen.get("visits"):
-            # Page loads are deliberately not shown: the visit is recorded once
-            # per session, so that number would only ever equal the visit count
-            # and look like a second, more precise measurement.
+            # All three spans, each labelled. One number with "12 today" beside
+            # it read as though the 12 were the total.
+            # Page loads are deliberately absent: the visit is recorded once per
+            # session, so that figure would only ever equal the visit count and
+            # look like a second, more precise measurement.
             ui.rows([
-                ("Visits", f"{seen['visits']:,}",
-                 f"{seen['today']} today" if seen["today"] else "none today"),
-                ("Devices", f"{seen['devices']:,}",
-                 f"{seen['recent']} this week"),
+                ("Visits, all time", f"{seen['visits']:,}",
+                 f"{seen['devices']:,} device{'' if seen['devices'] == 1 else 's'}"),
+                ("This week", f"{seen['recent']:,}"),
+                ("Today", f"{seen['today']:,}"),
             ])
             st.caption("Counted here rather than by an analytics company: one "
                        "visit per browser session, and no addresses kept.")
