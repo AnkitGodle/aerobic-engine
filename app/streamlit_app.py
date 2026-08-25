@@ -46,7 +46,8 @@ _reloaded = purge_stale_modules(log=logging.getLogger("aerobic_engine.ui").info)
 import app.ui as ui  # noqa: E402
 from core import (  # noqa: E402
     ai, applog, bugs as bugs_mod, clock, goal as goal_mod, insights, planner,
-    rules as rules_mod, strength, sync as sync_mod, visits as visits_mod,
+    profile, rules as rules_mod, strength, sync as sync_mod, version as version_mod,
+    visits as visits_mod,
 )
 from core.analysis import (  # noqa: E402
     ACWR_HIGH,
@@ -55,6 +56,7 @@ from core.analysis import (  # noqa: E402
     ZONE_LABELS,
     aerobic_ceiling_options,
     consistency,
+    km_splits,
     load_ramp,
     ramp_verdict,
     streak,
@@ -521,23 +523,15 @@ LOCAL_TZ = ZoneInfo(os.getenv("LOCAL_TZ", "Asia/Kolkata"))
 # import, no data crossing in either direction. Strava's API terms forbid using
 # their data with a language model, and this app's whole planning layer is a
 # language model — so the profile stays a link out, which those terms do not
-# touch. Override with STRAVA_PROFILE_URL if the profile ever moves.
-STRAVA_PROFILE_URL = os.getenv(
-    "STRAVA_PROFILE_URL", "https://www.strava.com/athletes/71829400")
-INSTAGRAM_PROFILE_URL = os.getenv(
-    "INSTAGRAM_PROFILE_URL", "https://www.instagram.com/ankitgodle/")
-
-# Label, URL, brand colour. Instagram's mark is a gradient; its pink is the one
-# solid colour that still reads as Instagram at chip size.
-REPO_URL = "https://github.com/AnkitGodle/aerobic-engine"
-
-PROFILE_LINKS: tuple[tuple[str, str, str], ...] = (
-    ("Strava", STRAVA_PROFILE_URL, "#FC5200"),
-    ("Instagram", INSTAGRAM_PROFILE_URL, "#E1306C"),
-    # The repo belongs beside them: it is the same kind of link out, and the
-    # code being readable is part of what the page is claiming.
-    ("GitHub", REPO_URL, "#8C9AA8"),
-)
+# touch. Set STRAVA_PROFILE_URL, and the others beside it, in .env.
+#
+# Label, URL, brand colour, all from core/profile.py, which reads them from the
+# environment and returns only what is configured. Nothing personal is hardcoded
+# here any more: someone who clones this fills in four lines and the sidebar is
+# theirs. Instagram's mark is a gradient; its pink is the one solid colour that
+# still reads as Instagram at chip size.
+REPO_URL = profile.REPO_URL
+PROFILE_LINKS: tuple[tuple[str, str, str], ...] = profile.links()
 EVENING_CUTOFF_HOUR = int(os.getenv("EVENING_CUTOFF_HOUR", "19"))
 
 
@@ -987,37 +981,79 @@ def session_recap(act: dict, data: dict, routes: dict | None = None) -> None:
             st.caption(drift["message"])
 
 
+@st.cache_data(show_spinner=False, ttl=900, max_entries=24)
+def session_splits(stamp: float, activity_id: str, unit_m: float,
+                   total_m: float | None) -> list:  # noqa: ARG001
+    """Even splits for one session, cut from the stored samples."""
+    try:
+        def read(s: Store) -> list:
+            return km_splits(s.stream(activity_id), unit_m, total_m)
+        return with_store(read) or []
+    except Exception as exc:  # noqa: BLE001 - the laps are still there to show
+        log.warning("Splits for %s failed: %s", activity_id, exc)
+        return []
+
+
 def split_rows(act: dict, laps: list[dict], zones: list[dict],
                ceiling: float | None) -> list[dict]:
-    """One row per lap: pace, a bar as long as it was quick, and the heart rate.
+    """One row per kilometre: pace, a bar as long as it was quick, and the pulse.
+
+    Cut at a fixed distance from the samples, not one row per lap. A lap is
+    whatever the athlete pressed — one ride's five laps were 203 m, 5 km, 1.9 km,
+    1.3 km and 1.6 km — so numbering laps 1 to 5 read as five kilometres of a
+    ten-kilometre ride. Laps remain the fallback for a session with no stream,
+    and there each row is labelled with its own distance rather than a number
+    that would imply an even split.
 
     The heart rate is coloured by the zone it fell in — against the athlete's own
     easy ceiling, not Garmin's — because the number climbing down the column is
     the thing worth seeing, and a colour says it before the digits do.
     """
-    rows = sorted((l for l in laps
-                   if str(l.get("activity_id")) == str(act["activity_id"])),
-                  key=lambda l: l.get("lap_index") or 0)
-    if len(rows) < 2:
-        return []
     bounds = zone_bounds_with_ceiling(zone_bounds(zones or []),
                                      float(ceiling) if ceiling else None)
     swim = act.get("sport") == "swim"
-    speeds = [float(l["avg_speed_mps"]) for l in rows if l.get("avg_speed_mps")]
-    quickest = max(speeds) if speeds else 0.0
+    unit_m = 100.0 if swim else 1000.0
+    total = float(act.get("distance_m") or 0) or None
+    even = session_splits(db_stamp(), str(act["activity_id"]), unit_m, total)
+
+    if even:
+        source = [{
+            "label": (f"{r['distance_m'] / unit_m:.2f}".rstrip("0").rstrip(".")
+                      if r.get("partial") else f"{r['index']}"),
+            "speed": r.get("speed_mps") or 0.0,
+            "hr": r.get("avg_hr"),
+            "gain": r.get("elev_gain_m"),
+        } for r in even]
+    else:
+        rows = sorted((l for l in laps
+                       if str(l.get("activity_id")) == str(act["activity_id"])),
+                      key=lambda l: l.get("lap_index") or 0)
+        if len(rows) < 2:
+            return []
+        # Labelled by distance, because these are not even splits: a row saying
+        # "2" next to a 5 km lap is the bug this replaced.
+        source = [{
+            "label": (f"{(l.get('distance_m') or 0) / unit_m:.2f}"
+                      .rstrip("0").rstrip(".")),
+            "speed": float(l.get("avg_speed_mps") or 0),
+            "hr": l.get("avg_hr"),
+            "gain": l.get("elevation_gain_m"),
+        } for l in rows]
+
+    quickest = max((r["speed"] for r in source if r["speed"]), default=0.0)
     out = []
-    for i, lap in enumerate(rows, 1):
-        speed = float(lap.get("avg_speed_mps") or 0)
+    for row in source:
+        speed = float(row["speed"] or 0)
         if speed > 0:
-            secs = (100.0 if swim else 1000.0) / speed
+            secs = unit_m / speed
             pace = f"{int(secs // 60)}:{int(secs % 60):02d}"
         else:
             pace = "—"
-        hr = lap.get("avg_hr")
+        hr = row.get("hr")
         zone = zone_of(float(hr), bounds) if hr and bounds else None
-        gain = lap.get("elevation_gain_m")
+        gain = row.get("gain")
         out.append({
-            "label": f"{i}",
+            "label": row["label"],
             "pace": pace,
             "bar": (speed / quickest) if quickest else 0,
             "bar_color": SPORT_COLOR.get(act.get("sport"), TONE["neutral"]),
@@ -2186,7 +2222,12 @@ def lap_block(activity_id: str, laps: list[dict], sport: str,
                   key=lambda l: l.get("lap_index") or 0)
     if len(rows) < 2:
         return
-    ui.section("Splits", f"{len(rows)} laps, as the watch recorded them.")
+    # Two different cuts of the same session, and saying so, because they will
+    # not agree: the chart is the laps the watch recorded, and the table below is
+    # even kilometres. A lap is wherever the button was pressed.
+    ui.section("Laps and splits",
+               f"{len(rows)} laps as the watch recorded them, then the same "
+               f"session cut into even {'100 m lengths' if sport == 'swim' else 'kilometres'}.")
     x = [f"{int(l.get('lap_index') or i + 1)}" for i, l in enumerate(rows)]
     fig = go.Figure()
     speeds = [float(l["avg_speed_mps"]) for l in rows if l.get("avg_speed_mps")]
@@ -2214,8 +2255,10 @@ def lap_block(activity_id: str, laps: list[dict], sport: str,
     fig.update_layout(xaxis_title="lap", hovermode="x unified", barmode="overlay")
     with ui.frame():
         ui.chart(fig, 240)
-    table_rows = split_rows({"activity_id": activity_id, "sport": sport},
-                            rows, zones or [], ceiling)
+    table_rows = split_rows(
+        {"activity_id": activity_id, "sport": sport,
+         "distance_m": sum(float(l.get("distance_m") or 0) for l in rows) or None},
+        rows, zones or [], ceiling)
     if table_rows:
         ui.splits(table_rows, unit="100 m" if sport == "swim" else "km")
     drift = lap_drift(rows)
@@ -3960,7 +4003,10 @@ def sidebar(data: dict) -> None:
     with st.sidebar:
         # No logo or app name here: the top bar carries both, and a third copy
         # in the sidebar is just noise.
-        st.subheader(data["name"] or "Athlete", anchor=False)
+        # ATHLETE_NAME first, then whatever Garmin's profile said. The setting
+        # exists because the watch's name is not always the name you want in
+        # your own dashboard.
+        st.subheader(profile.name(data["name"]) or "Athlete", anchor=False)
         # Marks only here. The logos say which is which, and the labels were
         # three words each on the narrowest column in the app.
         ui.link_chips(PROFILE_LINKS, labels=False)
@@ -4021,6 +4067,10 @@ def sidebar(data: dict) -> None:
                 ("Today", f"{seen['today']:,}"),
             ])
 
+        # Which build you are looking at, and when it last changed. Asked for in
+        # a bug report, and the reason is sound: "the chart was wrong yesterday"
+        # cannot be placed in time without it, and this app changes most days.
+        st.caption(version_mod.describe())
         st.caption("Not medical advice. Persistent tendon pain is a physio visit.")
 
 

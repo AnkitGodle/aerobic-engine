@@ -785,6 +785,122 @@ def lap_pace_spread(laps: Sequence[dict[str, Any]]) -> float | None:
     return round(pstdev(speeds) / mean * 100, 1)
 
 
+EARTH_RADIUS_M = 6371008.8
+# A split shorter than this fraction of the unit is not shown as its own row.
+# The remainder of a 10.04 km ride is 40 metres, and a row saying "0.04 km at
+# 3:12" is noise standing next to nine real kilometres.
+MIN_PARTIAL_SPLIT = 0.15
+
+
+def _metres_between(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance between two fixes, in metres."""
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = p2 - p1
+    dl = math.radians(lon2 - lon1)
+    a = (math.sin(dp / 2) ** 2
+         + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2)
+    return 2 * EARTH_RADIUS_M * math.asin(min(1.0, math.sqrt(a)))
+
+
+def km_splits(
+    stream: Sequence[Mapping[str, Any]],
+    unit_m: float = 1000.0,
+    total_m: float | None = None,
+) -> list[dict[str, Any]]:
+    """Even splits from the stored samples — the per-kilometre table, not the laps.
+
+    A lap is whatever the athlete pressed. This ride's five were 203 m, 5 km,
+    1.9 km, 1.3 km and 1.6 km, so numbering them 1 to 5 read as five kilometres
+    of a ten-kilometre ride. These are cut at a fixed distance instead, which is
+    what every splits table anyone has seen actually shows.
+
+    Distance comes from GPS where there is any, because it is measured rather
+    than inferred; from speed where there is not, which is the case in a pool.
+    `total_m` scales the result so the last split ends where the recorded
+    distance says it does — GPS over a downsampled stream lands a percent or two
+    short, and that error should not become an extra row.
+    """
+    samples = [r for r in (stream or []) if r.get("t_s") is not None]
+    if len(samples) < 4 or unit_m <= 0:
+        return []
+    samples.sort(key=lambda r: float(r["t_s"]))
+
+    # Step distances first, so the two sources can be compared before choosing.
+    gps, speed = [0.0], [0.0]
+    for before, after in zip(samples, samples[1:]):
+        dt = max(0.0, float(after["t_s"]) - float(before["t_s"]))
+        if (before.get("lat") is not None and after.get("lat") is not None
+                and before.get("lon") is not None and after.get("lon") is not None):
+            gps.append(_metres_between(float(before["lat"]), float(before["lon"]),
+                                       float(after["lat"]), float(after["lon"])))
+        else:
+            gps.append(0.0)
+        speed.append(float(after.get("speed_mps") or before.get("speed_mps") or 0) * dt)
+    steps = gps if sum(gps) > sum(speed) * 0.5 else speed
+    covered = sum(steps)
+    if covered <= 0:
+        return []
+    if total_m and total_m > 0:
+        scale = float(total_m) / covered
+        steps = [s * scale for s in steps]
+        covered = float(total_m)
+
+    out: list[dict[str, Any]] = []
+    distance = 0.0            # cumulative, over the whole session
+    split_start_t = float(samples[0]["t_s"])
+    split_distance = 0.0
+    beats: list[tuple[float, float]] = []   # (hr, seconds it stood for)
+    climb = 0.0
+    boundary = unit_m
+
+    def close(at_time: float, length: float, partial: bool) -> None:
+        held = sum(w for _, w in beats)
+        out.append({
+            "index": len(out) + 1,
+            "distance_m": round(length, 1),
+            "seconds": round(max(0.0, at_time - split_start_t), 1),
+            "avg_hr": (round(sum(hr * w for hr, w in beats) / held, 1)
+                       if held else None),
+            "elev_gain_m": round(climb, 1),
+            "partial": partial,
+            "speed_mps": (round(length / (at_time - split_start_t), 3)
+                          if at_time > split_start_t else None),
+        })
+
+    # Walked by index rather than zipped, because each step's distance was
+    # computed by index above and pairing them any other way invites them to
+    # drift apart.
+    for n in range(1, len(samples)):
+        before, after = samples[n - 1], samples[n]
+        step = steps[n]
+        t_before, t_after = float(before["t_s"]), float(after["t_s"])
+        dt = max(0.0, t_after - t_before)
+        hr = after.get("hr") if after.get("hr") is not None else before.get("hr")
+        if hr is not None and dt > 0:
+            beats.append((float(hr), dt))
+        if (before.get("altitude_m") is not None
+                and after.get("altitude_m") is not None):
+            climb += max(0.0, float(after["altitude_m"]) - float(before["altitude_m"]))
+        distance += step
+        split_distance += step
+
+        # One sample can cross more than one boundary on a downsampled ride.
+        while distance >= boundary - 1e-9 and step > 0:
+            over = distance - boundary
+            share = 1.0 - (over / step)
+            at = t_before + dt * max(0.0, min(1.0, share))
+            close(at, unit_m, partial=False)
+            split_start_t = at
+            split_distance = over
+            beats = [(float(hr), max(0.0, t_after - at))] if hr is not None else []
+            climb = 0.0
+            boundary += unit_m
+
+    if split_distance >= unit_m * MIN_PARTIAL_SPLIT:
+        close(float(samples[-1]["t_s"]), split_distance, partial=True)
+    return out
+
+
 def zone_bounds_with_ceiling(
     bounds: dict[int, tuple[int, int | None]], ceiling: float | None,
 ) -> dict[int, tuple[int, int | None]]:
