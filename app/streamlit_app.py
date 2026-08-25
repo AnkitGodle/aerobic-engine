@@ -45,7 +45,7 @@ _reloaded = purge_stale_modules(log=logging.getLogger("aerobic_engine.ui").info)
 
 import app.ui as ui  # noqa: E402
 from core import (  # noqa: E402
-    ai, applog, bugs as bugs_mod, goal as goal_mod, insights, planner,
+    ai, applog, bugs as bugs_mod, clock, goal as goal_mod, insights, planner,
     rules as rules_mod, strength, sync as sync_mod, visits as visits_mod,
 )
 from core.analysis import (  # noqa: E402
@@ -83,7 +83,10 @@ from core.auth import PinGate, session_expired  # noqa: E402
 from core import garmin_workout  # noqa: E402
 from core.garmin_client import GarminClient  # noqa: E402
 from core.garmin_guard import GarminBlocked  # noqa: E402
-from core.schemas import DAYS, ENDURANCE_SPORTS, SPORTS, Checkin, PlanDay, WeekPlan  # noqa: E402
+from core.schemas import (  # noqa: E402
+    DAYS, ENDURANCE_SPORTS, SPORTS, Checkin, Envelope, PlanDay, PlannerFacts,
+    WeekPlan,
+)
 from core.store import Store, default_db, is_postgres, week_start_of  # noqa: E402
 
 # Stamped here, with every app module loaded and agreeing with the files it came
@@ -196,6 +199,56 @@ def db_path() -> str:
     return default_db()
 
 
+@st.cache_data(show_spinner=False, ttl=8)
+def data_stamp() -> str:
+    """The database fingerprint, cached briefly.
+
+    It is a query, and it runs on every rerun to key every other cache — so on a
+    page with four interactions it was four round trips to decide nothing had
+    changed. Eight seconds is short enough that a sync started from the sidebar
+    (which clears the caches anyway) is never stale on screen.
+    """
+    return with_store(lambda s: s.data_stamp()) or ""
+
+
+@st.cache_data(show_spinner=False, ttl=30)
+def settings_state() -> tuple[dict, dict]:
+    """The rules and the goal, as plain dicts. Both are sync_state reads.
+
+    Cached because every page asks for them and neither changes without a save,
+    and a save clears the caches.
+    """
+    def read(s: Store) -> tuple[dict, dict]:
+        goal = goal_mod.load(s)
+        return (rules_mod.load(s).as_dict(),
+                {"event": goal.event, "day": goal.day.isoformat() if goal.day
+                 else "", "sport": goal.sport, "distance_km": goal.distance_km})
+    return with_store(read)
+
+
+def current_rules() -> rules_mod.Rules:
+    return rules_mod.from_mapping(settings_state()[0])
+
+
+def current_goal() -> goal_mod.Goal:
+    raw = settings_state()[1]
+    day = None
+    if raw.get("day"):
+        try:
+            day = date.fromisoformat(str(raw["day"])[:10])
+        except ValueError:
+            day = None
+    return goal_mod.Goal(event=raw.get("event") or "", day=day,
+                         sport=raw.get("sport") or "run",
+                         distance_km=raw.get("distance_km"))
+
+
+@st.cache_data(show_spinner=False, ttl=60)
+def visit_counts() -> dict[str, int]:
+    """The counter, read once a minute rather than on every click."""
+    return with_store(visits_mod.summary)
+
+
 def db_stamp() -> float:
     """Cache key for load(): must change whenever the data could have."""
     target = db_path()
@@ -206,8 +259,7 @@ def db_stamp() -> float:
         # on a Garmin sync, so importing history or repairing rows from a script
         # left every open dashboard serving what it had already cached.
         try:
-            marker = with_store(lambda s: s.data_stamp()) or ""
-            return float(zlib.crc32(marker.encode("utf-8")))
+            return float(zlib.crc32(data_stamp().encode("utf-8")))
         except Exception:  # noqa: BLE001 - a dead cache key beats a dead page
             log.warning("could not read the data stamp for the cache key")
             return 0.0
@@ -245,14 +297,24 @@ def load(stamp: float) -> dict:  # noqa: ARG001 - stamp is the cache key
             "records": s.personal_records(),
             "weather": s.weather(),
             "laps": s.laps(),
-            "plan": s.latest_plan(week_start_of(date.today())),
+            "plan": s.latest_plan(week_start_of(today_local())),
         }
 
     return with_store(read)
 
 
 def refresh() -> None:
-    load.clear()
+    """Forget everything derived from the database.
+
+    `load` alone was not enough once the settings, the week context and the
+    visit counts were cached too: saving a rule cleared the data and left the
+    envelope built from the old one on screen.
+    """
+    for cache in (load, settings_state, data_stamp, _week_context, visit_counts):
+        try:
+            cache.clear()
+        except Exception as exc:  # noqa: BLE001 - clearing is best effort
+            log.info("Could not clear a cache: %s", exc)
 
 
 class _SharedStore:
@@ -438,7 +500,17 @@ EVENING_CUTOFF_HOUR = int(os.getenv("EVENING_CUTOFF_HOUR", "19"))
 
 
 def local_now() -> datetime:
-    return datetime.now(LOCAL_TZ)
+    return clock.now()
+
+
+def today_local() -> date:
+    """The athlete's date. Never `today_local()`, which is the server's.
+
+    On Streamlit Community Cloud the server is on UTC, so between 18:30 and
+    midnight in India the app believed it was still yesterday: the evening rule
+    that rolls the plan forward never fired, and "today" was a day already done.
+    """
+    return clock.today()
 
 
 def training_focus(today: date) -> tuple[date, bool]:
@@ -504,7 +576,7 @@ def fmt_stamp(raw: object) -> str:
     # The year is dropped in the current year. On a sync timestamp it is almost
     # always noise — you know what year it is — and it only earns its space when
     # the reading is genuinely old.
-    pattern = "%d-%m, %I:%M %p" if when.year == date.today().year else \
+    pattern = "%d-%m, %I:%M %p" if when.year == today_local().year else \
               "%d-%m-%Y, %I:%M %p"
     return when.strftime(pattern).replace(" 0", " ").lower()
 
@@ -748,7 +820,7 @@ def strength_howto_block(exercise_ids: list[str], log_rows: list[dict],
                + "Slow and controlled beats heavy. Stop a set if something "
                  "sharp appears — soreness is fine, pain is not.")
     # Exactly what is listed below, in this order, at these numbers.
-    send_to_watch(prescriptions, day or date.today(), label)
+    send_to_watch(prescriptions, day or today_local(), label)
     for i, eid in enumerate(ids):
         with st.container(border=True):
             exercise_howto(strength.EXERCISES[eid], presc.get(eid))
@@ -757,24 +829,20 @@ def strength_howto_block(exercise_ids: list[str], log_rows: list[dict],
 
 
 @st.cache_data(show_spinner=False, ttl=1800)
-def route_points(stamp: float, activity_id: str,
-                 keep: int = 160) -> list[tuple[float, float]]:  # noqa: ARG001
-    """The route, thinned to something a browser can draw instantly.
+def week_routes(stamp: float, ids: tuple[str, ...]) -> dict:  # noqa: ARG001
+    """Every route for the week, in one query, cached until the data changes.
 
-    A thousand GPS points is a thousand points more than a 300px outline needs.
-    Cached per activity, so opening the same session twice costs one query once.
+    Preloaded rather than fetched on the click: the first session opened used to
+    pay 200ms of database on top of a full page rerun, which is exactly the wait
+    that made it feel slow. Now the click costs nothing but drawing.
     """
+    if not ids:
+        return {}
     try:
-        stream = with_store(lambda st_: st_.stream(str(activity_id)))
+        return with_store(lambda st_: st_.routes(list(ids)))
     except Exception as exc:  # noqa: BLE001 - a missing route is not an error
-        log.info("Could not read the route for %s: %s", activity_id, exc)
-        return []
-    coords = [(float(r["lat"]), float(r["lon"])) for r in stream
-              if r.get("lat") is not None and r.get("lon") is not None]
-    if len(coords) <= keep:
-        return coords
-    step = len(coords) / keep
-    return [coords[int(i * step)] for i in range(keep)]
+        log.info("Could not preload routes: %s", exc)
+        return {}
 
 
 def route_figure(coords: list[tuple[float, float]]):
@@ -808,7 +876,7 @@ def route_figure(coords: list[tuple[float, float]]):
                                                   "staticPlot": True})
 
 
-def session_recap(act: dict, data: dict) -> None:
+def session_recap(act: dict, data: dict, routes: dict | None = None) -> None:
     """What a finished session was: the numbers, the route, the splits.
 
     On Today rather than only on the Log page, because the question "how did
@@ -838,7 +906,7 @@ def session_recap(act: dict, data: dict) -> None:
                       "note": "Garmin's own"})
     ui.figures(cells)
 
-    coords = route_points(db_stamp(), str(act["activity_id"]))
+    coords = (routes or {}).get(str(act["activity_id"])) or []
     left, right = st.columns([1.25, 1], gap="medium")
     with left:
         if coords:
@@ -847,8 +915,10 @@ def session_recap(act: dict, data: dict) -> None:
             st.caption("No route for this one — indoors, or recorded before "
                        "coordinates were stored.")
     with right:
-        bands = (session_zone_minutes(db_stamp(), str(act["activity_id"]),
-                                      int(float(ceiling))) if ceiling else {})
+        # From the zone rows already loaded for this page. The old call re-read
+        # every activity, every zone row and the whole stream — 215ms measured,
+        # for numbers two of which were already in memory.
+        bands = session_bands(data, act, ceiling)
         if sum(bands.values()) > 0:
             st.markdown("**Where the time went**")
             ui.proportion_bar([(ZONE_LABELS[z], bands.get(z, 0), ZONE_COLOR[z])
@@ -870,6 +940,26 @@ def session_recap(act: dict, data: dict) -> None:
         drift = lap_drift(laps)
         if drift.get("drift_bpm") is not None:
             st.caption(drift["message"])
+
+
+def session_bands(data: dict, act: dict, ceiling: float | None) -> dict[int, float]:
+    """Minutes per zone for one session, from what the page already has.
+
+    Garmin's own per-session zone rows are already loaded, and they only need
+    re-cutting when the athlete's easy ceiling sits above Garmin's zone-2 top —
+    which is the only case that needs the samples.
+    """
+    rows = [z for z in (data.get("zones") or [])
+            if str(z.get("activity_id")) == str(act["activity_id"])]
+    bounds = zone_bounds(data.get("zones") or [])
+    garmin_top = (bounds.get(2) or (0, 0))[1] or 0
+    if rows and (not ceiling or int(float(ceiling)) <= int(garmin_top)):
+        return {int(z["zone_number"]): float(z["secs_in_zone"] or 0) / 60.0
+                for z in rows}
+    if not ceiling:
+        return {}
+    return session_zone_minutes(db_stamp(), str(act["activity_id"]),
+                                int(float(ceiling)))
 
 
 def done_sessions_block(data: dict, today: date) -> None:
@@ -898,21 +988,29 @@ def done_sessions_block(data: dict, today: date) -> None:
     # A picker rather than a stack of expanders: Streamlit executes an
     # expander's body whether or not it is open, so six sessions meant six
     # stream reads and six charts built on every click of anything.
-    picked = st.pills("Session", list(labels), selection_mode="single",
-                      key="week_session", label_visibility="collapsed")
-    if picked:
-        session_recap(labels[picked], data)
-    else:
-        st.caption("Nothing selected, so nothing loaded — pick a day above.")
+    routes = week_routes(db_stamp(),
+                         tuple(sorted(str(a["activity_id"]) for a in ordered)))
+
+    # A fragment, because picking a session used to rerun the whole page: the
+    # insight banner, the planner facts, the envelope, the week strip and the
+    # next-week preview, measured at 3.3 to 4.3 seconds for a chart whose data
+    # was already in memory. Inside a fragment only this block re-runs.
+    @st.fragment
+    def picker() -> None:
+        chosen = st.pills("Session", list(labels), selection_mode="single",
+                          key="week_session", label_visibility="collapsed")
+        if chosen:
+            session_recap(labels[chosen], data, routes)
+        else:
+            st.caption("Pick a day to see its numbers, its route and its splits.")
+
+    picker()
 
 
 def page_today(data: dict, today: date) -> None:
     acts, wl = data["activities"], data["wellness"]
     sig = recovery_signals(wl, acts, as_of=today) if wl else None
-    with Store(db_path()) as s:
-        facts = planner.build_facts(s, today=today)
-        env = planner.build_envelope(facts, s)
-        verdict = planner.readiness_verdict(facts)
+    facts, env, verdict = week_context(today, data.get("scoped_to"))
 
     plan = st.session_state.get("plan") or (data["plan"] or {}).get("plan")
     focus_day, rolled = training_focus(today)
@@ -1080,7 +1178,7 @@ def week_cells(plan: dict | None, today: date,
     """`mark_today=False` for a future week, which has no today to highlight."""
     start = week_start_of(today)
     entries = (plan or {}).get("week_plan", [])
-    real_today = date.today()
+    real_today = today_local()
     cells = []
     for i, name in enumerate(DAYS):
         d = start + timedelta(days=i)
@@ -1124,6 +1222,34 @@ def acwr_tone(sig) -> str:
     if sig.acwr < 0.8:
         return "caution"
     return "good"
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _week_context(stamp: float, iso_today: str,
+                  sports: tuple[str, ...]) -> tuple[dict, dict, dict]:  # noqa: ARG001
+    """This week's facts, envelope and verdict — one read, cached on the data.
+
+    Every page wanted these and each one built them again: about a dozen queries
+    against a managed Postgres, repeated on every click of anything. They are
+    pure given the database and the date, so they are computed once per change
+    and rebuilt from JSON, which costs nothing.
+    """
+    def read(s: Store) -> tuple[dict, dict, dict]:
+        day = date.fromisoformat(iso_today)
+        facts = planner.build_facts(s, today=day)
+        envelope = planner.build_envelope(facts, s,
+                                         only_sports=list(sports) or None)
+        return (facts.model_dump(mode="json"), envelope.model_dump(mode="json"),
+                planner.readiness_verdict(facts))
+    return with_store(read)
+
+
+def week_context(today: date, sports: list[str] | None = None
+                 ) -> tuple[PlannerFacts, Envelope, dict]:
+    facts, envelope, verdict = _week_context(
+        db_stamp(), today.isoformat(), tuple(sorted(sports or ())))
+    return (PlannerFacts.model_validate(facts),
+            Envelope.model_validate(envelope), verdict)
 
 
 def week_targets(data: dict, today: date) -> dict[str, dict[str, int]]:
@@ -1286,35 +1412,50 @@ def page_progress(data: dict, today: date) -> None:
                     "first session."):
         efficiency_block(acts, today, data.get("notes"), data.get("weather"))
 
-    detail = st.tabs(["Hours a week", "How fast you are building",
-                      "Easy vs hard, week by week", "Overnight numbers",
-                      "Steps and stride", "Running form",
-                      "Heart rate creep", "Heat"])
-    with detail[0], ui.frame():
-        st.caption("Never more than 10% more than last week, and every "
-                   "fourth week is an easy one.")
-        volume_chart(data, today, data.get("notes"))
-    with detail[1], ui.frame():
-        st.caption("Minutes say how much you did. Load says how much it took "
-                   "out of you. Comparing the last week with the last month is "
-                   "the best warning sign there is for getting hurt.")
-        load_ramp_block(acts, today, data.get("notes"))
-    with detail[2], ui.frame():
-        st.caption("Easy training turns into hard training a few minutes at "
-                   "a time, and this is where you would see it happening.")
-        zone_trend_block(data, today)
-    with detail[3], ui.frame():
-        st.caption("What your watch measured while you slept, against your "
-                   "own normal.")
-        trend_chart(wl, today)
-    with detail[4], ui.frame():
-        cadence_block(acts, today)
-    with detail[5], ui.frame():
-        form_block(acts)
-    with detail[6], ui.frame():
-        drift_block(acts, data.get("laps"))
-    with detail[7], ui.frame():
-        weather_block(data, today, data.get("notes"))
+    # A switch, not tabs. st.tabs executes every panel body on every rerun, so
+    # eight charts were computed to show one — measured at two seconds a click,
+    # most of it work nobody was looking at. A fragment on top, so changing
+    # panel does not rerun the page above it either.
+    PANELS = ("Hours a week", "How fast you are building",
+              "Easy vs hard, week by week", "Overnight numbers",
+              "Steps and stride", "Running form", "Heart rate creep", "Heat")
+
+    @st.fragment
+    def detail_panel() -> None:
+        chosen = st.segmented_control(
+            "Detail", PANELS, default=st.session_state.get("progress_panel")
+            or PANELS[0], key="progress_panel", label_visibility="collapsed")
+        panel = chosen or PANELS[0]
+        with ui.frame():
+            if panel == "Hours a week":
+                st.caption("Never more than 10% more than last week, and every "
+                           "fourth week is an easy one.")
+                volume_chart(data, today, data.get("notes"))
+            elif panel == "How fast you are building":
+                st.caption("Minutes say how much you did. Load says how much it "
+                           "took out of you. Comparing the last week with the "
+                           "last month is the best warning sign there is for "
+                           "getting hurt.")
+                load_ramp_block(acts, today, data.get("notes"))
+            elif panel == "Easy vs hard, week by week":
+                st.caption("Easy training turns into hard training a few minutes "
+                           "at a time, and this is where you would see it "
+                           "happening.")
+                zone_trend_block(data, today)
+            elif panel == "Overnight numbers":
+                st.caption("What your watch measured while you slept, against "
+                           "your own normal.")
+                trend_chart(wl, today)
+            elif panel == "Steps and stride":
+                cadence_block(acts, today)
+            elif panel == "Running form":
+                form_block(acts)
+            elif panel == "Heart rate creep":
+                drift_block(acts, data.get("laps"))
+            else:
+                weather_block(data, today, data.get("notes"))
+
+    detail_panel()
 
 
 def form_block(acts: list[dict]) -> None:
@@ -1873,8 +2014,13 @@ RACE_DISTANCES = (("time_5k", "5K", 5.0), ("time_10k", "10K", 10.0),
                                                     42.195))
 
 
-def clock(seconds: float | None) -> str:
-    """h:mm:ss, or m:ss under an hour. Race times, not durations."""
+def race_clock(seconds: float | None) -> str:
+    """h:mm:ss, or m:ss under an hour. Race times, not durations.
+
+    Named `clock` until it shadowed the `core.clock` module the whole app now
+    asks for the date — which turned every page into "AttributeError: 'function'
+    object has no attribute 'today'". A module and a helper cannot share a name.
+    """
     if not seconds:
         return "—"
     total = int(round(float(seconds)))
@@ -1923,10 +2069,10 @@ def race_block(race: list[dict], notes: dict | None = None) -> None:
         if first.get(field) and first is not latest:
             delta = float(latest[field]) - float(first[field])
             # Faster is a negative delta, so the sign is flipped for reading.
-            note = f"{'-' if delta < 0 else '+'}{clock(abs(delta))} since " \
+            note = f"{'-' if delta < 0 else '+'}{race_clock(abs(delta))} since " \
                    f"{day_label(str(first['day']))}"
             tone = "good" if delta < 0 else "caution" if delta > 0 else "neutral"
-        cells.append({"label": label, "value": clock(latest[field]),
+        cells.append({"label": label, "value": race_clock(latest[field]),
                       "note": note, "tone": tone})
     ui.figures(cells)
     chart_ai_note("race", notes)
@@ -2210,10 +2356,7 @@ def page_plan(data: dict, today: date) -> None:
     unlocked = writes_allowed()
     if not unlocked:
         st.caption("🔒 Read-only. Enter your PIN in the sidebar to make changes.")
-    with Store(db_path()) as s:
-        facts = planner.build_facts(s, today=today)
-        env = planner.build_envelope(facts, s)
-        verdict = planner.readiness_verdict(facts)
+    facts, env, verdict = week_context(today, data.get("scoped_to"))
 
     tone = {"deload": "bad", "hold": "neutral", "build": "good"}[verdict["verdict"]]
     ui.banner(verdict["headline"], " · ".join(verdict["reasons"]), tone)
@@ -2431,8 +2574,7 @@ def goal_block(today: date, unlocked: bool) -> None:
     the growth cap, the hard-session allowance and the long sessions all move
     with how close the race is.
     """
-    with Store(db_path()) as s:
-        goal = goal_mod.load(s)
+    goal = current_goal()
     ui.section("What you are training for",
                "Set a date and the plan stops treating every week the same.")
     if goal.set:
@@ -2504,10 +2646,8 @@ def goal_block(today: date, unlocked: bool) -> None:
 
 def page_rules(data: dict, today: date) -> None:
     unlocked = writes_allowed()
-    with Store(db_path()) as s:
-        current = rules_mod.load(s)
-        facts = planner.build_facts(s, today=today)
-        env = planner.build_envelope(facts, s)
+    current = current_rules()
+    _, env, _ = week_context(today, data.get("scoped_to"))
 
     goal_block(today, unlocked)
 
@@ -3076,8 +3216,7 @@ def page_about(data: dict, today: date) -> None:
     chart_notes = len([k for k in notes if str(k).startswith("chart:")])
     ceiling = data.get("aerobic_ceiling")
     ceiling_txt = f"{int(float(ceiling))} bpm" if ceiling else "a ceiling you set"
-    with Store(db_path()) as s:
-        goal = goal_mod.load(s)
+    goal = current_goal()
     phase = goal.phase(today)
     weeks = goal.weeks_to_go(today)
 
@@ -3715,7 +3854,7 @@ def count_visit() -> dict[str, int]:
         with_store(lambda s: visits_mod.record(
             s, key, user_agent=headers.get("User-Agent"),
             url=str(getattr(st.context, "url", "") or "")))
-    return with_store(lambda s: visits_mod.summary(s))
+    return visit_counts()
 
 
 def sidebar(data: dict) -> None:
@@ -3738,10 +3877,9 @@ def sidebar(data: dict) -> None:
         # was set. And the AI line was a caption at the foot of the sidebar: it
         # is the thing that makes this more than a dashboard, so it belongs in
         # the table with everything else that says what you are working with.
-        with Store(db_path()) as _s:
-            goal = goal_mod.load(_s)
-        phase = goal.phase(date.today()).title()
-        weeks = goal.weeks_to_go(date.today())
+        goal = current_goal()
+        phase = goal.phase(today_local()).title()
+        weeks = goal.weeks_to_go(today_local())
         ui.rows([
             ("Watch", "Forerunner 265"),
             ("Phase", phase,
@@ -3823,9 +3961,9 @@ def filter_summary(today: date, sports: list[str]) -> str:
     appears only when it is actually narrowing something.
     """
     monday = week_start_of(today)
-    if monday == week_start_of(date.today()):
+    if monday == week_start_of(today_local()):
         span = "This week"
-    elif monday == week_start_of(date.today()) + timedelta(weeks=1):
+    elif monday == week_start_of(today_local()) + timedelta(weeks=1):
         span = "Next week"
     else:
         span = monday.strftime("%d-%m")
@@ -4012,7 +4150,7 @@ def week_picker(today: date) -> date:
     offers no way to change that, which contradicted the Monday-anchored weeks
     used everywhere else. Choosing the week directly removes the ambiguity.
     """
-    this_monday = week_start_of(date.today())
+    this_monday = week_start_of(today_local())
     options = [this_monday - timedelta(weeks=i) for i in range(-1, 12)]
     labels = {}
     for mon in options:
@@ -4036,7 +4174,7 @@ def week_picker(today: date) -> date:
     st.session_state["week_choice"] = picked
 
     if picked == this_monday:
-        return date.today()          # keep "today" real for the current week
+        return today_local()          # keep "today" real for the current week
     return picked + timedelta(days=6)  # otherwise show the whole week, ending Sunday
 
 
@@ -4095,7 +4233,7 @@ def main() -> None:
     ui.load_css()
     if not read_gate():
         return
-    today = date.today()
+    today = today_local()
     target = db_path()
     # Only a local file can be "missing"; a Postgres URL either connects or
     # raises, and Path(url).exists() is always False — which used to stop the

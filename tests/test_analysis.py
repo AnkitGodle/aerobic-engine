@@ -370,3 +370,30 @@ def test_no_module_defines_the_same_name_twice():
                                    ast.ClassDef))]
         repeated = [n for n, c in Counter(names).items() if c > 1]
         assert not repeated, f"{path.name} defines {repeated} more than once"
+
+
+def test_no_module_is_shadowed_by_a_function_of_the_same_name():
+    """`def clock(...)` in the app shadowed the `core.clock` module it imports,
+    and every page died with "'function' object has no attribute 'today'". The
+    tests passed: nothing but rendering the app would have caught it."""
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    for path in sorted((root / "core").glob("*.py")) + \
+            sorted((root / "app").glob("*.py")) + \
+            sorted((root / "scripts").glob("*.py")):
+        tree = ast.parse(path.read_text())
+        imported = set()
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    imported.add((alias.asname or alias.name).split(".")[0])
+            elif isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    imported.add(alias.asname or alias.name)
+        defined = {n.name for n in tree.body
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                     ast.ClassDef))}
+        clash = sorted(imported & defined)
+        assert not clash, f"{path.name} defines {clash}, which it also imports"

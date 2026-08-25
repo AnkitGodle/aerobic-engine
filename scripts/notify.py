@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dotenv import load_dotenv  # noqa: E402
 
+from core import clock  # noqa: E402
 from core import goal as goal_mod  # noqa: E402
 from core import notify, planner, strength  # noqa: E402
 from core.analysis import recovery_signals  # noqa: E402
@@ -36,7 +37,9 @@ SPORT_ICON = {"swim": "🏊", "bike": "🚲", "run": "🏃", "strength": "🦵",
 
 def compose(store: Store, today: date | None = None) -> str:
     """The day's plan as a short message."""
-    today = today or date.today()
+    # The athlete's date, not the server's: a 6am message composed on a UTC
+    # host would otherwise be yesterday's session for half the evening.
+    today = today or clock.today()
     facts = planner.build_facts(store, today=today)
     envelope = planner.build_envelope(facts, store)
     verdict = planner.readiness_verdict(facts)

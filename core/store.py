@@ -1240,6 +1240,37 @@ class Store:
                   str(r["activity_id"])] for r in rows])
         return len(rows)
 
+    def routes(self, activity_ids: Sequence[str],
+               keep: int = 160) -> dict[str, list[tuple[float, float]]]:
+        """Coordinates for several activities at once, thinned as they are read.
+
+        One query for the whole week rather than one per session, and two columns
+        rather than nine: measured against this database, six routes cost 150ms
+        together where a single `stream()` call cost 211ms on its own. The
+        thinning happens here because a 300px outline does not need a thousand
+        points and shipping them to the browser is the other half of the cost.
+        """
+        ids = [str(a) for a in activity_ids if a]
+        if not ids:
+            return {}
+        marks = ",".join("?" for _ in ids)
+        rows = self.query(
+            f"SELECT activity_id, lat, lon FROM hr_streams"
+            f" WHERE activity_id IN ({marks}) AND lat IS NOT NULL"
+            f" ORDER BY activity_id, t_s", ids)
+        grouped: dict[str, list[tuple[float, float]]] = {}
+        for row in rows:
+            grouped.setdefault(str(row["activity_id"]), []).append(
+                (float(row["lat"]), float(row["lon"])))
+        out = {}
+        for key, coords in grouped.items():
+            if len(coords) <= keep:
+                out[key] = coords
+                continue
+            step = len(coords) / keep
+            out[key] = [coords[int(i * step)] for i in range(keep)]
+        return out
+
     def activities_missing_route(self, sports: Sequence[str],
                                 limit: int = 25) -> list[dict[str, Any]]:
         """Outdoor sessions whose stored stream has no coordinates yet.

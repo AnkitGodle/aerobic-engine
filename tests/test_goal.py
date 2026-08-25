@@ -112,3 +112,27 @@ def test_the_taper_keeps_its_sharpness(healthy):
     env = planner.build_envelope(planner.build_facts(healthy, today=TODAY), healthy)
     assert env.max_quality_sessions >= 1
     goal_mod.clear(healthy)
+
+
+def test_the_clock_is_the_athletes_not_the_servers(monkeypatch):
+    """On a UTC host, 18:30 to midnight in India was still "yesterday" — so the
+    evening rule never fired and today's session was one already done."""
+    from datetime import datetime, timezone
+
+    from core import clock
+
+    monkeypatch.setenv("LOCAL_TZ", "Asia/Kolkata")
+    # 19:00 UTC on the 25th is 00:30 on the 26th in India.
+    fixed = datetime(2026, 8, 25, 19, 0, tzinfo=timezone.utc)
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed.astimezone(tz) if tz else fixed
+
+    monkeypatch.setattr(clock, "datetime", FrozenDatetime)
+    assert clock.today().isoformat() == "2026-08-26"
+    assert clock.now().hour == 0
+
+    monkeypatch.setenv("LOCAL_TZ", "UTC")
+    assert clock.today().isoformat() == "2026-08-25"
