@@ -339,19 +339,139 @@ def reference_speed(activities: Sequence[dict[str, Any]], sport: str) -> float |
     return speeds[mid] if len(speeds) % 2 else (speeds[mid - 1] + speeds[mid]) / 2
 
 
+# How much heart rate rises per metre per second, before there is enough of the
+# athlete's own data to fit it. Not guesses: they are the middle of the range
+# these relationships fall in, and each is only used until four sessions with
+# some pace spread exist, after which the athlete's own slope replaces it.
+DEFAULT_HR_SLOPE = {"run": 35.0, "bike": 12.0, "swim": 90.0}
+# A fitted slope outside these is not a physiological relationship, it is two
+# sessions that happened to line up. Falls back to the default and says so.
+HR_SLOPE_BOUNDS = {"run": (12.0, 80.0), "bike": (4.0, 45.0), "swim": (25.0, 260.0)}
+MIN_FIT_SESSIONS = 4
+MIN_SPEED_SPREAD = 0.08     # (max - min) / mean
+MIN_FIT_R2 = 0.30
+# Only used when there is no fit to judge by: beyond this much slower or faster
+# than the reference, a correction built on a default slope is a guess.
+EXTRAPOLATION_LIMIT = 0.20
+# With a fit, the test is the correction's own uncertainty in beats. Three is
+# chosen against the signal: this chart's whole story is a handful of bpm, so a
+# correction that could be out by more than three is not evidence.
+CORRECTION_DOUBT_BPM = 3.0
+
+
+def hr_pace_model(
+    activities: Sequence[Mapping[str, Any]], sport: str
+) -> dict[str, Any]:
+    """How this athlete's heart rate moves with pace, fitted from their sessions.
+
+    The number this whole page turns on used to be computed as
+    `HR x (reference_speed / session_speed)` — heart rate treated as proportional
+    to speed. It is not: at a standstill heart rate is resting, not zero. Over an
+    aerobic range the relationship is a straight line with a large intercept,
+
+        HR = intercept + slope x speed
+
+    and the honest way to ask "what would this session have cost at my usual
+    pace" is to move along that line — add `slope x (reference - speed)` — rather
+    than to scale by a ratio through the origin.
+
+    The difference is not academic. On four real runs spanning 7:29 to 9:38 per
+    km, the ratio version read 146, 148, 157, 164 bpm: an eighteen-beat decline
+    that looked like a month of lost fitness. The fitted line (r-squared 0.998)
+    puts the same four sessions at 151, 152, 152, 152. They were the same
+    fitness at four different paces, and the slow easy runs were being punished
+    for being slow.
+
+    Dynamic and adaptive on purpose: refitted from the whole history every time,
+    so it sharpens as sessions accumulate. Until there are four sessions with
+    some spread of pace it uses a per-sport default, and says which it used.
+    """
+    rows = [
+        (speed, float(a["avg_hr"]))
+        for a in activities
+        if a.get("sport") == sport and _pos(a.get("avg_hr"))
+        for speed in ((_pos(a.get("avg_speed_mps")) or _derived_speed(a)),)
+        if speed
+    ]
+    low, high = HR_SLOPE_BOUNDS.get(sport, (5.0, 200.0))
+    out: dict[str, Any] = {
+        "sport": sport,
+        "slope": DEFAULT_HR_SLOPE.get(sport, 35.0),
+        "intercept": None,
+        "r2": None,
+        "n": len(rows),
+        "source": "default",
+        "speed_range": None,
+        "why": "",
+    }
+    if len(rows) < MIN_FIT_SESSIONS:
+        out["why"] = (f"{len(rows)} session{'s' if len(rows) != 1 else ''}: needs "
+                      f"{MIN_FIT_SESSIONS} before your own slope can be measured")
+        return out
+
+    speeds = [r[0] for r in rows]
+    beats = [r[1] for r in rows]
+    out["speed_range"] = (round(min(speeds), 3), round(max(speeds), 3))
+    mean_speed, mean_hr = fmean(speeds), fmean(beats)
+    spread = (max(speeds) - min(speeds)) / mean_speed if mean_speed else 0.0
+    if spread < MIN_SPEED_SPREAD:
+        out["why"] = (f"every session within {spread * 100:.0f}% of the same pace, "
+                      f"so the slope cannot be separated from the noise")
+        return out
+
+    denom = sum((s - mean_speed) ** 2 for s in speeds)
+    if denom <= 0:
+        out["why"] = "no variation in pace to fit against"
+        return out
+    slope = sum((s - mean_speed) * (h - mean_hr)
+                for s, h in rows) / denom
+    intercept = mean_hr - slope * mean_speed
+    total = sum((h - mean_hr) ** 2 for h in beats)
+    resid = sum((h - (intercept + slope * s)) ** 2 for s, h in rows)
+    r2 = 1 - resid / total if total > 0 else 0.0
+
+    if slope <= 0 or r2 < MIN_FIT_R2:
+        out["why"] = (f"pace explains only {max(r2, 0) * 100:.0f}% of the heart-rate "
+                      f"spread, so the fit is not usable yet")
+        return out
+    if not low <= slope <= high:
+        out["why"] = (f"the fitted slope ({slope:.0f} bpm per m/s) is outside what "
+                      f"is physiologically plausible for {sport}")
+        return out
+
+    # The standard error of the slope, because the honest question about any one
+    # point is not "how far from the reference is it" but "how uncertain is the
+    # correction I am about to apply to it". That is |reference - speed| times
+    # this, and it scales the right way on its own: a tight fit tolerates a big
+    # pace gap, a loose one does not tolerate much at all.
+    se = ((resid / (len(rows) - 2)) / denom) ** 0.5 if len(rows) > 2 else None
+    out.update({"slope": round(slope, 2), "intercept": round(intercept, 1),
+                "r2": round(r2, 3), "source": "fitted",
+                "slope_se": round(se, 3) if se is not None else None,
+                "why": f"fitted from {len(rows)} sessions, r² {r2:.2f}"})
+    return out
+
+
 def hr_points(
-    activities: Sequence[dict[str, Any]], sport: str, ref_speed: float | None = None
+    activities: Sequence[dict[str, Any]], sport: str, ref_speed: float | None = None,
+    model: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Per-session training heart rate, plus the same thing normalised to a
-    reference pace.
+    """Per-session training heart rate, plus the same thing at a reference pace.
 
     Raw average heart rate alone is not progress: a hard session is high because
-    it was hard, not because fitness fell. `hr_at_reference` removes that by
-    asking what heart rate this session's efficiency implies at one fixed pace —
-    so a falling line means the same pace now costs fewer beats. It is efficiency
-    factor turned back into a unit you can feel.
+    it was hard, not because fitness fell. `hr_at_reference` removes the pace by
+    moving each session along the athlete's own heart-rate-to-pace line — see
+    `hr_pace_model` for why that is a straight line with an intercept rather than
+    a ratio, and what the ratio version got wrong.
+
+    Because the correction is additive, moving the reference pace shifts every
+    point by the same amount and leaves the shape of the trend alone. That is
+    what makes it safe to keep the reference dynamic: the yardstick can grow with
+    the athlete's history without rewriting what the line says.
     """
     ref = ref_speed if ref_speed is not None else reference_speed(activities, sport)
+    fit = dict(model or hr_pace_model(activities, sport))
+    slope = float(fit.get("slope") or DEFAULT_HR_SLOPE.get(sport, 35.0))
     out: list[dict[str, Any]] = []
     for a in activities:
         if a.get("sport") != sport:
@@ -359,12 +479,28 @@ def hr_points(
         hr = _pos(a.get("avg_hr"))
         if not hr:
             continue
-        ef = _pos(a.get("ef"))
-        normalised = None
-        # Only meaningful for the speed-based metric: watts per beat cannot be
-        # turned into "heart rate at a pace".
-        if ef and ref and (a.get("ef_metric") or "speed_per_hr") == "speed_per_hr":
-            normalised = round(ref * 100.0 / ef, 1)
+        speed = _pos(a.get("avg_speed_mps")) or _derived_speed(a)
+        normalised, drift, far = None, None, False
+        correction, doubt = None, None
+        # Only for the speed-based metric: watts per beat has no pace equivalent,
+        # so a power-measured ride carries no normalised value.
+        if speed and ref and (a.get("ef_metric") or "speed_per_hr") == "speed_per_hr":
+            correction = slope * (ref - speed)
+            normalised = round(hr + correction, 1)
+            drift = round((speed - ref) / ref, 3)
+            # Whether to trust that correction is a question about its own
+            # uncertainty, not about how far the session was from the reference.
+            # |reference - speed| times the standard error of the slope answers
+            # it directly, and scales the right way: a tight fit tolerates a big
+            # pace gap, a loose one tolerates almost none. With no fit to stand
+            # on, distance is all there is to go by.
+            se = fit.get("slope_se")
+            if fit.get("source") == "fitted" and se is not None:
+                doubt = abs(ref - speed) * float(se)
+                far = doubt > CORRECTION_DOUBT_BPM
+            else:
+                doubt = None
+                far = abs(drift) > EXTRAPOLATION_LIMIT
         out.append(
             {
                 "activity_id": a["activity_id"],
@@ -372,8 +508,16 @@ def hr_points(
                 "avg_hr": round(hr, 1),
                 "max_hr": _pos(a.get("max_hr")),
                 "minutes": round((a.get("duration_s") or 0) / 60.0, 1),
-                "speed_mps": _pos(a.get("avg_speed_mps")) or _derived_speed(a),
+                "speed_mps": speed,
                 "hr_at_reference": normalised,
+                # How far this session's pace sat from the reference, and whether
+                # that is far enough that the correction is a guess.
+                "pace_offset": drift,
+                "correction_bpm": (round(correction, 1)
+                                   if normalised is not None else None),
+                "correction_doubt_bpm": (round(doubt, 2)
+                                         if doubt is not None else None),
+                "extrapolated": far,
                 "is_steady": bool(a.get("is_steady")),
                 "steady_reason": a.get("steady_reason") or "",
             }

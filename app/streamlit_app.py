@@ -59,6 +59,7 @@ from core.analysis import (  # noqa: E402
     clean_status,
     consistency,
     fitness_drivers,
+    hr_pace_model,
     km_splits,
     load_ramp,
     reference_speed,
@@ -2425,12 +2426,14 @@ def training_hr_block(acts: list[dict], today: date,
     normalised = (view or "Usual pace").startswith("Usual")
     field = "hr_at_reference" if normalised else "avg_hr"
 
-    # What "your usual pace" actually is, per sport, in the units you think in.
-    # The toggle had a tooltip and nothing else, and a tooltip is a poor place to
-    # keep the one sentence that says what the chart is measuring.
-    yardsticks = []
+    # What "your usual pace" actually is, per sport, in the units you think in,
+    # and the slope each correction is made with. The toggle had a tooltip and
+    # nothing else, and a tooltip is a poor place to keep the sentence that says
+    # what a chart is measuring.
+    yardsticks, models = [], {}
     for sport in shown_sports():
         speed = reference_speed(acts, sport)
+        models[sport] = hr_pace_model(acts, sport)
         if speed:
             yardsticks.append(f"{sport} {pace_str(sport, speed * 3600, 3600)}")
 
@@ -2458,13 +2461,22 @@ def training_hr_block(acts: list[dict], today: date,
         # than as a sport with fewer sessions; the markers still show where the
         # actual sessions are.
         mode = "lines+markers" if len(days) >= 2 else "markers"
+        # Hollow where the pace correction could be out by more than a few beats
+        # — a filled marker would claim a confidence the fit does not have.
+        shaky = [any(q.get("extrapolated") for q in by_day[d]) for d in days]
+        fills = ["rgba(0,0,0,0)" if bad else SPORT_COLOR[sport] for bad in shaky]
+        corrections = [sum(q.get("correction_bpm") or 0 for q in by_day[d])
+                       / len(by_day[d]) for d in days]
         fig.add_scatter(
             x=days, y=ys, mode=mode, name=sport,
             line=dict(color=SPORT_COLOR[sport], width=2),
-            marker=dict(size=10, color=SPORT_COLOR[sport]),
-            customdata=list(zip(mins, raws)),
+            marker=dict(size=10, color=fills,
+                        line=dict(color=SPORT_COLOR[sport], width=2)),
+            customdata=list(zip(mins, raws, corrections)),
             hovertemplate="%{x|%a %d-%m-%Y}<br>%{y:.0f} bpm<br>"
-                          "%{customdata[0]:.0f} min · raw %{customdata[1]:.0f}"
+                          "%{customdata[0]:.0f} min · recorded "
+                          "%{customdata[1]:.0f} bpm, pace correction "
+                          "%{customdata[2]:+.1f}"
                           f"<extra>{sport}</extra>")
         t = hr_trend(acts, sport, as_of=today, steady_only=False)
         if t["normalised_change_bpm"] is not None:
@@ -2567,6 +2579,23 @@ def training_hr_block(acts: list[dict], today: date,
                  "real average and a slower one higher, so what is left is how "
                  "much each beat is buying you. **This is the view where a line "
                  "going down means you are getting fitter.**")
+        for sport, model in models.items():
+            if not model.get("n"):
+                continue
+            if model.get("source") == "fitted":
+                said += (f"  \n{sport.title()}: your heart rate rises about "
+                         f"{model['slope']:.0f} bpm per m/s of pace "
+                         f"({model['why']}), and that is the line each session is "
+                         f"moved along.")
+            else:
+                said += (f"  \n{sport.title()}: using a typical "
+                         f"{model['slope']:.0f} bpm per m/s until your own can be "
+                         f"measured — {model['why']}.")
+        if any(p.get("extrapolated") for sp in shown_sports()
+               for p in hr_points(acts, sp)):
+            said += ("  \nA hollow marker means that session's pace was far "
+                     "enough from your usual that the correction could be out by "
+                     "several beats. Read it as approximate.")
     else:
         said = ("**Raw** is the average heart rate the watch recorded, with "
                 "nothing taken out. A hard session sits high because it was "
