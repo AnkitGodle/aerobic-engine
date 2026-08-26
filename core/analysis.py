@@ -287,9 +287,37 @@ def ef_trend(
         if slope is not None and mean_y:
             trend.slope_pct_per_week = round(slope / mean_y * 100.0, 3)
 
+    # The verdict comes from the pace-corrected series where one exists, because
+    # efficiency factor is speed over heart rate — a ratio through the origin —
+    # and so it drops when a session is run slower whether or not anything about
+    # the athlete changed. Four easy runs read as an eighteen-beat decline that
+    # way. See hr_pace_model for the arithmetic and the numbers.
+    if metric == "speed_per_hr":
+        corrected = hr_trend(list(activities), sport, recent_days=recent_days,
+                             baseline_days=baseline_days, as_of=as_of,
+                             steady_only=steady_only)
+        trend.change_bpm_at_pace = corrected["normalised_change_bpm"]
+        trend.slope_bpm_at_pace_per_week = corrected[
+            "normalised_slope_bpm_per_week"]
+        if (trend.change_bpm_at_pace is not None
+                or trend.slope_bpm_at_pace_per_week is not None):
+            trend.pace_corrected = True
+
+    if trend.pace_corrected:
+        # The verdict is hr_trend's, which is stated in beats at the athlete's
+        # own pace and already decides whether the record is long enough for a
+        # slope to mean anything. Only the word differs: "worsening" heart rate
+        # is "declining" efficiency.
+        trend.verdict = {"improving": "improving", "worsening": "declining",
+                         "flat": "flat",
+                         "insufficient_data": "insufficient_data"}[
+            corrected["verdict"]]
+        return trend
+
+    # No pace equivalent — a power-measured ride. Watts per beat is the metric
+    # itself, so the percentage change is the signal.
     signal = trend.change_pct if trend.change_pct is not None else (
-        trend.slope_pct_per_week
-    )
+        trend.slope_pct_per_week)
     if signal is None or len(window) < 3:
         trend.verdict = "insufficient_data"
     elif signal > 1.0:
@@ -348,6 +376,10 @@ DEFAULT_HR_SLOPE = {"run": 35.0, "bike": 12.0, "swim": 90.0}
 # sessions that happened to line up. Falls back to the default and says so.
 HR_SLOPE_BOUNDS = {"run": (12.0, 80.0), "bike": (4.0, 45.0), "swim": (25.0, 260.0)}
 MIN_FIT_SESSIONS = 4
+# Before a slope over time becomes a verdict it needs this many sessions across
+# this many days. Three rides inside three days can produce any slope you like.
+SLOPE_MIN_SESSIONS = 4
+SLOPE_MIN_SPAN_DAYS = 7
 MIN_SPEED_SPREAD = 0.08     # (max - min) / mean
 MIN_FIT_R2 = 0.30
 # Only used when there is no fit to judge by: beyond this much slower or faster
@@ -546,7 +578,15 @@ def hr_trend(
         "sport": sport, "reference_speed_mps": ref, "n_sessions": len(pts),
         "recent_hr": None, "baseline_hr": None, "change_bpm": None,
         "recent_normalised": None, "baseline_normalised": None,
-        "normalised_change_bpm": None, "verdict": "insufficient_data",
+        "normalised_change_bpm": None,
+        # A least-squares slope over whatever history exists, in bpm a week.
+        # Recent-against-baseline needs two windows, so it says nothing at all
+        # until the record is older than `recent_days` — eight days of training
+        # produced no verdict from it, and the fallback was the raw efficiency
+        # slope, which drops when sessions are run slower. This is the same
+        # question asked in a way a short record can answer.
+        "normalised_slope_bpm_per_week": None,
+        "verdict": "insufficient_data",
     }
     if not pts:
         return out
@@ -571,8 +611,27 @@ def hr_trend(
             out["recent_normalised"] - out["baseline_normalised"], 1
         )
 
+    dated = [p for p in pts if p.get("hr_at_reference") is not None]
+    span_days = (dated[-1]["date"] - dated[0]["date"]).days if len(dated) > 1 else 0
+    if len(dated) >= 3 and span_days > 0:
+        first = dated[0]["date"]
+        weeks = [(p["date"] - first).days / 7.0 for p in dated]
+        slope = ols_slope(weeks, [p["hr_at_reference"] for p in dated])
+        if slope is not None:
+            out["normalised_slope_bpm_per_week"] = round(slope, 2)
+    out["span_days"] = span_days
+
+    # Recent against baseline where both windows have sessions in them; the
+    # slope over the whole record otherwise. Both are in bpm at the athlete's own
+    # pace, and both read the same way: down is fitter.
     signal = out["normalised_change_bpm"]
-    if signal is None or len(pts) < 3:
+    if signal is None and out["normalised_slope_bpm_per_week"] is not None:
+        # Judged on the change actually observed, not on a weekly rate
+        # extrapolated from it: three rides across three days imply a dramatic
+        # slope per week and have seen almost nothing happen.
+        if len(dated) >= SLOPE_MIN_SESSIONS and span_days >= SLOPE_MIN_SPAN_DAYS:
+            signal = out["normalised_slope_bpm_per_week"] * (span_days / 7.0)
+    if signal is None or len(dated) < 3:
         out["verdict"] = "insufficient_data"
     elif signal <= -1.0:
         out["verdict"] = "improving"     # same pace, fewer beats

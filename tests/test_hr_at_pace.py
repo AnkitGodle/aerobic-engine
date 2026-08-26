@@ -227,3 +227,58 @@ def test_real_improvement_still_shows_as_improvement():
     trend = analysis.hr_trend(runs(improving), "run", as_of=date(2026, 7, 21))
     assert trend["verdict"] == "improving"
     assert trend["normalised_change_bpm"] < -1
+
+
+# --------------------------------------------------------------------------
+# The verdict on the page
+# --------------------------------------------------------------------------
+
+
+def test_the_verdict_ignores_raw_efficiency_when_a_pace_correction_exists():
+    """The banner said "efficiency is slipping in run" over these four sessions.
+
+    Raw efficiency factor fell 11.8% a week across them, entirely because they
+    were run slower. At the athlete's own pace the change is four hundredths of a
+    beat a week.
+    """
+    trend = analysis.ef_trend(runs(), "run", as_of=TODAY)
+    assert trend.pace_corrected is True
+    assert trend.verdict == "flat"
+    assert abs(trend.slope_bpm_at_pace_per_week) < 1.0
+    assert trend.slope_pct_per_week < -5      # what the old verdict was built on
+
+
+def test_a_short_burst_of_sessions_gets_no_verdict():
+    """Three rides inside three days can produce any slope you like."""
+    rides = runs([("2026-08-22", 4.35, 114.0), ("2026-08-23", 4.21, 133.0),
+                  ("2026-08-25", 4.39, 126.0)], sport="bike")
+    trend = analysis.ef_trend(rides, "bike", as_of=TODAY)
+    assert trend.verdict == "insufficient_data"
+    assert analysis.hr_trend(rides, "bike")["span_days"] < 7
+
+
+def test_a_week_of_sessions_does_get_one():
+    assert analysis.hr_trend(runs(), "run")["span_days"] == 7
+    assert analysis.hr_trend(runs(), "run")["verdict"] == "flat"
+
+
+def test_a_real_decline_is_still_called_a_decline():
+    """Same paces, rising heart rate: that is a genuine loss and must show."""
+    worse = [
+        ((date(2026, 6, 1) + timedelta(days=i * 4)).isoformat(),
+         2.05 + (i % 2) * 0.08, 145.0 + i * 1.6)
+        for i in range(10)
+    ]
+    trend = analysis.ef_trend(runs(worse), "run", as_of=date(2026, 7, 8))
+    assert trend.verdict == "declining"
+    assert trend.pace_corrected is True
+
+
+def test_the_insight_states_the_number_in_beats():
+    from core import insights
+    data = {"activities": runs(), "wellness": [], "zones": [], "strength": [],
+            "scoped_to": ("run",)}
+    ins = insights.fitness_insight(data, TODAY)
+    text = " ".join(ins.bullets)
+    assert "bpm" in text and "usual pace" in text
+    assert "slipping" not in ins.headline.lower()

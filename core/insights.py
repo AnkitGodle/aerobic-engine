@@ -157,12 +157,25 @@ def fitness_insight(data: dict, today: date) -> PageInsight:
                            tone)
 
     for t in usable:
-        direction = {"improving": "improving", "declining": "declining",
-                     "flat": "flat", "insufficient_data": "unclear"}[t.verdict]
-        line = f"**{t.sport.title()}** is {direction}"
-        if t.change_pct is not None:
-            line += f" ({t.change_pct:+.1f}% against the earlier baseline)"
-        line += f", from {t.n_sessions} session{'s' if t.n_sessions != 1 else ''}."
+        sessions = f"{t.n_sessions} session{'s' if t.n_sessions != 1 else ''}"
+        if t.verdict == "insufficient_data":
+            bullets.append(
+                f"**{t.sport.title()}**: {sessions}, but not spread over enough "
+                f"days yet to read a direction from.")
+            continue
+        line = f"**{t.sport.title()}** is {t.verdict}"
+        # Stated in beats at the athlete's own pace, which is the number the
+        # verdict is actually made on. The percentage change in raw efficiency
+        # factor is not: it moves with how fast the sessions happened to be.
+        if t.change_bpm_at_pace is not None:
+            line += (f" ({t.change_bpm_at_pace:+.1f} bpm at your usual pace "
+                     f"against the earlier block)")
+        elif t.slope_bpm_at_pace_per_week is not None:
+            line += (f" ({t.slope_bpm_at_pace_per_week:+.1f} bpm a week at your "
+                     f"usual pace)")
+        elif t.change_pct is not None:
+            line += f" ({t.change_pct:+.1f}% watts per beat)"
+        line += f", from {sessions}."
         bullets.append(line)
     improving = [t for t in usable if t.verdict == "improving"]
     declining = [t for t in usable if t.verdict == "declining"]

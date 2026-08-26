@@ -49,6 +49,16 @@ class EFTrend(BaseModel):
     baseline_mean: float | None = None
     change_pct: float | None = None  # recent vs baseline
     slope_pct_per_week: float | None = None
+    # The same question asked without the pace in it: heart rate at the athlete's
+    # usual pace, recent against baseline, in bpm. Negative is better. Raw
+    # efficiency factor is speed over heart rate, a ratio through the origin, so
+    # it falls when a session is run slower even at identical fitness — four easy
+    # runs read as a month of decline. When this is present it decides the
+    # verdict and `pace_corrected` says so.
+    change_bpm_at_pace: float | None = None
+    # The same thing as a slope, for a record too short to have two windows.
+    slope_bpm_at_pace_per_week: float | None = None
+    pace_corrected: bool = False
     verdict: Literal["improving", "flat", "declining", "insufficient_data"] = (
         "insufficient_data"
     )
