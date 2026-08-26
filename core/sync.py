@@ -250,6 +250,12 @@ def _note_backends() -> list[Any]:
     return out
 
 
+# Charts that get a paragraph rather than a sentence. Only the one the page is
+# built around: it is doing the actual analysis, and a twelve-word caption under
+# it was the wrong ration — said so in a bug report, and it was right.
+DETAILED_CHARTS = {"chart:training_hr"}
+
+
 def _one_note(kind: str, key: str, arg: Any, backend: Any,
               alternates: Sequence[Any] = ()) -> str | None:
     """Generate one summary. A rate limit moves it to another provider.
@@ -264,7 +270,8 @@ def _one_note(kind: str, key: str, arg: Any, backend: Any,
             if kind == "page":
                 return insights.narrate(key, arg, backend=candidate)
             title, payload = arg
-            return insights.chart_note(title, payload, backend=candidate)
+            return insights.chart_note(title, payload, backend=candidate,
+                                       detail=key in DETAILED_CHARTS)
         except ai.AIUnavailable as exc:
             log.info("%s on %s (%s); trying another provider", key,
                      getattr(candidate, "name", "?"), str(exc)[:70])
@@ -286,14 +293,32 @@ def _chart_inputs(data: dict[str, Any], today: date) -> list[tuple[str, str, Any
     since = today - timedelta(days=28)
     out: list[tuple[str, str, Any]] = []
 
+    # Conditions travel with the points. Without them the model can only read
+    # the line, and the line lies on a humid day: the same pace costs several
+    # beats when sweat cannot evaporate, and calling that lost fitness is the
+    # easiest wrong conclusion this dashboard makes available.
+    weather = data.get("weather") or {}
+
+    def conditions(activity_id: Any) -> dict[str, Any]:
+        wx = weather.get(str(activity_id)) or {}
+        out: dict[str, Any] = {}
+        if wx.get("temp_c") is not None:
+            out["air_c"] = round(float(wx["temp_c"]), 1)
+        if wx.get("dew_point_c") is not None:
+            out["dew_c"] = round(float(wx["dew_point_c"]), 1)
+        return out
+
     hr = {sp: [{"date": str(p["date"]), "bpm": p["hr_at_reference"],
-                "min": round(p["minutes"])}
+                "min": round(p["minutes"]), **conditions(p.get("activity_id"))}
                for p in hr_points(acts, sp) if p.get("hr_at_reference")]
           for sp in ENDURANCE_SPORTS}
     if any(hr.values()):
         out.append(("chart:training_hr",
-                    "Heart rate at the athlete's usual pace, by sport "
-                    "(bpm; falling is better)", hr))
+                    "Heart rate at the athlete's usual pace, by sport (bpm; "
+                    "falling is better). air_c and dew_c are the conditions "
+                    "that session was done in, where they are known: a dew "
+                    "point at or above 18C costs several beats at the same "
+                    "pace", hr))
         # The same series over all time rather than the recent window. Read
         # differently on purpose: the question there is the direction of travel
         # over months, not whether this block is working.

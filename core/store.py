@@ -1517,16 +1517,22 @@ class Store:
         cached before. That is how the About page came to say six sessions while
         the database held fifty-five.
 
-        Three scalars in one query: the sync marker, how many activities there
-        are, and when the newest row was written. Between them they move for any
-        write worth re-reading.
+        Four scalars in one query: the sync marker, how many activities there
+        are, when the newest one was written, and when a written summary last
+        changed. Between them they move for any write worth re-reading.
+
+        The last one was added after regenerating the chart summaries changed
+        nothing on screen for half an hour: the notes live in their own table, so
+        none of the other three noticed.
         """
         row = dict(self.execute(
             "SELECT (SELECT value FROM sync_state WHERE key = 'last_sync') AS synced,"
             " (SELECT COUNT(*) FROM activities) AS rows,"
-            " (SELECT MAX(ingested_at) FROM activities) AS newest"
+            " (SELECT MAX(ingested_at) FROM activities) AS newest,"
+            " (SELECT MAX(generated_at) FROM ai_notes) AS noted"
         ).fetchone() or {})
-        return f"{row.get('synced') or ''}|{row.get('rows') or 0}|{row.get('newest') or ''}"
+        return (f"{row.get('synced') or ''}|{row.get('rows') or 0}"
+                f"|{row.get('newest') or ''}|{row.get('noted') or ''}")
 
     def counts(self) -> dict[str, int]:
         """Row counts for every table, in a single round trip.

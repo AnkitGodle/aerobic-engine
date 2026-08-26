@@ -881,13 +881,17 @@ def week_routes(stamp: float, ids: tuple[str, ...]) -> dict:  # noqa: ARG001
         return {}
 
 
-def route_figure(coords: list[tuple[float, float]]):
+def route_figure(coords: list[tuple[float, float]], height: int = 165):
     """The shape of the route, as a line. No tiles, no WebGL, no map at all.
 
     `st.map` renders through deck.gl, which pulls WebGL and a basemap and locked
     the browser for several seconds on a page that might show six of them. The
     outline is what identifies a route at a glance — the streets underneath it
     are decoration you already know.
+
+    Small on purpose, and smaller than it was after a report said so: the shape
+    is recognisable at a glance and does not earn a third of the screen above the
+    numbers you came for.
     """
     lats = [c[0] for c in coords]
     lons = [c[1] for c in coords]
@@ -905,8 +909,8 @@ def route_figure(coords: list[tuple[float, float]]):
     fig.update_yaxes(scaleanchor="x",
                      scaleratio=1.0 / max(math.cos(math.radians(lats[0])), 0.1))
     fig.update_layout(showlegend=False, xaxis=dict(visible=False),
-                      yaxis=dict(visible=False), margin=dict(t=4, b=4, l=4, r=4),
-                      height=230, paper_bgcolor="rgba(0,0,0,0)",
+                      yaxis=dict(visible=False), margin=dict(t=2, b=2, l=2, r=2),
+                      height=height, paper_bgcolor="rgba(0,0,0,0)",
                       plot_bgcolor="rgba(0,0,0,0)")
     st.plotly_chart(fig, width="stretch", config={"displayModeBar": False,
                                                   "staticPlot": True})
@@ -943,7 +947,9 @@ def session_recap(act: dict, data: dict, routes: dict | None = None) -> None:
     ui.figures(cells)
 
     coords = (routes or {}).get(str(act["activity_id"])) or []
-    left, right = st.columns([1.25, 1], gap="medium")
+    # The narrower half now. The route is orientation; where the time went is the
+    # thing you read.
+    left, right = st.columns([1, 1.5], gap="medium")
     with left:
         if coords:
             route_figure(coords)
@@ -1429,7 +1435,9 @@ def page_progress(data: dict, today: date) -> None:
     ui.section("Heart rate at your usual pace",
                "Every session is shown as the heart rate it would have taken at "
                "your normal pace, so a fast day and a slow day can be compared. "
-               "A line going down means you are getting fitter.")
+               "A line going down usually means you are getting fitter — it also "
+               "moves with heat, sleep and how tired you were, which is why the "
+               "conditions are drawn behind it.")
     with ui.frame():
         training_hr_block(acts, today, data.get("notes"), data.get("weather"),
                           ceiling=data.get("aerobic_ceiling"))
@@ -2362,6 +2370,54 @@ def training_hr_block(acts: list[dict], today: date,
             annotation_text=f"your easy ceiling · {float(ceiling):.0f} bpm",
             annotation_position="top left",
             annotation_font=dict(size=10, color=TONE["good"]))
+
+    # Conditions behind the line, on their own axis. The humid rings below say
+    # which points to distrust; this says how warm it has been all along, which
+    # is the difference between "my fitness stalled in August" and "August was
+    # 30C". Drawn first in reading order but sent to the back by `layer`.
+    if drawn and weather:
+        by_day: dict[date, list[tuple[float, float | None]]] = {}
+        for a in acts:
+            wx = (weather or {}).get(str(a.get("activity_id"))) or {}
+            if wx.get("temp_c") is None or not a.get("start_date"):
+                continue
+            try:
+                day = date.fromisoformat(str(a["start_date"])[:10])
+            except (ValueError, TypeError):
+                continue
+            dew = wx.get("dew_point_c")
+            by_day.setdefault(day, []).append(
+                (float(wx["temp_c"]), float(dew) if dew is not None else None))
+        if len(by_day) >= 2:
+            days_wx = sorted(by_day)
+            air = [sum(t for t, _ in by_day[d]) / len(by_day[d]) for d in days_wx]
+            dews = [[p for _, p in by_day[d] if p is not None] for d in days_wx]
+            dew_line = [sum(vals) / len(vals) if vals else None for vals in dews]
+            fig.add_scatter(
+                x=days_wx, y=air, mode="lines", name="air °C", yaxis="y2",
+                line=dict(color="rgba(179,154,107,.85)", width=1.2,
+                          shape="spline", smoothing=.6),
+                hovertemplate="%{y:.0f}°C air<extra>conditions</extra>")
+            if any(v is not None for v in dew_line):
+                fig.add_scatter(
+                    x=days_wx, y=dew_line, mode="lines", name="dew point °C",
+                    yaxis="y2", line=dict(color="rgba(219,95,90,.7)", width=1.2,
+                                          dash="dot", shape="spline",
+                                          smoothing=.6),
+                    hovertemplate="%{y:.0f}°C dew point"
+                                  "<extra>conditions</extra>")
+            # Squeezed into the lower third so the weather reads as a backdrop
+            # rather than competing with the heart-rate line for attention.
+            values = [*air, *[v for v in dew_line if v is not None]]
+            floor, span = min(values), max(values) - min(values)
+            fig.update_layout(yaxis2=dict(
+                overlaying="y", side="right", showgrid=False,
+                # `title=dict(font=...)`, not `titlefont`: the shorthand was
+                # removed and passing it raises rather than being ignored.
+                title=dict(text="°C",
+                           font=dict(size=10, color="rgba(179,154,107,.9)")),
+                range=[floor - 2, floor + max(span, 6) * 2.6],
+                tickfont=dict(size=9, color="rgba(179,154,107,.9)")))
 
     muggy = humid_days(acts, weather)
     if muggy and drawn:

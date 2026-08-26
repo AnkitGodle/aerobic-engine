@@ -529,8 +529,38 @@ Rules:
 - No preamble, no markdown, no quotes. One sentence of plain text."""
 
 
-def chart_note(title: str, data: Any, backend: Any = None) -> str | None:
-    """A one-line reading of a single chart. None when no AI is configured."""
+CHART_DETAIL_SYSTEM = """\
+You write a short paragraph — three or four sentences, at most 75 words — reading
+one chart for the athlete whose data it is.
+
+This is the chart their training is judged on, so it earns more than a caption.
+Cover, in this order, and only where the numbers support it:
+- which way the line is going, and by how much
+- whether there is enough data to trust that yet
+- anything in the numbers that explains it: the conditions a session was run in,
+  a session far from the others, a gap in the record
+- what it means for the next week, in one clause
+
+Rules:
+- Use ONLY the numbers given. Never invent a cause. If the series is too short to
+  read, say so plainly and stop — a confident trend from four points is worse
+  than no comment.
+- Where air temperature or dew point is given, use it: a hot, humid session costs
+  several beats at the same pace, and reading that as lost fitness is the easiest
+  wrong conclusion available here.
+- Plain words a beginner would understand. No jargon, no stock AI phrasing
+  ("it's worth noting", "delve", "leverage", "overall"), no hedging, no headings.
+- No preamble, no markdown, no quotes. Plain sentences."""
+
+
+def chart_note(title: str, data: Any, backend: Any = None,
+               detail: bool = False) -> str | None:
+    """A reading of a single chart. None when no AI is configured.
+
+    `detail` asks for a paragraph rather than a sentence. Reserved for the chart
+    a page exists for — a bug report put it well: the headline chart is the one
+    doing the analysis, so a twelve-word caption under it is the wrong ration.
+    """
     from core import ai
 
     try:
@@ -539,8 +569,9 @@ def chart_note(title: str, data: Any, backend: Any = None) -> str | None:
         return None
     # AIUnavailable propagates on purpose: the sync-time generator pauses and
     # retries on a rate limit, which it cannot do if this swallows it.
-    text = backend.complete(CHART_NOTE_SYSTEM, _chart_prompt(title, data))
-    return (text or "").strip().strip('"').strip()[:180] or None
+    system = CHART_DETAIL_SYSTEM if detail else CHART_NOTE_SYSTEM
+    text = backend.complete(system, _chart_prompt(title, data))
+    return (text or "").strip().strip('"').strip()[:700 if detail else 180] or None
 
 
 # Chart payloads are trimmed rather than sent whole. The cap is generous for a
