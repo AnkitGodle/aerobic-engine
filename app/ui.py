@@ -256,6 +256,21 @@ CSS = """
   .ic-row-note { font-size: .74rem; opacity: .5; margin-left: .5rem;
                  font-weight: 400; }
 
+  /* Why a trend is doing what it is: a mark, the thing, its number, the reason.
+     Two columns rather than three, because the reason is the long part and it
+     reads better under the name than beside it. */
+  .ic-drivers { display: flex; flex-direction: column; }
+  .ic-driver { display: grid; grid-template-columns: 1.15rem 1fr; gap: .55rem;
+               padding: .5rem .1rem; align-items: start; }
+  .ic-driver + .ic-driver { border-top: 1px solid var(--ic-line); }
+  .ic-driver-mark { font-size: .95rem; font-weight: 700; line-height: 1.35;
+                    text-align: center; }
+  .ic-driver-head { font-size: .89rem; font-weight: 620; line-height: 1.35; }
+  .ic-driver-val { font-size: .82rem; font-weight: 660; margin-left: .5rem;
+                   font-variant-numeric: tabular-nums; }
+  .ic-driver-note { font-size: .79rem; opacity: .62; line-height: 1.5;
+                    margin-top: .1rem; }
+
   .ic-banner { border-radius: 14px; padding: 15px 18px; margin: 0 0 14px;
                border: 1px solid var(--ic-line); background: var(--ic-surface); }
   .ic-banner.good { border-left: 3px solid var(--ic-good); }
@@ -578,6 +593,39 @@ def rows(items: list[tuple]) -> None:
             + "</div></div>"
         )
     st.markdown(f'<div class="ic-rows">{"".join(out)}</div>',
+                unsafe_allow_html=True)
+
+
+DRIVER_MARK = {"good": "✓", "bad": "✕", "caution": "!", "neutral": "·"}
+
+
+def drivers(items: list[dict]) -> None:
+    """Why a trend is doing what it is: a mark, the thing, the number, the reason.
+
+    items: [{name, value, detail, tone}]
+
+    A list rather than cards. These are read top to bottom as a set — "these
+    three are working, that one is not" — and a grid of bordered boxes makes each
+    one look like an independent measurement instead of one line of an argument.
+    """
+    items = [i for i in items if i]
+    if not items:
+        return
+    out = []
+    for item in items:
+        tone = item.get("tone", "neutral")
+        colour = TONE_COLOR.get(tone, TONE_COLOR["neutral"])
+        out.append(
+            f'<div class="ic-driver"><div class="ic-driver-mark" '
+            f'style="color:{esc(colour)}">{DRIVER_MARK.get(tone, "·")}</div>'
+            f'<div><div class="ic-driver-head">{esc(item.get("name", ""))}'
+            + (f'<span class="ic-driver-val" style="color:{esc(colour)}">'
+               f'{esc(item["value"])}</span>' if item.get("value") else "")
+            + "</div>"
+            + (f'<div class="ic-driver-note">{esc(item["detail"])}</div>'
+               if item.get("detail") else "")
+            + "</div></div>")
+    st.markdown(f'<div class="ic-drivers">{"".join(out)}</div>',
                 unsafe_allow_html=True)
 
 

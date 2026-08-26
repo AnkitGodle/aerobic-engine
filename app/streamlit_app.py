@@ -55,8 +55,10 @@ from core.analysis import (  # noqa: E402
     DEW_POINT_HARD_C,
     ZONE_LABELS,
     aerobic_ceiling_options,
+    add_heat_driver,
     clean_status,
     consistency,
+    fitness_drivers,
     km_splits,
     load_ramp,
     reference_speed,
@@ -1464,6 +1466,8 @@ def page_progress(data: dict, today: date) -> None:
         training_hr_block(acts, today, data.get("notes"), data.get("weather"),
                           ceiling=data.get("aerobic_ceiling"))
 
+    drivers_block(data, today)
+
     rhr = baseline_trend(wl, "resting_hr", as_of=today, lower_is_better=True)
     hrv = baseline_trend(wl, "hrv_last_night", as_of=today, lower_is_better=False)
     tones = {"improving": "good", "worsening": "bad", "steady": "neutral",
@@ -1729,13 +1733,16 @@ def efficiency_block(acts: list[dict], today: date,
     # decision made on the reader's behalf.
     _, ctrl = st.columns([2, 1.6], vertical_alignment="center")
     with ctrl:
+        # Every session, by default. Filtering to steady sessions is available
+        # and is the statistically cleaner read, but a chart that answers "no
+        # data" because the training was hard is not doing its job.
         scope = st.segmented_control(
-            "Sessions", ["Steady only", "All"], default="Steady only",
+            "Sessions", ["All", "Steady only"], default="All",
             key="ef_scope", label_visibility="collapsed",
-            help="Steady only keeps the even, aerobic sessions, so the line "
-                 "tracks fitness. All includes intervals and races, which pull "
-                 "it down on hard weeks whether or not anything has changed.")
-    steady_only = (scope or "Steady only").startswith("Steady")
+            help="All counts every session. Steady only keeps the even, aerobic "
+                 "ones, which makes the line smoother — it is not more data, "
+                 "it is less.")
+    steady_only = (scope or "All").startswith("Steady")
 
     drawn = False
     left_out: dict[str, list[str]] = {}
@@ -2579,6 +2586,53 @@ def training_hr_block(acts: list[dict], today: date,
     elif normalised:
         st.caption("Power-based bike sessions are excluded here: watts per beat "
                    "has no pace equivalent.")
+
+
+def drivers_block(data: dict, today: date) -> None:
+    """Which of your own habits is moving that line, and which is not.
+
+    "Fitness is rising" is not actionable on its own. Every one of these is
+    already stored — how much of the training was easy, whether the hours are
+    growing, how often you showed up, what resting heart rate and HRV are doing,
+    whether the load is in the productive band, whether the weather is hiding any
+    of it — so the page can say which ones are doing the work instead of leaving
+    the athlete to guess.
+
+    Deterministic. No model call: see core.analysis.fitness_drivers.
+    """
+    sport = "run" if "run" in shown_sports() else (shown_sports() or ("run",))[0]
+    found = fitness_drivers(
+        data["activities"], data.get("wellness"), data.get("zones"),
+        data.get("strength"), as_of=today, sport=sport)
+    if data.get("weather"):
+        add_heat_driver(found, weather_effect(data["activities"],
+                                              data.get("weather") or {}, sport=sport))
+    if not (found["helping"] or found["holding_back"] or found["watch"]):
+        return
+
+    change = found["change_bpm"]
+    heading = {
+        "rising": "Why it is going down",
+        "falling": "Why it is going up",
+        "flat": "Why it is holding where it is",
+    }.get(found["direction"], "What your habits are doing")
+    note = {
+        "rising": f"Heart rate at your usual {sport} pace is "
+                  f"{abs(change or 0):.1f} bpm lower than the block before. "
+                  f"These are the reasons, from your own numbers.",
+        "falling": f"Heart rate at your usual {sport} pace is "
+                   f"{abs(change or 0):.1f} bpm higher than the block before. "
+                   f"These are the candidates, from your own numbers.",
+        "flat": "The line is level. These are the things holding it there.",
+    }.get(found["direction"],
+          "Not enough history yet to call a direction, but these are the habits "
+          "that will decide it.")
+    ui.section(heading, note)
+    with ui.frame():
+        ui.drivers(
+            [{**d, "tone": "good"} for d in found["helping"]]
+            + [{**d, "tone": "bad"} for d in found["holding_back"]]
+            + [{**d, "tone": "caution"} for d in found["watch"]])
 
 
 def trend_chart(wl: list[dict], today: date) -> None:

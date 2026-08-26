@@ -115,14 +115,13 @@ def overview_insight(data: dict, today: date) -> PageInsight:
             )
             tone = "error"
 
-    missing = [s for s in _sports(data)
-               if ef_data_status(acts, s)["needed_for_verdict"] > 0]
-    if missing:
+    thin = [s for s in _sports(data)
+            if ef_data_status(acts, s)["needed_for_verdict"] > 0]
+    if thin:
         bullets.append(
-            "Efficiency trends are not measurable yet for "
-            + ", ".join(missing)
-            + " — each needs three steady easy sessions before the trend "
-              "means anything."
+            "Not enough sessions yet to trend efficiency in "
+            + ", ".join(thin)
+            + " — three each is where a direction starts to mean something."
         )
 
     if not data["strength"]:
@@ -145,22 +144,17 @@ def fitness_insight(data: dict, today: date) -> PageInsight:
     bullets, tone = [], "info"
 
     if not usable:
+        # Every session counts towards this, so a thin verdict here means few
+        # sessions and nothing else. It used to list what had been "excluded",
+        # which told an athlete with four hard runs that they had no data — when
+        # what they had was four runs.
         for sport in _sports(data):
             st = ef_data_status(acts, sport)
-            if st["total"]:
+            if st["sessions"]:
                 bullets.append(f"**{sport.title()}:** {st['message']}")
-                if st["rejected_reasons"]:
-                    bullets.append(
-                        "  Excluded: "
-                        + "; ".join(f"{n}× {why}" for why, n in st["rejected_reasons"].items())
-                    )
-        headline = ("Not enough steady easy sessions yet to tell if you are "
-                    "getting fitter.")
-        if any("Z4-Z5" in b for b in bullets):
-            headline = ("Efficiency cannot be measured yet — the sessions are too "
-                        "hard, not too few.")
-            tone = "warning"
-        return PageInsight(headline, bullets or ["No sessions with heart rate yet."], tone)
+        headline = "Not enough sessions yet to tell if you are getting fitter."
+        return PageInsight(headline, bullets or ["No sessions with heart rate yet."],
+                           tone)
 
     for t in usable:
         direction = {"improving": "improving", "declining": "declining",
@@ -168,7 +162,7 @@ def fitness_insight(data: dict, today: date) -> PageInsight:
         line = f"**{t.sport.title()}** is {direction}"
         if t.change_pct is not None:
             line += f" ({t.change_pct:+.1f}% against the earlier baseline)"
-        line += f", from {t.n_sessions} steady sessions."
+        line += f", from {t.n_sessions} session{'s' if t.n_sessions != 1 else ''}."
         bullets.append(line)
     improving = [t for t in usable if t.verdict == "improving"]
     declining = [t for t in usable if t.verdict == "declining"]

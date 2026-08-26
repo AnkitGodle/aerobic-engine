@@ -457,3 +457,64 @@ def test_a_good_status_does_not_trip_the_deload_words():
     for good in ("PRODUCTIVE_3", "MAINTAINING_1", "PEAKING_2", "RECOVERY_1"):
         cleaned = analysis.clean_status(good)
         assert not any(w in cleaned.lower() for w in BAD_STATUS_WORDS), cleaned
+
+
+# --------------------------------------------------------------------------
+# Every session counts
+# --------------------------------------------------------------------------
+
+
+def _hard_runs(days: int = 4) -> list[dict]:
+    """Runs that the steady gate would reject: fast, spiky, short."""
+    out = []
+    for i in range(days):
+        day = TODAY - timedelta(days=i * 3)
+        out.append({
+            "activity_id": f"hard-{i}", "sport": "run", "garmin_type": "run",
+            "name": f"run {day}", "start_time": f"{day}T06:00:00",
+            "start_date": day.isoformat(), "duration_s": 1800,
+            "moving_s": 1800, "distance_m": 5000 + i * 100,
+            "avg_hr": 160 + i, "max_hr": 195, "avg_speed_mps": 2.8 + i * 0.05,
+            "ef": 1.7 + i * 0.02, "ef_metric": "speed_per_hr",
+            "is_steady": 0, "steady_reason": "85% of time in Z4-Z5",
+            "ingested_at": f"{TODAY}T12:00:00",
+        })
+    return out
+
+
+def test_a_trend_counts_hard_sessions_too():
+    """The athlete asked for this directly: four hard runs are four runs."""
+    acts = _hard_runs()
+    trend = analysis.ef_trend(acts, "run", as_of=TODAY)
+    assert trend.n_sessions == 4
+    assert analysis.hr_trend(acts, "run", as_of=TODAY)["n_sessions"] == 4
+    assert analysis.all_ef_trends(acts, as_of=TODAY)[0].n_sessions >= 0
+
+
+def test_the_steady_filter_is_still_available_to_a_caller():
+    acts = _hard_runs()
+    assert analysis.ef_trend(acts, "run", as_of=TODAY, steady_only=True).n_sessions == 0
+    assert analysis.ef_trend(acts, "run", as_of=TODAY).n_sessions == 4
+
+
+def test_the_status_never_says_a_session_was_excluded():
+    status = analysis.ef_data_status(_hard_runs(), "run")
+    assert status["sessions"] == 4
+    assert status["rejected_reasons"] == {}
+    text = status["message"].lower()
+    assert "exclud" not in text and "does not count" not in text
+    # It may say the sessions were hard — that is information, not a refusal.
+    assert "4 run sessions" in text
+
+
+def test_the_status_says_when_hard_sessions_make_the_line_noisy():
+    assert "jump" in analysis.ef_data_status(_hard_runs(), "run")["message"]
+
+
+def test_a_page_insight_gives_a_verdict_from_hard_sessions(healthy):
+    from core import insights
+    data = {"activities": _hard_runs(6), "wellness": [], "zones": [],
+            "strength": [], "scoped_to": ("run",)}
+    ins = insights.fitness_insight(data, TODAY)
+    assert "not enough" not in ins.headline.lower()
+    assert "excluded" not in " ".join(ins.bullets).lower()

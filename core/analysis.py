@@ -246,7 +246,7 @@ def ef_trend(
     recent_days: int = 21,
     baseline_days: int = 56,
     as_of: date | None = None,
-    steady_only: bool = True,
+    steady_only: bool = False,
 ) -> EFTrend:
     """Recent EF mean vs the preceding baseline, plus a least-squares slope.
 
@@ -301,10 +301,15 @@ def ef_trend(
     return trend
 
 
+# Every session, by default. The steady gate exists to keep interval work out of
+# a fitness trend, and it is still available to any caller that wants it — but a
+# trend the athlete cannot see because their sessions were hard is worse than a
+# noisy one they can. The athlete asked for this directly and they are right:
+# telling someone "0 of your 4 runs counted" is not analysis, it is a refusal.
 def all_ef_trends(
     activities: Iterable[dict[str, Any]],
     as_of: date | None = None,
-    steady_only: bool = True,
+    steady_only: bool = False,
 ) -> list[EFTrend]:
     acts = list(activities)
     return [
@@ -382,7 +387,7 @@ def hr_trend(
     recent_days: int = 28,
     baseline_days: int = 56,
     as_of: date | None = None,
-    steady_only: bool = True,
+    steady_only: bool = False,
 ) -> dict[str, Any]:
     """Is the heart rate you train at coming down for the same pace?
 
@@ -432,6 +437,238 @@ def hr_trend(
     else:
         out["verdict"] = "flat"
     return out
+
+
+# What an easy base block should look like, and the bands each driver is judged
+# against. All of them are the same numbers the planner and the Rules page use;
+# none is invented here.
+EASY_SHARE_TARGET = 70.0
+STRENGTH_TARGET_PER_WEEK = 2.0
+CONSISTENCY_TARGET = 0.5          # active days as a share of the window
+
+
+def fitness_drivers(
+    activities: Sequence[Mapping[str, Any]],
+    wellness: Sequence[Mapping[str, Any]] | None = None,
+    zone_rows: Sequence[Mapping[str, Any]] | None = None,
+    strength_rows: Sequence[Mapping[str, Any]] | None = None,
+    as_of: date | None = None,
+    sport: str = "run",
+    days: int = 28,
+) -> dict[str, Any]:
+    """Why the trend is going the way it is, from the numbers rather than a model.
+
+    "Fitness is rising" on its own tells an athlete nothing they can act on. What
+    they need is which of their own habits is producing it, and which is working
+    against it — and every one of these is already stored: how much of the
+    training was easy, whether the hours are growing, how often they showed up,
+    what resting heart rate and HRV are doing, whether the load is in the
+    productive band, and whether the weather is masking any of it.
+
+    Each driver comes back as helping, holding back, or worth watching, with the
+    number behind it. Nothing is weighted or scored into a single index: a made-up
+    composite would look authoritative and mean nothing, and the athlete can read
+    five plain lines perfectly well.
+    """
+    as_of = as_of or date.today()
+    trend = hr_trend(activities, sport, as_of=as_of, steady_only=False)
+    out: dict[str, Any] = {
+        "sport": sport,
+        "direction": {"improving": "rising", "worsening": "falling",
+                      "flat": "flat"}.get(trend["verdict"], "unknown"),
+        "change_bpm": trend["normalised_change_bpm"],
+        "helping": [], "holding_back": [], "watch": [],
+    }
+
+    def add(where: str, name: str, value: str, detail: str) -> None:
+        out[where].append({"name": name, "value": value, "detail": detail})
+
+    # 1. How much of it was easy. The single biggest lever in a base block, and
+    #    the one most often got wrong in the same direction.
+    if zone_rows:
+        split = polarisation(zone_rows, since=as_of - timedelta(days=days))
+        easy = split.get("easy")
+        if easy is not None and split.get("samples", 1):
+            if easy >= EASY_SHARE_TARGET:
+                add("helping", "Easy training", f"{easy:.0f}% easy",
+                    f"At or above the {EASY_SHARE_TARGET:.0f}% a base block wants, "
+                    f"so the aerobic work is going in without the fatigue.")
+            else:
+                add("holding_back", "Too much intensity", f"{easy:.0f}% easy",
+                    f"A base block wants {EASY_SHARE_TARGET:.0f}%+. Hard sessions "
+                    f"cost recovery you could be spending on volume.")
+
+    # 2. Volume, this window against the one before it.
+    now_min = _minutes_between(activities, as_of - timedelta(days=days - 1), as_of)
+    before_min = _minutes_between(activities, as_of - timedelta(days=days * 2 - 1),
+                                  as_of - timedelta(days=days))
+    if now_min or before_min:
+        if before_min > 0:
+            change = (now_min - before_min) / before_min * 100
+            words = f"{now_min / 60:.1f}h vs {before_min / 60:.1f}h"
+            if change >= 8:
+                add("helping", "Growing volume", words,
+                    f"{change:+.0f}% on the previous {days} days. More aerobic "
+                    f"hours is the most reliable way this number moves.")
+            elif change <= -12:
+                add("holding_back", "Volume dropped", words,
+                    f"{change:+.0f}% on the previous {days} days. Fitness follows "
+                    f"hours, and these have gone down.")
+            else:
+                add("helping", "Steady volume", words,
+                    "Held within a tenth of the previous block, which is what "
+                    "lets adaptation accumulate.")
+        elif now_min:
+            add("helping", "Training started", f"{now_min / 60:.1f}h",
+                f"Nothing in the {days} days before this, so there is no "
+                f"comparison yet — only a baseline being built.")
+
+    # 3. Showing up. Endurance is mostly an attendance problem.
+    all_days = [_as_date(a["start_date"]) for a in activities if a.get("start_date")]
+    active = {d for d in all_days
+              if d and as_of - timedelta(days=days - 1) <= d <= as_of}
+    # Counted against the days there was a record to show up in, not a flat 28.
+    # A watch eight days old would otherwise be told it missed twenty days.
+    first = min((d for d in all_days if d), default=None)
+    window = days
+    if first and first > as_of - timedelta(days=days - 1):
+        window = max(1, (as_of - first).days + 1)
+    share = len(active) / window if window else 0
+    if active:
+        if share >= CONSISTENCY_TARGET:
+            add("helping", "Consistency", f"{len(active)}/{window} days",
+                f"{share * 100:.0f}% of days had something logged. Regularity "
+                f"beats big weeks with gaps in them.")
+        else:
+            add("holding_back", "Gaps", f"{len(active)}/{window} days",
+                f"Only {share * 100:.0f}% of days had a session. The gaps cost "
+                f"more than the sessions gain.")
+
+    # 4 and 5. What the body says about all of it.
+    rows = list(wellness or [])
+    if rows:
+        rhr = baseline_trend(rows, "resting_hr", as_of=as_of, lower_is_better=True)
+        if rhr["verdict"] == "improving":
+            add("helping", "Resting heart rate falling",
+                f"{rhr['recent']:.0f} bpm",
+                "Down against your own 28-day baseline, which is the clearest "
+                "sign the engine is adapting.")
+        elif rhr["verdict"] == "worsening":
+            add("watch", "Resting heart rate rising", f"{rhr['recent']:.0f} bpm",
+                "Up against your baseline. Usually load, sleep or something "
+                "coming on rather than lost fitness.")
+        hrv = baseline_trend(rows, "hrv_last_night", as_of=as_of,
+                            lower_is_better=False)
+        if hrv["verdict"] == "improving":
+            add("helping", "HRV rising", f"{hrv['recent']:.0f} ms",
+                "Overnight HRV above your baseline: the training is being "
+                "absorbed rather than survived.")
+        elif hrv["verdict"] == "worsening":
+            add("watch", "HRV falling", f"{hrv['recent']:.0f} ms",
+                "Below your baseline. Worth an easy day before a hard one.")
+        sleep = rolling(rows, "sleep_seconds", 14, as_of)
+        if sleep:
+            hours = sleep / 3600
+            if hours >= 7:
+                add("helping", "Sleep", f"{hours:.1f}h",
+                    "Averaging seven hours or more over two weeks, which is "
+                    "where adaptation actually happens.")
+            elif hours < 6.5:
+                add("holding_back", "Short sleep", f"{hours:.1f}h",
+                    "Under six and a half hours on average. The training is "
+                    "going in; the recovery it needs is not.")
+
+    # 6. Load, against the athlete's own four weeks.
+    ratio = acwr_from_activities(activities, as_of=as_of)
+    if ratio is not None:
+        if ACWR_LOW <= ratio <= ACWR_HIGH:
+            add("helping", "Load in the productive band", f"{ratio:.2f}",
+                f"Between {ACWR_LOW} and {ACWR_HIGH}: enough stimulus to adapt "
+                f"to, not more than you are absorbing.")
+        elif ratio < ACWR_LOW:
+            add("watch", "Load is light", f"{ratio:.2f}",
+                "This week is well under your own four-week average. Room to "
+                "add, if recovery is good.")
+        else:
+            add("watch", "Load is running hot", f"{ratio:.2f}",
+                f"Above {ACWR_HIGH}. A rise here is where injuries come from, "
+                f"not where fitness does.")
+
+    # 7. Legs. Not fitness, but the reason run volume survives.
+    legs = _strength_sessions(activities, strength_rows, as_of, days)
+    per_week = legs / (days / 7) if days else 0
+    if legs:
+        if per_week >= STRENGTH_TARGET_PER_WEEK - 0.25:
+            add("helping", "Leg work", f"{per_week:.1f}/week",
+                "At the twice-a-week the plan asks for. Tendons are what let "
+                "run volume keep climbing.")
+        else:
+            add("holding_back", "Leg work light", f"{per_week:.1f}/week",
+                "Under twice a week. It does not raise this number directly; it "
+                "protects the running that does.")
+    else:
+        add("holding_back", "No leg work", "0/week",
+            "Nothing logged in this window. Two short sessions a week is what "
+            "protects the run volume this all depends on.")
+
+    return out
+
+
+def add_heat_driver(drivers: dict[str, Any], effect: Mapping[str, Any]) -> None:
+    """Fold the weather reading into an existing set of drivers.
+
+    Separate because it needs the weather table, which `fitness_drivers` is
+    deliberately not given: everything else here comes from data that exists for
+    every athlete, and conditions are only stored for sessions the sync could
+    look up. It goes last on the page because it changes how to read every line
+    above it — a hot block hides real fitness rather than preventing it.
+    """
+    hot_share = effect.get("hot_share")
+    if not hot_share:
+        return
+    per_degree = effect.get("bpm_per_deg")
+    detail = (f"{hot_share:.0f}% of these sessions were in air too humid to cool "
+              f"in")
+    if per_degree:
+        detail += (f", and each degree of dew point costs about "
+                   f"{per_degree:+.1f} bpm at the same pace")
+    detail += (". Heart rate at a given pace reads high in this weather, so the "
+               "trend above is understating you rather than the other way "
+               "round.")
+    drivers.setdefault("watch", []).append(
+        {"name": "Heat and humidity", "value": f"{hot_share:.0f}% muggy",
+         "detail": detail})
+
+
+def _minutes_between(activities: Sequence[Mapping[str, Any]], start: date,
+                     end: date) -> float:
+    """Total endurance minutes in a window, inclusive."""
+    total = 0.0
+    for a in activities:
+        if not a.get("start_date") or a.get("sport") not in ENDURANCE_SPORTS:
+            continue
+        day = _as_date(a["start_date"])
+        if day and start <= day <= end:
+            total += (a.get("duration_s") or 0) / 60.0
+    return round(total, 1)
+
+
+def _strength_sessions(activities: Sequence[Mapping[str, Any]],
+                       strength_rows: Sequence[Mapping[str, Any]] | None,
+                       as_of: date, days: int) -> int:
+    """Days with leg work, from the watch's own sessions or the app's log."""
+    start = as_of - timedelta(days=days - 1)
+    seen: set[date] = set()
+    for a in activities:
+        if a.get("sport") == "strength" and a.get("start_date"):
+            day = _as_date(a["start_date"])
+            if day and start <= day <= as_of:
+                seen.add(day)
+    for row in strength_rows or []:
+        day = _as_date(row.get("day"))
+        if day and start <= day <= as_of:
+            seen.add(day)
+    return len(seen)
 
 
 def rolling(
@@ -1186,41 +1423,45 @@ EF_GOOD_SAMPLE = 6
 def ef_data_status(
     activities: Sequence[dict[str, Any]], sport: str
 ) -> dict[str, Any]:
-    """What the athlete needs to do before the EF trend for `sport` means anything."""
-    steady = ef_points(activities, sport, steady_only=True)
-    considered = [a for a in activities if a.get("sport") == sport]
-    rejected: dict[str, int] = {}
-    for a in considered:
-        if a.get("is_steady"):
-            continue
-        reason = a.get("steady_reason") or "unknown"
-        rejected[reason] = rejected.get(reason, 0) + 1
+    """How much there is to judge the trend on, and how noisy it will be.
 
-    n = len(steady)
-    if n >= EF_GOOD_SAMPLE:
-        message = f"{n} steady sessions — the trend is meaningful."
-    elif n >= EF_MIN_FOR_VERDICT:
-        message = (
-            f"{n} steady sessions — enough for a direction, "
-            f"{EF_GOOD_SAMPLE - n} more for a trend you can lean on."
-        )
-    elif n >= EF_MIN_FOR_CHART:
-        message = (
-            f"{n} steady sessions — {EF_MIN_FOR_VERDICT - n} more before this "
-            f"reads as improving or declining."
-        )
+    This used to report how many sessions had been *excluded* for being hard, and
+    tell the athlete their four runs did not count. That is a refusal dressed up
+    as analysis. Every session counts now; hard ones make the line jumpier, which
+    is worth saying once and is not the same as having no data.
+    """
+    every = ef_points(activities, sport)
+    steady = [p for p in every if p.is_steady]
+    n, hard = len(every), len(every) - len(steady)
+
+    if n == 0:
+        message = f"No {sport} sessions with heart rate yet."
+    elif n < EF_MIN_FOR_CHART:
+        message = (f"{n} {sport} session{'s' if n != 1 else ''}. Two draws a "
+                   f"line, {EF_MIN_FOR_VERDICT} gives it a direction.")
+    elif n < EF_MIN_FOR_VERDICT:
+        message = (f"{n} {sport} sessions — {EF_MIN_FOR_VERDICT - n} more before "
+                   f"this reads as improving or declining.")
+    elif n < EF_GOOD_SAMPLE:
+        message = (f"{n} {sport} sessions — enough for a direction, "
+                   f"{EF_GOOD_SAMPLE - n} more for one you can lean on.")
     else:
-        message = (
-            f"{n} steady {sport} session{'s' if n != 1 else ''}. "
-            f"Needs {EF_MIN_FOR_VERDICT} to show a direction — "
-            f"aim for a 30-60 min conversational effort with heart rate."
-        )
+        message = f"{n} {sport} sessions — the trend is meaningful."
+
+    if hard and n:
+        share = hard / n * 100
+        message += (f" {hard} of them ran hard or uneven ({share:.0f}%), which "
+                    f"makes the line jump about; easy sessions are what make it "
+                    f"smooth.")
+
     return {
         "sport": sport,
-        "steady": n,
-        "total": len(considered),
+        "sessions": n,
+        "steady": len(steady),
+        "hard": hard,
+        "total": n,
         "needed_for_verdict": max(0, EF_MIN_FOR_VERDICT - n),
-        "rejected_reasons": dict(sorted(rejected.items(), key=lambda kv: -kv[1])),
+        "rejected_reasons": {},
         "message": message,
     }
 
