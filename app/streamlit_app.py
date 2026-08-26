@@ -55,10 +55,12 @@ from core.analysis import (  # noqa: E402
     DEW_POINT_HARD_C,
     ZONE_LABELS,
     aerobic_ceiling_options,
+    clean_status,
     consistency,
     km_splits,
     load_ramp,
     reference_speed,
+    status_meaning,
     ramp_verdict,
     streak,
     weather_effect,
@@ -628,6 +630,21 @@ def pace_str(sport: str, dist_m: float | None, dur_s: float | None) -> str:
         return f"{int(per // 60)}:{int(per % 60):02d}/100m"
     per = dur_s / (dist_m / 1000.0)
     return f"{int(per // 60)}:{int(per % 60):02d}/km"
+
+
+def status_note(status: str | None) -> str:
+    """Garmin's training status with its meaning, for a one-line note.
+
+    "PRODUCTIVE_3" was reaching the page twice — once as a raw enum, which is
+    what the report was about, and once as a word with no explanation. Garmin's
+    own vocabulary is not obvious: "Unproductive" sounds like a judgement on the
+    athlete and means the training is going in without fitness coming out.
+    """
+    label = clean_status(status)
+    if not label:
+        return "morning reading"
+    meaning = status_meaning(status)
+    return f"{label} — {meaning}" if meaning else label
 
 
 def insight_banner(page: str, data: dict, today: date) -> None:
@@ -1218,7 +1235,11 @@ def page_today(data: dict, today: date) -> None:
         {"label": "Readiness",
          "value": f"{sig.training_readiness:.0f}"
                   if sig and sig.training_readiness else "—",
-         "note": (sig.training_status or "morning reading") if sig else "no data",
+         # The status and what it is telling you. `sig.training_status` is
+         # already cleaned of Garmin's enum suffix; the gloss is what makes
+         # "Productive" mean something to a reader who has not memorised
+         # Garmin's vocabulary.
+         "note": (status_note(sig.training_status) if sig else "no data"),
          "tone": "bad" if sig and sig.training_readiness
                  and sig.training_readiness < 35 else "neutral"},
         {"label": "Resting HR",
@@ -4083,6 +4104,7 @@ def log_data(data: dict) -> None:
             keep = ("day", "resting_hr", "hrv_last_night", "training_readiness",
                     "vo2max_run", "training_status")
             table([{**{k: r.get(k) for k in keep},
+                    "training_status": clean_status(r.get("training_status")),
                     "sleep_hours": (round(r["sleep_seconds"] / 3600, 1)
                                     if r.get("sleep_seconds") else None)}
                    for r in data["wellness"]][::-1])

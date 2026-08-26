@@ -447,19 +447,60 @@ def rolling(
     return fmean(vals) if vals else None
 
 
-def clean_status(value: object) -> str | None:
-    """A Garmin status string, or None when it is one of its placeholders.
+# What Garmin's training-status phrases mean, in the athlete's words. The keys
+# are the phrase names with their numeric suffix removed: Garmin sends
+# PRODUCTIVE_3, PRODUCTIVE_2 and so on, where the number selects which wording
+# its own app shows and carries no extra meaning worth keeping.
+STATUS_MEANING = {
+    "productive": "fitness is rising",
+    "maintaining": "holding the fitness you have",
+    "recovery": "a light stretch, letting adaptation happen",
+    "unproductive": "training is going in, fitness is not coming out",
+    "peaking": "race-ready",
+    "overreaching": "load is ahead of what your recovery is supporting",
+    "strained": "hard recent load against low recovery",
+    "high_strain": "hard recent load against low recovery",
+    "detraining": "too little training to hold your fitness",
+}
 
-    Belt and braces with the parser: 47 wellness rows were already stored with
-    "NO_STATUS_2" in them before that was recognised as a sentinel, and the
-    dashboard was showing it as the athlete's training status.
-    """
-    text = str(value or "").strip()
-    low = text.lower()
-    if not text or low in ("none", "unknown", "not_set") or low.startswith(
-            ("no_status", "unknown")):
+# Not statuses at all: placeholders Garmin sends while it works one out.
+STATUS_PLACEHOLDERS = ("no_status", "unknown", "none", "not_set", "onboarding",
+                       "undefined", "unrecognized")
+
+
+def status_key(value: object) -> str | None:
+    """The status as a lookup key — lowercase, no trailing variant number."""
+    text = str(value or "").strip().lower().replace(" ", "_")
+    if not text or any(text.startswith(p) for p in STATUS_PLACEHOLDERS):
         return None
-    return text
+    # PRODUCTIVE_3 -> productive. Only a trailing number goes; HIGH_STRAIN keeps
+    # the word that makes it a different status.
+    parts = text.split("_")
+    while len(parts) > 1 and parts[-1].isdigit():
+        parts.pop()
+    return "_".join(parts) or None
+
+
+def clean_status(value: object) -> str | None:
+    """A Garmin status in plain words, or None when it is a placeholder.
+
+    Two jobs, both learned the hard way. 47 wellness rows were stored with
+    "NO_STATUS_2" in them before that was recognised as a sentinel, and the
+    dashboard showed it as the athlete's training status. Then a real status
+    arrived and did the same thing in a different way: "PRODUCTIVE_3" is an enum
+    name, not something to put on a page, and the 3 does not mean a level.
+    """
+    key = status_key(value)
+    if not key:
+        return None
+    return key.replace("_", " ").title()
+
+
+def status_meaning(value: object) -> str | None:
+    """What that status is telling the athlete, or None if it is not one of the
+    ones Garmin documents."""
+    key = status_key(value)
+    return STATUS_MEANING.get(key or "")
 
 
 def recovery_signals(

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+import pytest
+
 from conftest import TODAY
+from core import analysis
 
 from core.analysis import (
     acwr_from_activities,
@@ -397,3 +400,60 @@ def test_no_module_is_shadowed_by_a_function_of_the_same_name():
                                      ast.ClassDef))}
         clash = sorted(imported & defined)
         assert not clash, f"{path.name} defines {clash}, which it also imports"
+
+
+# --------------------------------------------------------------------------
+# Garmin's status vocabulary, and keeping it off the page
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw,shown", [
+    ("PRODUCTIVE_3", "Productive"),
+    ("PRODUCTIVE_2", "Productive"),
+    ("MAINTAINING_1", "Maintaining"),
+    ("HIGH_STRAIN_2", "High Strain"),
+    ("OVERREACHING_1", "Overreaching"),
+    ("Productive", "Productive"),
+    ("overreaching", "Overreaching"),
+    ("PEAKING", "Peaking"),
+])
+def test_a_status_reaches_the_page_as_words(raw, shown):
+    """The number in PRODUCTIVE_3 picks Garmin's wording, not a level."""
+    assert analysis.clean_status(raw) == shown
+
+
+@pytest.mark.parametrize("raw", [
+    "NO_STATUS_1", "NO_STATUS_2", "no_status", "ONBOARDING_1", "UNKNOWN",
+    "none", "NOT_SET", "", None, "   ",
+])
+def test_a_placeholder_is_not_a_status(raw):
+    assert analysis.clean_status(raw) is None
+    assert analysis.status_meaning(raw) is None
+
+
+def test_every_status_garmin_documents_has_a_meaning():
+    for key in analysis.STATUS_MEANING:
+        assert analysis.status_meaning(f"{key.upper()}_2")
+        assert analysis.status_meaning(key)
+
+
+def test_an_unknown_status_still_shows_but_says_nothing_it_cannot():
+    """A status Garmin adds later must not vanish, and must not be glossed."""
+    assert analysis.clean_status("SOMETHING_NEW_4") == "Something New"
+    assert analysis.status_meaning("SOMETHING_NEW_4") is None
+
+
+def test_the_deload_trigger_still_reads_a_cleaned_status():
+    """The guardrail matches words inside the status, so tidying it must not
+    stop a bad status from forcing an easy week."""
+    from core.planner import BAD_STATUS_WORDS
+    for bad in ("OVERREACHING_1", "UNPRODUCTIVE_2", "DETRAINING_1", "STRAINED_3"):
+        cleaned = analysis.clean_status(bad)
+        assert any(w in cleaned.lower() for w in BAD_STATUS_WORDS), cleaned
+
+
+def test_a_good_status_does_not_trip_the_deload_words():
+    from core.planner import BAD_STATUS_WORDS
+    for good in ("PRODUCTIVE_3", "MAINTAINING_1", "PEAKING_2", "RECOVERY_1"):
+        cleaned = analysis.clean_status(good)
+        assert not any(w in cleaned.lower() for w in BAD_STATUS_WORDS), cleaned
