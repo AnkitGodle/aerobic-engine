@@ -58,6 +58,7 @@ from core.analysis import (  # noqa: E402
     consistency,
     km_splits,
     load_ramp,
+    reference_speed,
     ramp_verdict,
     streak,
     weather_effect,
@@ -1699,11 +1700,35 @@ def efficiency_block(acts: list[dict], today: date,
     speed per beat elsewhere — so the raw values cannot share an axis. Expressing
     each as a percentage change from its own earliest baseline can.
     """
+    # Which sessions count. Steady-only is the default and the reason the trend
+    # means anything: a session at 85% of its time in Z4-Z5 has a low efficiency
+    # because it was an interval session, and mixing it in makes the line track
+    # how hard the week was rather than how fit the athlete is. But "show me
+    # everything" is a fair thing to ask, so it is a switch rather than a
+    # decision made on the reader's behalf.
+    _, ctrl = st.columns([2, 1.6], vertical_alignment="center")
+    with ctrl:
+        scope = st.segmented_control(
+            "Sessions", ["Steady only", "All"], default="Steady only",
+            key="ef_scope", label_visibility="collapsed",
+            help="Steady only keeps the even, aerobic sessions, so the line "
+                 "tracks fitness. All includes intervals and races, which pull "
+                 "it down on hard weeks whether or not anything has changed.")
+    steady_only = (scope or "Steady only").startswith("Steady")
+
     drawn = False
+    left_out: list[str] = []
     fig = go.Figure()
     for sport in shown_sports():
-        pts = [p for p in ef_points(acts, sport) if p.is_steady] or \
-              ef_points(acts, sport)
+        every = ef_points(acts, sport)
+        if steady_only:
+            pts = [p for p in every if p.is_steady] or every
+            for p in every:
+                if not p.is_steady and pts is not every and p.steady_reason:
+                    left_out.append(f"{day_label(p.date.isoformat())} "
+                                    f"{p.sport} — {p.steady_reason}")
+        else:
+            pts = every
         if len(pts) < 2:
             continue
         base = pts[0].ef
@@ -1732,6 +1757,20 @@ def efficiency_block(acts: list[dict], today: date,
     fig.add_hline(y=0, line_dash="dot", line_color="rgba(140,158,176,.5)")
     fig.update_layout(yaxis_title="% vs first session")
     ui.chart(fig, 200, date_axis=True)
+    if steady_only:
+        if left_out:
+            st.caption("Left out as not steady: " + " · ".join(left_out[:4])
+                       + (f" (+{len(left_out) - 4} more)" if len(left_out) > 4
+                          else "")
+                       + ". Switch to All to include them.")
+        else:
+            st.caption("Every session in this sport is counted — nothing here "
+                       "was ragged enough to leave out. A sport with no steady "
+                       "session at all falls back to showing all of them.")
+    else:
+        st.caption("Every session, intervals and races included. The line now "
+                   "moves with how hard you trained as well as how fit you are, "
+                   "so read a dip on a hard week as effort rather than a loss.")
     chart_ai_note("efficiency", notes)
     statuses = [ef_data_status(acts, s) for s in shown_sports()]
     short = [s for s in statuses if s["total"] and s["needed_for_verdict"]]
@@ -2320,10 +2359,20 @@ def training_hr_block(acts: list[dict], today: date,
         view = st.segmented_control(
             "View", ["Usual pace", "Raw"], default="Usual pace",
             key="hr_view", label_visibility="collapsed",
-            help="Usual pace normalises each session to your median pace, so "
-                 "a fast day and a slow day are comparable.")
+            help="Usual pace: what each session's heart rate would have been at "
+                 "your normal pace, so sessions of different speeds compare. "
+                 "Raw: the average heart rate the watch actually recorded.")
     normalised = (view or "Usual pace").startswith("Usual")
     field = "hr_at_reference" if normalised else "avg_hr"
+
+    # What "your usual pace" actually is, per sport, in the units you think in.
+    # The toggle had a tooltip and nothing else, and a tooltip is a poor place to
+    # keep the one sentence that says what the chart is measuring.
+    yardsticks = []
+    for sport in shown_sports():
+        speed = reference_speed(acts, sport)
+        if speed:
+            yardsticks.append(f"{sport} {pace_str(sport, speed * 3600, 3600)}")
 
     fig = go.Figure()
     # `trend_notes`, not `notes`: the old name shadowed the stored-notes argument,
@@ -2445,8 +2494,33 @@ def training_hr_block(acts: list[dict], today: date,
         return
     fig.update_layout(yaxis_title="bpm")
     ui.chart(fig, 200, date_axis=True)
+
+    # Which view you are looking at, said in full. Both are heart rate in bpm,
+    # which is exactly why the difference needs stating: the same session sits at
+    # two different heights depending on the toggle.
+    if normalised:
+        said = ("**Usual pace** converts every session to the heart rate it "
+                "would have taken at your own middle pace")
+        if yardsticks:
+            said += f" — {', '.join(yardsticks)}"
+        said += (". A session you ran faster than that is drawn lower than its "
+                 "real average and a slower one higher, so what is left is how "
+                 "much each beat is buying you. **This is the view where a line "
+                 "going down means you are getting fitter.**")
+    else:
+        said = ("**Raw** is the average heart rate the watch recorded, with "
+                "nothing taken out. A hard session sits high because it was "
+                "hard, so this says what you did, not how fit you are — **a "
+                "line going down here only means you have been training "
+                "easier.** Switch to Usual pace to compare sessions with each "
+                "other.")
+    st.caption(said)
+
     chart_ai_note("training_hr", notes)
-    if trend_notes:
+    # Only under the view it describes. This number is always the change at the
+    # same pace, so printing it beneath the raw chart put "going down is
+    # progress" under a line where going down means nothing of the kind.
+    if trend_notes and normalised:
         st.caption("Change at the same pace: " + " · ".join(trend_notes)
                    + " (going down is progress).")
     elif normalised:
