@@ -1717,16 +1717,24 @@ def efficiency_block(acts: list[dict], today: date,
     steady_only = (scope or "Steady only").startswith("Steady")
 
     drawn = False
-    left_out: list[str] = []
+    left_out: dict[str, list[str]] = {}
+    fell_back: set[str] = set()
     fig = go.Figure()
     for sport in shown_sports():
         every = ef_points(acts, sport)
         if steady_only:
-            pts = [p for p in every if p.is_steady] or every
+            steady = [p for p in every if p.is_steady]
+            pts = steady or every
+            if not steady and every:
+                # No steady session in this sport, so every one is plotted. Worth
+                # saying out loud: the footnote used to read "run: 0/3 steady"
+                # under a line drawn from all four runs, which says the opposite
+                # of what is on screen.
+                fell_back.add(sport)
             for p in every:
-                if not p.is_steady and pts is not every and p.steady_reason:
-                    left_out.append(f"{day_label(p.date.isoformat())} "
-                                    f"{p.sport} — {p.steady_reason}")
+                if not p.is_steady and steady and p.steady_reason:
+                    left_out.setdefault(sport, []).append(
+                        f"{day_label(p.date.isoformat())} — {p.steady_reason}")
         else:
             pts = every
         if len(pts) < 2:
@@ -1757,25 +1765,49 @@ def efficiency_block(acts: list[dict], today: date,
     fig.add_hline(y=0, line_dash="dot", line_color="rgba(140,158,176,.5)")
     fig.update_layout(yaxis_title="% vs first session")
     ui.chart(fig, 200, date_axis=True)
-    if steady_only:
-        if left_out:
-            st.caption("Left out as not steady: " + " · ".join(left_out[:4])
-                       + (f" (+{len(left_out) - 4} more)" if len(left_out) > 4
-                          else "")
-                       + ". Switch to All to include them.")
-        else:
-            st.caption("Every session in this sport is counted — nothing here "
-                       "was ragged enough to leave out. A sport with no steady "
-                       "session at all falls back to showing all of them.")
-    else:
+
+    # One sentence per sport, saying what is actually plotted. The old footnote
+    # was "run: 0/3 steady", which a bug report reasonably read as "my runs are
+    # being ignored" — when in fact all four were on the chart, because a sport
+    # with no steady session falls back to showing everything.
+    statuses = {sp: ef_data_status(acts, sp) for sp in shown_sports()}
+    lines = []
+    for sport, status in statuses.items():
+        if not status["total"]:
+            continue
+        if not steady_only:
+            continue
+        if sport in fell_back:
+            why = " · ".join(f"{n} {reason}" for reason, n
+                             in list(status["rejected_reasons"].items())[:3])
+            lines.append(
+                f"**{sport}** — no steady session yet, so all "
+                f"{status['total']} are plotted{f' ({why})' if why else ''}. "
+                f"Easy, even sessions are what make this line mean fitness "
+                f"rather than effort.")
+        elif left_out.get(sport):
+            dropped = left_out[sport]
+            more = f" (+{len(dropped) - 3} more)" if len(dropped) > 3 else ""
+            need = status["needed_for_verdict"]
+            lines.append(
+                f"**{sport}** — {status['steady']} of {status['total']} "
+                f"counted. Left out: " + " · ".join(dropped[:3]) + more
+                + (f". {need} more steady session"
+                   f"{'s' if need != 1 else ''} for a direction." if need
+                   else "."))
+        elif status["needed_for_verdict"]:
+            lines.append(f"**{sport}** — {status['steady']} steady, "
+                         f"{status['needed_for_verdict']} more for a direction.")
+    if not steady_only:
         st.caption("Every session, intervals and races included. The line now "
                    "moves with how hard you trained as well as how fit you are, "
                    "so read a dip on a hard week as effort rather than a loss.")
+    elif lines:
+        st.caption("  \n".join(lines) + "  \nSwitch to All to plot everything.")
+    else:
+        st.caption("Every session counted — nothing here was ragged enough to "
+                   "leave out.")
     chart_ai_note("efficiency", notes)
-    statuses = [ef_data_status(acts, s) for s in shown_sports()]
-    short = [s for s in statuses if s["total"] and s["needed_for_verdict"]]
-    if short:
-        st.caption(" · ".join(f"{s['sport']}: {s['steady']}/3 steady" for s in short))
 
 
 def cadence_block(acts: list[dict], today: date) -> None:

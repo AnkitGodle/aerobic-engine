@@ -368,12 +368,17 @@ def _chart_inputs(data: dict[str, Any], today: date) -> list[tuple[str, str, Any
                                                                 since=since)
                                           for sp in ENDURANCE_SPORTS}}))
 
-    ef = {sp: [{"date": str(p.date), "ef": round(p.ef, 3), "steady": p.is_steady}
+    ef = {sp: [{"date": str(p.date), "ef": round(p.ef, 3), "steady": p.is_steady,
+                "why_not_steady": p.steady_reason if not p.is_steady else ""}
                for p in ef_points(acts, sp)] for sp in ENDURANCE_SPORTS}
     if any(ef.values()):
         out.append(("chart:efficiency",
                     "Efficiency (speed or watts per heartbeat) as % change from "
-                    "each sport's first session", ef))
+                    "each sport's first session. steady=false means the session "
+                    "was intervals, a race or too short, and its efficiency is "
+                    "low because it was hard rather than because fitness fell — "
+                    "never read a run of those as a decline; say what they were",
+                    ef))
 
     weeks = week_summaries(acts, weeks=12, as_of=today,
                            strength_rows=data["strength"])
