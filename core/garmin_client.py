@@ -212,6 +212,8 @@ class GarminClient:
         email: str | None = None,
         password: str | None = None,
         tokenstore: str | None = None,
+        load_tokens: Callable[[], str | None] | None = None,
+        save_tokens: Callable[[str], None] | None = None,
         prompt_mfa: Callable[[], str] | None = None,
         guard: GarminGuard | None = None,
         allow_password_login: bool = True,
@@ -226,7 +228,21 @@ class GarminClient:
         # A token blob (from scripts/export_tokens.py) can be supplied directly
         # instead of a path — that is how a hosted deployment authenticates
         # without ever performing an SSO login from a datacenter IP.
-        self.tokenstore = tokenstore or os.getenv("GARMINTOKENS") or ".garmin_tokens"
+        # A blob kept from the last successful session wins over the one in the
+        # secrets, because Garmin rotates these: a hosted app that resumes the
+        # same bootstrap blob after every restart is using a token that goes
+        # stale in days, which is precisely what kept happening — "the sync
+        # stopped working again" every few days, reading like a bad password.
+        self.load_tokens = load_tokens
+        self.save_tokens = save_tokens
+        stored = None
+        if load_tokens is not None:
+            try:
+                stored = load_tokens()
+            except Exception as exc:  # noqa: BLE001 - fall back to the secret
+                log.info("Could not read the stored Garmin session: %s", exc)
+        self.tokenstore = (tokenstore or stored or os.getenv("GARMINTOKENS")
+                           or ".garmin_tokens")
         if len(self.tokenstore) <= 512:
             self.tokenstore = str(Path(self.tokenstore).expanduser())
         self.prompt_mfa = prompt_mfa
@@ -277,6 +293,21 @@ class GarminClient:
                 self.guard.record_failure(status_of(inner), retry_after_of(inner))
                 raise
         self.guard.record_success()
+
+        # Keep the session that just worked, refreshed tokens and all. Without
+        # this the host is permanently re-resuming whatever was pasted into its
+        # secrets weeks ago; with it, every successful sync extends the life of
+        # the session and a manual re-export is needed only if the app is left
+        # unused long enough for the refresh token itself to expire.
+        if self.save_tokens is not None:
+            try:
+                blob = api.client.dumps()
+                if blob and len(blob) > 512 and blob != self.tokenstore:
+                    self.save_tokens(blob)
+                    log.info("Stored the refreshed Garmin session (%d chars)",
+                             len(blob))
+            except Exception as exc:  # noqa: BLE001 - never fail a sync for this
+                log.info("Could not store the refreshed Garmin session: %s", exc)
 
         self.api = api
         return api

@@ -434,6 +434,11 @@ def _chart_inputs(data: dict[str, Any], today: date) -> list[tuple[str, str, Any
 # `workout_pushed_<sport>_<date>` for a run or a ride, keyed by the day they were
 # for.
 PUSHED_PREFIX = "workout_pushed_"
+
+# Where the working Garmin session is kept between runs. Bootstrapped from the
+# GARMINTOKENS secret, then replaced by whatever Garmin last refreshed.
+TOKEN_STATE_KEY = "garmin_session_blob"
+TOKEN_SAVED_KEY = "garmin_session_saved_at"
 # How long a pushed workout may sit on the watch unused before it is cleared. One
 # day: the plan moves on, and yesterday's session is not what you want offered
 # when you press START.
@@ -633,6 +638,15 @@ def _sync_locked(
         prompt_mfa=prompt_mfa,
         guard=guard or GarminGuard(store),
         allow_password_login=allow_password_login,
+        # The session lives in the database once it has worked, so a hosted app
+        # keeps the tokens Garmin refreshed rather than re-resuming the blob
+        # pasted into its secrets weeks ago. Same secrecy as the secret itself:
+        # the database is private, and this grants the same access.
+        load_tokens=lambda: store.get_state(TOKEN_STATE_KEY) or None,
+        save_tokens=lambda blob: (store.set_state(TOKEN_STATE_KEY, blob),
+                                  store.set_state(TOKEN_SAVED_KEY,
+                                                  datetime.now().isoformat(
+                                                      timespec="seconds"))),
     )
     client.connect()
     log.info("Connected to Garmin as %s", client.display_name or "(unknown)")

@@ -1461,10 +1461,11 @@ def page_progress(data: dict, today: date) -> None:
                "Every session is shown as the heart rate it would have taken at "
                "your normal pace, so a fast day and a slow day can be compared. "
                "A line going down usually means you are getting fitter — it also "
-               "moves with heat, sleep and how tired you were, which is why the "
-               "conditions are drawn behind it.")
+               "moves with heat, sleep and how tired you were. Cadence is drawn "
+               "behind it, because a quicker, shorter stride is the part of this "
+               "you can change on purpose.")
     with ui.frame():
-        training_hr_block(acts, today, data.get("notes"), data.get("weather"),
+        training_hr_block(acts, today, data.get("notes"),
                           ceiling=data.get("aerobic_ceiling"))
 
     drivers_block(data, today)
@@ -2410,9 +2411,12 @@ def humid_days(acts: list[dict], weather: dict | None) -> dict[date, str]:
 
 def training_hr_block(acts: list[dict], today: date,
                       notes: dict | None = None,
-                      weather: dict | None = None,
                       ceiling: float | None = None) -> None:
-    """All sports on one axis, so this is one chart rather than three."""
+    """All sports on one axis, so this is one chart rather than three.
+
+    No weather here any more: it moved to the Heat panel, which is about the
+    weather rather than annotating it onto something else.
+    """
     # Right-aligned beside the heading rather than on a row of its own: a
     # two-option control does not deserve 40px of full-width page.
     _, ctrl = st.columns([3, 1.15], vertical_alignment="center")
@@ -2492,74 +2496,47 @@ def training_hr_block(acts: list[dict], today: date,
             annotation_position="top left",
             annotation_font=dict(size=10, color=TONE["good"]))
 
-    # Conditions behind the line, on their own axis. The humid rings below say
-    # which points to distrust; this says how warm it has been all along, which
-    # is the difference between "my fitness stalled in August" and "August was
-    # 30C". Drawn first in reading order but sent to the back by `layer`.
-    if drawn and weather:
-        by_day: dict[date, list[tuple[float, float | None]]] = {}
-        for a in acts:
-            wx = (weather or {}).get(str(a.get("activity_id"))) or {}
-            if wx.get("temp_c") is None or not a.get("start_date"):
-                continue
-            try:
-                day = date.fromisoformat(str(a["start_date"])[:10])
-            except (ValueError, TypeError):
-                continue
-            dew = wx.get("dew_point_c")
-            by_day.setdefault(day, []).append(
-                (float(wx["temp_c"]), float(dew) if dew is not None else None))
-        if len(by_day) >= 2:
-            days_wx = sorted(by_day)
-            air = [sum(t for t, _ in by_day[d]) / len(by_day[d]) for d in days_wx]
-            dews = [[p for _, p in by_day[d] if p is not None] for d in days_wx]
-            dew_line = [sum(vals) / len(vals) if vals else None for vals in dews]
+    # Cadence behind the line, on its own axis. It earns the place the weather
+    # used to have: of everything that lowers heart rate at a given pace, cadence
+    # is the one the athlete can change deliberately this week — a quicker,
+    # shorter stride lands the foot closer to underneath the body and costs fewer
+    # beats to hold the same speed. Seeing the two lines together is the argument.
+    #
+    # The air and dew-point lines have gone. Conditions matter for reading a
+    # single session, which is what the humid rings below still mark and what the
+    # Heat panel goes into properly; a second continuous line about the weather
+    # made this chart about the weather.
+    if drawn:
+        spm_by_day: dict[date, list[float]] = {}
+        for sport in shown_sports():
+            for row in cadence_stats(acts, sport=sport)["points"]:
+                spm_by_day.setdefault(row["date"], []).append(row["cadence"])
+        if len(spm_by_day) >= 2:
+            days_spm = sorted(spm_by_day)
+            spms = [sum(spm_by_day[d]) / len(spm_by_day[d]) for d in days_spm]
             fig.add_scatter(
-                x=days_wx, y=air, mode="lines", name="air °C", yaxis="y2",
-                line=dict(color="rgba(179,154,107,.85)", width=1.2,
-                          shape="spline", smoothing=.6),
-                hovertemplate="%{y:.0f}°C air<extra>conditions</extra>")
-            if any(v is not None for v in dew_line):
-                fig.add_scatter(
-                    x=days_wx, y=dew_line, mode="lines", name="dew point °C",
-                    yaxis="y2", line=dict(color="rgba(219,95,90,.7)", width=1.2,
-                                          dash="dot", shape="spline",
-                                          smoothing=.6),
-                    hovertemplate="%{y:.0f}°C dew point"
-                                  "<extra>conditions</extra>")
-            # Squeezed into the lower third so the weather reads as a backdrop
-            # rather than competing with the heart-rate line for attention.
-            values = [*air, *[v for v in dew_line if v is not None]]
-            floor, span = min(values), max(values) - min(values)
+                x=days_spm, y=spms, mode="lines+markers", name="cadence",
+                yaxis="y2",
+                line=dict(color="rgba(169,139,217,.8)", width=1.5, dash="dot"),
+                marker=dict(size=7, color="rgba(169,139,217,.95)"),
+                hovertemplate="%{y:.0f} steps per minute<extra>cadence</extra>")
+            # Squeezed into the lower half so cadence reads as the supporting
+            # line rather than competing with heart rate for the eye.
+            low, high = min(spms), max(spms)
+            pad = max(3.0, (high - low) * 0.5)
             fig.update_layout(yaxis2=dict(
                 overlaying="y", side="right", showgrid=False,
                 # `title=dict(font=...)`, not `titlefont`: the shorthand was
                 # removed and passing it raises rather than being ignored.
-                title=dict(text="°C",
-                           font=dict(size=10, color="rgba(179,154,107,.9)")),
-                range=[floor - 2, floor + max(span, 6) * 2.6],
-                tickfont=dict(size=9, color="rgba(179,154,107,.9)")))
+                title=dict(text="spm",
+                           font=dict(size=10, color="rgba(169,139,217,.95)")),
+                range=[low - pad, low + (high - low + pad) * 2.3],
+                tickfont=dict(size=9, color="rgba(169,139,217,.95)")))
 
-    muggy = humid_days(acts, weather)
-    if muggy and drawn:
-        # Marked, not corrected. There is no defensible constant to subtract for
-        # humidity, so the honest move is to say which points to distrust.
-        rings = []
-        for d in sorted(muggy):
-            same = [p[field] for sp in shown_sports()
-                    for p in hr_points(acts, sp)
-                    if p.get(field) and p["date"] == d]
-            if same:
-                rings.append((d, sum(same) / len(same), muggy[d]))
-        if rings:
-            fig.add_scatter(
-                x=[r[0] for r in rings], y=[r[1] for r in rings],
-                mode="markers", name="humid",
-                marker=dict(size=19, color="rgba(0,0,0,0)", symbol="circle-open",
-                            line=dict(color=TONE["caution"], width=2)),
-                customdata=[r[2] for r in rings],
-                hovertemplate="%{customdata}<extra>humid — expect a few beats "
-                              "more at the same pace</extra>")
+    # The humid rings are gone from here too. Everything about the weather now
+    # lives in the Heat panel, where it is the subject rather than an annotation:
+    # this chart is heart rate against cadence, and three overlays on four points
+    # was more marking than data.
 
     if not drawn:
         st.caption("No sessions with heart rate yet.")
@@ -4642,7 +4619,32 @@ def sync_control() -> None:
             box.warning(str(exc))
         except Exception as exc:  # noqa: BLE001
             log.exception("Sync failed")
-            box.error(f"Sync failed ({type(exc).__name__}). See the terminal.")
+            box.error(sync_failure_message(exc))
+
+
+# Garmin's own message for an expired session is "Failed to retrieve social
+# profile" behind a 401, which reads like a password problem and was reported as
+# one. It is not: the session tokens have aged out, and the fix is a re-export,
+# never a new password.
+SESSION_MARKERS = ("social profile", "session is unusable", "401",
+                   "authentication", "token")
+
+
+def sync_failure_message(exc: Exception) -> str:
+    """What actually went wrong, in words that point at the fix."""
+    text = str(exc).lower()
+    if any(mark in text for mark in SESSION_MARKERS):
+        return (
+            "Garmin would not accept the stored session. This is not your "
+            "password — the session tokens have expired.\n\n"
+            "Run `python scripts/export_tokens.py` on your own machine and sync "
+            "from there once. The refreshed session is saved to the database, "
+            "and this app picks it up on its own."
+        )
+    if "429" in text or "too many" in text:
+        return ("Garmin is rate-limiting the account. Nothing to do but wait — "
+                "the breaker holds requests back for an hour.")
+    return f"Sync failed ({type(exc).__name__}). The details are in the app log."
 
 
 def main() -> None:
