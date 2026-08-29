@@ -3,6 +3,8 @@ account, so it gets tested like it matters."""
 
 from __future__ import annotations
 
+import pytest
+
 import core.garmin_guard as gg
 from core.garmin_guard import GarminBlocked, GarminGuard, SyncInProgress
 
@@ -133,3 +135,66 @@ def test_reset_breaker_is_available_but_explicit():
     assert guard.status()["breaker_open"]
     guard.reset_breaker()
     assert not guard.status()["breaker_open"]
+
+
+# --------------------------------------------------------------------------
+# A failed sync must not lock the athlete out
+# --------------------------------------------------------------------------
+
+
+def test_a_failed_sync_does_not_start_the_cooldown(tmp_path, monkeypatch):
+    """Reported as "it is not letting me sync from the UI".
+
+    The cooldown paces syncs that worked. A sync that died on an expired session
+    never fetched anything, and marking it complete meant every retry for the
+    next fifteen minutes was refused — so one broken session became an hour of
+    being unable to try again.
+    """
+    from core import sync as sync_mod
+    from core.store import Store
+
+    db = str(tmp_path / "guard.db")
+    Store(db).close()
+
+    def explode(**kwargs):
+        raise RuntimeError("Failed to retrieve social profile")
+
+    monkeypatch.setattr(sync_mod, "_sync_locked", explode)
+    with pytest.raises(RuntimeError):
+        sync_mod.sync(db=db)
+
+    with Store(db) as store:
+        guard = GarminGuard(store)
+        assert guard.sync_cooldown_remaining() == 0
+        ok, why = guard.can_sync()
+        assert ok, why
+
+
+def test_a_successful_sync_does_start_the_cooldown(tmp_path, monkeypatch):
+    from core import sync as sync_mod
+    from core.store import Store
+
+    db = str(tmp_path / "guard2.db")
+    Store(db).close()
+    monkeypatch.setattr(sync_mod, "_sync_locked", lambda **kw: {"activities_new": 1})
+    sync_mod.sync(db=db)
+
+    with Store(db) as store:
+        guard = GarminGuard(store)
+        assert guard.sync_cooldown_remaining() > 0
+        assert guard.can_sync()[0] is False
+
+
+def test_a_failed_sync_still_releases_the_lock(tmp_path, monkeypatch):
+    """Whatever else happens, the next attempt must not meet a held lock."""
+    from core import sync as sync_mod
+    from core.store import Store
+
+    db = str(tmp_path / "guard3.db")
+    Store(db).close()
+    monkeypatch.setattr(sync_mod, "_sync_locked",
+                        lambda **kw: (_ for _ in ()).throw(RuntimeError("boom")))
+    with pytest.raises(RuntimeError):
+        sync_mod.sync(db=db)
+    with Store(db) as store:
+        assert "already running" not in GarminGuard(store).can_sync()[1]

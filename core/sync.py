@@ -875,6 +875,7 @@ def sync(
     except Exception:
         store.close()
         raise
+    completed = False
     try:
         if progress:
             progress("Connecting to Garmin…")
@@ -884,8 +885,14 @@ def sync(
             prompt_mfa=prompt_mfa, allow_password_login=allow_password_login,
             guard=guard, progress=progress,
         )
+        completed = True
     finally:
-        guard.release_sync()
+        # The cooldown exists to stop a working sync running every minute. A
+        # sync that failed did not talk to Garmin about anything worth pacing,
+        # and marking it complete locked the athlete out of retrying for fifteen
+        # minutes — so an expired session became "I cannot even try again",
+        # which is what was reported. The lock is released either way.
+        guard.release_sync(mark_complete=completed)
         store.close()
     return stats
 
