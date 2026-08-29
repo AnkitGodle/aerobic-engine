@@ -2483,8 +2483,24 @@ def training_hr_block(acts: list[dict], today: date,
                           "%{customdata[2]:+.1f}"
                           f"<extra>{sport}</extra>")
         t = hr_trend(acts, sport, as_of=today, steady_only=False)
+        # The change where two windows exist, the slope over the record where
+        # they do not. Before this, a record younger than three weeks produced
+        # neither and the caption fell through to a line about power meters.
+        # Only where there is a verdict to stand on. The bike's four rides span
+        # three days, which implies a dramatic slope per week and has seen almost
+        # nothing happen; printing it would be the same overreach the verdict
+        # already refuses to make.
+        if t["verdict"] == "insufficient_data":
+            continue
         if t["normalised_change_bpm"] is not None:
-            trend_notes.append(f"{sport} {t['normalised_change_bpm']:+.1f} bpm")
+            trend_notes.append(
+                f"{sport} {say_bpm(t['normalised_change_bpm'])} against the "
+                f"earlier block")
+        elif t["normalised_slope_bpm_per_week"] is not None:
+            value = t["normalised_slope_bpm_per_week"]
+            trend_notes.append(
+                f"{sport} no measurable change" if abs(value) < 0.1
+                else f"{sport} {value:+.1f} bpm a week")
     # The ceiling drawn on the chart, because it is the line the whole page is
     # asking about: below it was an easy session, above it was not, and without
     # the line the reader has to hold the number in their head.
@@ -2588,10 +2604,27 @@ def training_hr_block(acts: list[dict], today: date,
     # progress" under a line where going down means nothing of the kind.
     if trend_notes and normalised:
         st.caption("Change at the same pace: " + " · ".join(trend_notes)
-                   + " (going down is progress).")
-    elif normalised:
-        st.caption("Power-based bike sessions are excluded here: watts per beat "
-                   "has no pace equivalent.")
+                   + ". Going down is progress.")
+    power_only = [sp for sp in shown_sports()
+                  if any(p.get("hr_at_reference") is None
+                         for p in hr_points(acts, sp))]
+    if normalised and power_only:
+        st.caption(f"Power-measured {', '.join(power_only)} sessions are left "
+                   f"out of this view: watts per beat has no pace equivalent.")
+
+
+def say_bpm(value: float | None) -> str:
+    """A heart-rate change in words when the number rounds to nothing.
+
+    "+0.0 bpm" is arithmetically right and reads as a failed calculation, which
+    is how it was reported. Four hundredths of a beat a week is not zero, it is
+    "no measurable change", and saying so is both shorter and truer.
+    """
+    if value is None:
+        return "no reading yet"
+    if abs(value) < 0.1:
+        return "no measurable change"
+    return f"{value:+.1f} bpm"
 
 
 def drivers_block(data: dict, today: date) -> None:

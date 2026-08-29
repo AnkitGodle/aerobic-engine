@@ -274,11 +274,27 @@ def test_a_real_decline_is_still_called_a_decline():
     assert trend.pace_corrected is True
 
 
-def test_the_insight_states_the_number_in_beats():
+def test_the_insight_says_a_change_too_small_to_print_in_words():
+    """"+0.0 bpm" is right and reads as a failed calculation. It was reported."""
     from core import insights
     data = {"activities": runs(), "wellness": [], "zones": [], "strength": [],
             "scoped_to": ("run",)}
     ins = insights.fitness_insight(data, TODAY)
     text = " ".join(ins.bullets)
-    assert "bpm" in text and "usual pace" in text
+    assert "no measurable change" in text and "usual pace" in text
+    assert "+0.0" not in text
     assert "slipping" not in ins.headline.lower()
+
+
+def test_the_insight_states_a_real_change_as_a_number():
+    from core import insights
+    worse = [
+        ((date(2026, 6, 1) + timedelta(days=i * 4)).isoformat(),
+         2.05 + (i % 2) * 0.08, 145.0 + i * 1.6)
+        for i in range(10)
+    ]
+    data = {"activities": runs(worse), "wellness": [], "zones": [],
+            "strength": [], "scoped_to": ("run",)}
+    ins = insights.fitness_insight(data, date(2026, 7, 8))
+    text = " ".join(ins.bullets)
+    assert "bpm" in text and "usual pace" in text

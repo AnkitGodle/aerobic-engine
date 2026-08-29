@@ -137,6 +137,12 @@ def overview_insight(data: dict, today: date) -> PageInsight:
     return PageInsight(headline, bullets, tone)
 
 
+def _bpm(value: float) -> str:
+    """A heart-rate change, or the honest words for one too small to print."""
+    return ("no measurable change" if abs(value) < 0.1
+            else f"{value:+.1f} bpm")
+
+
 def fitness_insight(data: dict, today: date) -> PageInsight:
     acts = data["activities"]
     trends = all_ef_trends(acts, as_of=today)
@@ -167,12 +173,16 @@ def fitness_insight(data: dict, today: date) -> PageInsight:
         # Stated in beats at the athlete's own pace, which is the number the
         # verdict is actually made on. The percentage change in raw efficiency
         # factor is not: it moves with how fast the sessions happened to be.
+        # Said in words when the number rounds to nothing: "+0.0 bpm a week" is
+        # right and reads as a failed calculation, which is how it was reported.
         if t.change_bpm_at_pace is not None:
-            line += (f" ({t.change_bpm_at_pace:+.1f} bpm at your usual pace "
-                     f"against the earlier block)")
+            line += (f" ({_bpm(t.change_bpm_at_pace)} at your usual pace against "
+                     f"the earlier block)")
         elif t.slope_bpm_at_pace_per_week is not None:
-            line += (f" ({t.slope_bpm_at_pace_per_week:+.1f} bpm a week at your "
-                     f"usual pace)")
+            value = t.slope_bpm_at_pace_per_week
+            line += (" (no measurable change at your usual pace)"
+                     if abs(value) < 0.1
+                     else f" ({value:+.1f} bpm a week at your usual pace)")
         elif t.change_pct is not None:
             line += f" ({t.change_pct:+.1f}% watts per beat)"
         line += f", from {sessions}."
