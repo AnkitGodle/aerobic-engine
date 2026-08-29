@@ -3603,7 +3603,7 @@ def page_lifetime(data: dict, today: date) -> None:
                "The one that matters most. The same pace needing fewer beats "
                "means you are fitter. Every session on record.")
     with ui.frame():
-        training_hr_block(acts, today, data.get("notes"), data.get("weather"),
+        training_hr_block(acts, today, data.get("notes"),
                           ceiling=data.get("aerobic_ceiling"))
         chart_ai_note("lifetime_hr", data.get("notes"))
 

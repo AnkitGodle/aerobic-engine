@@ -518,3 +518,85 @@ def test_a_page_insight_gives_a_verdict_from_hard_sessions(healthy):
     ins = insights.fitness_insight(data, TODAY)
     assert "not enough" not in ins.headline.lower()
     assert "excluded" not in " ".join(ins.bullets).lower()
+
+
+# --------------------------------------------------------------------------
+# Static checks over the app, for the mistakes a test suite cannot see
+# --------------------------------------------------------------------------
+
+
+def _app_tree():
+    import ast
+    import pathlib
+    source = (pathlib.Path(__file__).resolve().parents[1]
+              / "app" / "streamlit_app.py").read_text()
+    return ast.parse(source)
+
+
+def test_no_call_argues_with_itself_about_a_parameter():
+    """The bug this exists for: a parameter was removed from training_hr_block
+    and one of its two call sites still passed the old argument positionally, so
+    the fourth positional landed on `ceiling` — which the same call also passed
+    by keyword. The Lifetime page died with a TypeError. Nothing in the suite
+    touched it, because the suite does not render pages.
+
+    Checks both halves: too many positional arguments, and a positional argument
+    that lands on a parameter the call also names.
+    """
+    import ast
+
+    tree = _app_tree()
+    params = {}
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef):
+            args = node.args
+            if args.vararg:
+                continue                      # *args takes anything
+            params[node.name] = [a.arg for a in args.posonlyargs + args.args]
+
+    problems = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        names = params.get(node.func.id)
+        if names is None or any(isinstance(a, ast.Starred) for a in node.args):
+            continue
+        given = len(node.args)
+        if given > len(names):
+            problems.append(
+                f"{node.func.id}() takes {len(names)} positional arguments, "
+                f"called with {given} at line {node.lineno}")
+            continue
+        taken = set(names[:given])
+        for kw in node.keywords:
+            if kw.arg and kw.arg in taken:
+                problems.append(
+                    f"{node.func.id}() got {kw.arg} both positionally and by "
+                    f"keyword at line {node.lineno}")
+    assert not problems, "; ".join(problems)
+
+
+def test_no_call_uses_a_keyword_the_function_does_not_have():
+    import ast
+
+    tree = _app_tree()
+    known = {}
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef):
+            args = node.args
+            if args.kwarg:
+                continue                      # **kwargs takes anything
+            known[node.name] = {a.arg for a in
+                                args.posonlyargs + args.args + args.kwonlyargs}
+
+    problems = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        allowed = known.get(node.func.id)
+        if allowed is None:
+            continue
+        for kw in node.keywords:
+            if kw.arg and kw.arg not in allowed:
+                problems.append(f"{node.func.id}(... {kw.arg}=) at line {node.lineno}")
+    assert not problems, "; ".join(problems)
