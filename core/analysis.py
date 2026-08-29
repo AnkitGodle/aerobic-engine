@@ -1510,7 +1510,11 @@ def cadence_stats(
         })
     rows.sort(key=lambda r: r["date"])
     if not rows:
-        return {"points": [], "avg": None, "verdict": "no_data", "message":
+        return {"points": [], "avg": None, "latest": None, "latest_date": None,
+                "latest_stride_cm": None, "earlier_avg": None,
+                "change_vs_earlier": None, "sessions": 0,
+                "avg_stride_cm": None, "target": CADENCE_TARGET_SPM,
+                "verdict": "no_data", "message":
                 f"No {sport} sessions with cadence recorded yet."}
 
     avg = sum(r["cadence"] for r in rows) / len(rows)
@@ -1532,9 +1536,22 @@ def cadence_stats(
             f"Averaging {avg:.0f} steps per minute, which is in the range most "
             f"coaching aims for. Nothing to change."
         )
+    # The latest session, and where it sits against everything before it. An
+    # all-time mean barely moves for a single good session — "my cadence was 152
+    # today and the number still says 149" — which makes the one thing the
+    # athlete can change this week look like it changed nothing.
+    latest = rows[-1]
+    earlier = [r["cadence"] for r in rows[:-1]]
     return {
         "points": rows,
         "avg": round(avg, 1),
+        "latest": round(latest["cadence"], 1),
+        "latest_date": latest["date"],
+        "latest_stride_cm": latest["stride_cm"],
+        "earlier_avg": round(sum(earlier) / len(earlier), 1) if earlier else None,
+        "change_vs_earlier": (round(latest["cadence"] - sum(earlier) / len(earlier), 1)
+                              if earlier else None),
+        "sessions": len(rows),
         "avg_stride_cm": round(sum(strides) / len(strides), 1) if strides else None,
         "target": CADENCE_TARGET_SPM,
         "verdict": verdict,

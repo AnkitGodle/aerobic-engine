@@ -600,3 +600,63 @@ def test_no_call_uses_a_keyword_the_function_does_not_have():
             if kw.arg and kw.arg not in allowed:
                 problems.append(f"{node.func.id}(... {kw.arg}=) at line {node.lineno}")
     assert not problems, "; ".join(problems)
+
+
+# --------------------------------------------------------------------------
+# Cadence: the last run, not only the lifetime mean
+# --------------------------------------------------------------------------
+
+
+def _runs_with_cadence(values):
+    out = []
+    for i, spm in enumerate(values):
+        day = (TODAY - timedelta(days=(len(values) - i) * 2)).isoformat()
+        out.append({
+            "activity_id": f"c{i}", "sport": "run", "start_date": day,
+            "start_time": f"{day}T06:00:00", "avg_hr": 150.0,
+            "avg_speed_mps": 2.6, "avg_cadence": spm, "duration_s": 2400,
+            "distance_m": 6240, "ingested_at": f"{day}T12:00:00",
+        })
+    return out
+
+
+def test_a_single_good_session_shows_even_when_the_average_barely_moves():
+    """Reported as "my cadence was good today and the KPI did not update".
+
+    It had: three runs at 148.6 plus one at 151.6 moves an all-time mean by 0.8
+    of a step. The number the athlete looks at is now the run they just did.
+    """
+    # The athlete's own four runs, to the precision Garmin recorded them.
+    stats = analysis.cadence_stats(
+        _runs_with_cadence([151.3125, 150.59375, 143.9375, 151.5625]))
+    assert stats["latest"] == 151.6
+    assert stats["earlier_avg"] == 148.6
+    # 151.5625 against an earlier mean of 148.614: 2.9, shown as "+3".
+    assert stats["change_vs_earlier"] == 2.9
+    assert stats["avg"] == 149.4          # the mean that hardly moved
+    assert stats["sessions"] == 4
+
+
+def test_the_latest_is_the_most_recent_session_not_the_last_row_given():
+    rows = _runs_with_cadence([150.0, 160.0])
+    rows.reverse()                        # order of arrival must not matter
+    assert analysis.cadence_stats(rows)["latest"] == 160.0
+
+
+def test_one_session_has_nothing_to_compare_against():
+    stats = analysis.cadence_stats(_runs_with_cadence([155.0]))
+    assert stats["latest"] == 155.0
+    assert stats["earlier_avg"] is None
+    assert stats["change_vs_earlier"] is None
+
+
+def test_no_cadence_anywhere_is_not_an_error():
+    stats = analysis.cadence_stats([])
+    assert stats["latest"] is None and stats["sessions"] == 0
+    assert stats["verdict"] == "no_data"
+
+
+def test_stride_comes_back_for_the_latest_run():
+    stats = analysis.cadence_stats(_runs_with_cadence([150.0, 168.0]))
+    # 2.6 m/s at 168 spm is a 92.9 cm stride, derived exactly rather than guessed.
+    assert stats["latest_stride_cm"] == pytest.approx(92.9, abs=0.2)

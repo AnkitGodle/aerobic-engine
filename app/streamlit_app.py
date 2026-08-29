@@ -52,6 +52,8 @@ from core import (  # noqa: E402
 from core.analysis import (  # noqa: E402
     ACWR_HIGH,
     ACWR_LOW,
+    CADENCE_LOW_SPM,
+    CADENCE_TARGET_SPM,
     DEW_POINT_HARD_C,
     ZONE_LABELS,
     aerobic_ceiling_options,
@@ -306,9 +308,18 @@ def db_stamp() -> float:
         # left every open dashboard serving what it had already cached.
         try:
             return float(zlib.crc32(data_stamp().encode("utf-8")))
-        except Exception:  # noqa: BLE001 - a dead cache key beats a dead page
-            log.warning("could not read the data stamp for the cache key")
-            return 0.0
+        except Exception as exc:  # noqa: BLE001 - a stale page beats a dead one
+            # A constant was returned here, which means the cache key never
+            # changes and the page serves whatever it loaded first — for the
+            # life of the container. That is how a sidebar can show a sync time
+            # from hours ago while the database has today's. A minute bucket
+            # keeps the page working and lets it catch up on its own.
+            #
+            # And the exception is logged: this was recorded 36 times as a bare
+            # "could not read the data stamp", which says nothing about why.
+            log.warning("could not read the data stamp for the cache key: %s: %s",
+                        type(exc).__name__, exc)
+            return float(int(time.time() // 60))
     p = Path(target)
     return p.stat().st_mtime if p.exists() else 0.0
 
@@ -962,6 +973,22 @@ def session_recap(act: dict, data: dict, routes: dict | None = None) -> None:
                       "value": f"{over:+.0f} bpm",
                       "note": "easy" if over <= 0 else "harder than easy",
                       "tone": "good" if over <= 0 else "caution"})
+    # Cadence beside the heart rate, because it is the lever on it: a quicker,
+    # shorter stride costs fewer beats at the same speed, and this is where the
+    # athlete looks straight after a session.
+    if act.get("avg_cadence"):
+        spm = float(act["avg_cadence"])
+        stride = act.get("stride_length_cm")
+        if not stride and act.get("avg_speed_mps") and spm > 0:
+            # Derived when Garmin's list endpoint omits it: distance per step is
+            # speed over steps per second. Exact, not an estimate.
+            stride = float(act["avg_speed_mps"]) / (spm / 60.0) * 100.0
+        cells.append({
+            "label": "Cadence", "value": f"{spm:.0f}",
+            "note": (f"stride {float(stride):.0f} cm" if stride
+                     else f"target {CADENCE_TARGET_SPM:.0f}+"),
+            "tone": ("good" if spm >= CADENCE_TARGET_SPM
+                     else "caution" if spm >= CADENCE_LOW_SPM else "bad")})
     if act.get("training_load"):
         cells.append({"label": "Load", "value": f"{act['training_load']:.0f}",
                       "note": "Garmin's own"})
@@ -1510,13 +1537,23 @@ def page_progress(data: dict, today: date) -> None:
          "value": f"{sig.acwr:.2f}" if sig and sig.acwr else "—",
          "note": acwr_note(sig), "tone": acwr_tone(sig)},
     ]
-    if cad.get("avg"):
+    if cad.get("latest"):
+        # The last run, not the all-time mean. A single good session moves an
+        # average of everything by a fraction of a step, so a cadence of 152
+        # today left the number reading 149 and looked like nothing had changed.
+        change = cad.get("change_vs_earlier")
+        note = f"last run · {cad['avg']:.0f} average of {cad['sessions']}"
+        if change is not None and abs(change) >= 0.5:
+            note = (f"{change:+.0f} on your {cad['earlier_avg']:.0f} average, "
+                    f"{cad['sessions']} runs")
         figures.append({
-            "label": "Cadence", "value": f"{cad['avg']:.0f}",
-            "note": f"stride {cad['avg_stride_cm']:.0f} cm"
-                    if cad.get("avg_stride_cm") else "steps/min",
-            "tone": {"low": "bad", "fair": "caution",
-                     "good": "good"}.get(cad["verdict"], "neutral")})
+            "label": "Cadence", "value": f"{cad['latest']:.0f}",
+            "note": note,
+            # Coloured on where the last run sits, since that is the number
+            # shown. The verdict on the average is in the Steps and stride panel.
+            "tone": ("good" if cad["latest"] >= CADENCE_TARGET_SPM
+                     else "caution" if cad["latest"] >= CADENCE_LOW_SPM
+                     else "bad")})
     # Per-sport counts are coloured against this week's plan, not against the
     # lifetime total: "3 runs" is only good or bad relative to what was asked for.
     planned = week_targets(data, today)
@@ -1856,12 +1893,19 @@ def cadence_block(acts: list[dict], today: date) -> None:
 
     tone = {"low": "bad", "fair": "caution", "good": "good"}.get(
         stats["verdict"], "neutral")
+    change = stats.get("change_vs_earlier")
     ui.stats_row([
-        {"label": "Cadence", "value": f"{stats['avg']:.0f} spm",
-         "note": f"target {stats['target']:.0f}+", "tone": tone},
-        {"label": "Stride", "value": f"{stats['avg_stride_cm']:.0f} cm"
-         if stats.get("avg_stride_cm") else "—", "note": "distance per step"},
-        {"label": "Sessions", "value": len(pts), "note": "with cadence recorded"},
+        {"label": "Last run", "value": f"{stats['latest']:.0f} spm",
+         "note": (f"{change:+.0f} on your earlier average" if change is not None
+                  and abs(change) >= 0.5 else f"target {stats['target']:.0f}+"),
+         "tone": ("good" if stats["latest"] >= stats["target"]
+                  else "caution" if stats["latest"] >= CADENCE_LOW_SPM else "bad")},
+        {"label": "Average", "value": f"{stats['avg']:.0f} spm",
+         "note": f"across {stats['sessions']} runs", "tone": tone},
+        {"label": "Stride", "value": f"{stats['latest_stride_cm']:.0f} cm"
+         if stats.get("latest_stride_cm") else
+         (f"{stats['avg_stride_cm']:.0f} cm" if stats.get("avg_stride_cm") else "—"),
+         "note": "distance per step, last run"},
     ])
 
     fig = go.Figure()
