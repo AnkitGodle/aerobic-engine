@@ -328,6 +328,22 @@ def db_stamp() -> float:
 # during a session used to leave the previous snapshot resident for the life of
 # the container — every activity, every lap, every zone row, twice over. Two is
 # enough to keep the page that is mid-render working while the new one loads.
+def _ceiling_split(store: Store, ceiling: object,
+                   days: int = 28) -> dict | None:
+    """Easy / moderate / hard against the athlete's ceiling, counted in SQL."""
+    if not ceiling:
+        return None
+    try:
+        bounds = zone_bounds(store.zones())
+        hard_floor = int(bounds.get(4, (0, 0))[0] or 0)
+        return store.sample_split(
+            int(float(ceiling)), hard_floor or int(float(ceiling) * 1.18),
+            since=today_local() - timedelta(days=days)) or None
+    except Exception as exc:  # noqa: BLE001 - the zone buckets still work
+        log.info("Could not count the intensity split: %s", exc)
+        return None
+
+
 @st.cache_data(show_spinner=False, ttl=1800, max_entries=2)
 def load(stamp: float) -> dict:  # noqa: ARG001 - stamp is the cache key
     def read(s: Store) -> dict:
@@ -354,6 +370,12 @@ def load(stamp: float) -> dict:  # noqa: ARG001 - stamp is the cache key
             "thresholds": {k: state[k]
                            for k in ("threshold_hr", "running_ftp", "cycling_ftp")},
             "aerobic_ceiling": state["aerobic_ceiling_bpm"],
+            # The easy/moderate/hard split against the athlete's own ceiling,
+            # computed once here. Three places used to work it out separately —
+            # the intensity panel from the samples, the page insight and the
+            # drivers panel from Garmin's fixed zone buckets — and on one page
+            # they read 50% and 42%.
+            "split": _ceiling_split(s, state["aerobic_ceiling_bpm"]),
             "profile": profile,
             "records": s.personal_records(),
             "weather": s.weather(),
@@ -1754,9 +1776,12 @@ def intensity_block(zones: list[dict], today: date,
     # page contradicts the setting on the Plan page.
     pol = polarisation(zones, since=since)
     bounds = zone_bounds(zones)
-    custom = None
     ceiling = (data or {}).get("aerobic_ceiling")
-    if ceiling:
+    # From the payload, so this panel, the page's written summary and the
+    # drivers list are all quoting one number. Computed per sport only when the
+    # page is filtered to a subset, which the shared one does not cover.
+    custom = (data or {}).get("split")
+    if ceiling and set(shown_sports()) != set(ENDURANCE_SPORTS):
         custom = stream_polarisation(
             db_stamp(), today.isoformat(), int(float(ceiling)),
             int(bounds.get(4, (0, 0))[0] or 0), tuple(sorted(shown_sports())))
@@ -2734,7 +2759,8 @@ def drivers_block(data: dict, today: date) -> None:
     sport = "run" if "run" in shown_sports() else (shown_sports() or ("run",))[0]
     found = fitness_drivers(
         data["activities"], data.get("wellness"), data.get("zones"),
-        data.get("strength"), as_of=today, sport=sport)
+        data.get("strength"), as_of=today, sport=sport,
+        easy_share=(data.get("split") or {}).get("easy"))
     if data.get("weather"):
         add_heat_driver(found, weather_effect(data["activities"],
                                               data.get("weather") or {}, sport=sport))
@@ -3333,6 +3359,15 @@ def page_rules(data: dict, today: date) -> None:
                                                disabled=not unlocked) and writes_allowed():
                         with Store(db_path()) as _s:
                             _s.set_state("aerobic_ceiling_bpm", str(int(new_ceiling)))
+                            # Chosen by hand, so stop following Garmin's Z2 top
+                            # — otherwise the next sync would quietly put it
+                            # back and the slider would look broken. Matching
+                            # Garmin's own number puts it back on follow.
+                            garmin_top = bounds.get(2, (None, None))[1]
+                            _s.set_state(
+                                sync_mod.CEILING_MODE_KEY,
+                                "garmin" if garmin_top
+                                and int(new_ceiling) == int(garmin_top) else "manual")
                             # Every Z2 target is derived from this, so a saved ceiling
                             # that leaves the plan untouched looks like it did nothing.
                             with st.spinner("Restamping your targets…"):

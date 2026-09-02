@@ -658,6 +658,7 @@ def fitness_drivers(
     as_of: date | None = None,
     sport: str = "run",
     days: int = 28,
+    easy_share: float | None = None,
 ) -> dict[str, Any]:
     """Why the trend is going the way it is, from the numbers rather than a model.
 
@@ -688,10 +689,15 @@ def fitness_drivers(
 
     # 1. How much of it was easy. The single biggest lever in a base block, and
     #    the one most often got wrong in the same direction.
-    if zone_rows:
-        split = polarisation(zone_rows, since=as_of - timedelta(days=days))
+    if zone_rows or easy_share is not None:
+        # `easy_share` is the share counted against the athlete's own easy
+        # ceiling, which is what the rest of the page shows. Garmin's zone
+        # buckets are the fallback, and the two disagree — 50% against 42% on
+        # one page, because Garmin's Z2 top is fixed and the ceiling is not.
+        split = ({"easy": easy_share} if easy_share is not None
+                 else polarisation(zone_rows, since=as_of - timedelta(days=days)))
         easy = split.get("easy")
-        if easy is not None and split.get("samples", 1):
+        if easy is not None:
             if easy >= EASY_SHARE_TARGET:
                 add("helping", "Easy training", f"{easy:.0f}% easy",
                     f"At or above the {EASY_SHARE_TARGET:.0f}% a base block wants, "

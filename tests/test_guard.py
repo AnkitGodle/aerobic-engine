@@ -280,3 +280,67 @@ def test_a_rules_only_plan_is_upgraded_when_the_model_comes_back(tmp_path, monke
     assert sync_mod.ensure_week_plan(path, today=TODAY) is True
     with Store(path) as s:
         assert s.latest_plan(week_start_of(TODAY))["source"] != "rules"
+
+
+# --------------------------------------------------------------------------
+# The aerobic ceiling follows Garmin unless it was set by hand
+# --------------------------------------------------------------------------
+
+
+def test_the_ceiling_follows_garmins_z2_top(tmp_path):
+    from conftest import TODAY, build_db
+    from core import sync as sync_mod
+    from core.store import Store
+
+    path = str(tmp_path / "ceiling.db")
+    store = build_db(path, today=TODAY)
+    store.upsert_zones([
+        {"activity_id": a["activity_id"], "zone_number": z,
+         "zone_low_bpm": low, "secs_in_zone": 60.0}
+        for a in store.activities()[:1]
+        for z, low in ((1, 101), (2, 121), (3, 141), (4, 162), (5, 182))
+    ])
+    store.set_state("aerobic_ceiling_bpm", "137")
+    store.conn.commit()
+    store.close()
+
+    assert sync_mod.follow_garmin_ceiling(path) == 140
+    with Store(path) as s:
+        assert s.get_state("aerobic_ceiling_bpm") == "140"
+    # Idempotent: nothing to move on the next sync.
+    assert sync_mod.follow_garmin_ceiling(path) is None
+
+
+def test_a_ceiling_set_by_hand_is_left_alone(tmp_path):
+    from conftest import TODAY, build_db
+    from core import sync as sync_mod
+    from core.store import Store
+
+    path = str(tmp_path / "manual_ceiling.db")
+    store = build_db(path, today=TODAY)
+    store.upsert_zones([
+        {"activity_id": store.activities()[0]["activity_id"], "zone_number": z,
+         "zone_low_bpm": low, "secs_in_zone": 60.0}
+        for z, low in ((1, 101), (2, 121), (3, 141), (4, 162), (5, 182))
+    ])
+    store.set_state("aerobic_ceiling_bpm", "152")
+    store.set_state(sync_mod.CEILING_MODE_KEY, "manual")
+    store.conn.commit()
+    store.close()
+
+    assert sync_mod.follow_garmin_ceiling(path) is None
+    with Store(path) as s:
+        assert s.get_state("aerobic_ceiling_bpm") == "152"
+
+
+def test_no_zone_data_means_no_change(tmp_path):
+    from conftest import TODAY, build_db
+    from core import sync as sync_mod
+
+    path = str(tmp_path / "nozones.db")
+    store = build_db(path, today=TODAY)
+    store.execute("DELETE FROM activity_zones")
+    store.set_state("aerobic_ceiling_bpm", "137")
+    store.conn.commit()
+    store.close()
+    assert sync_mod.follow_garmin_ceiling(path) is None

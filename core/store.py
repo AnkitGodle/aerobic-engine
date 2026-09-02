@@ -1529,10 +1529,19 @@ class Store:
             "SELECT (SELECT value FROM sync_state WHERE key = 'last_sync') AS synced,"
             " (SELECT COUNT(*) FROM activities) AS rows,"
             " (SELECT MAX(ingested_at) FROM activities) AS newest,"
-            " (SELECT MAX(generated_at) FROM ai_notes) AS noted"
+            " (SELECT MAX(generated_at) FROM ai_notes) AS noted,"
+            # The settings that every derived number is measured against. The
+            # aerobic ceiling decides what counts as easy, so a change to it
+            # changes the intensity split, the zone bands, the colour of every
+            # split's heart rate and every Z2 target — and none of the three
+            # counters above notice it moving.
+            " (SELECT value FROM sync_state WHERE key = 'aerobic_ceiling_bpm')"
+            "   AS ceiling,"
+            " (SELECT value FROM sync_state WHERE key = 'threshold_hr') AS lthr"
         ).fetchone() or {})
         return (f"{row.get('synced') or ''}|{row.get('rows') or 0}"
-                f"|{row.get('newest') or ''}|{row.get('noted') or ''}")
+                f"|{row.get('newest') or ''}|{row.get('noted') or ''}"
+                f"|{row.get('ceiling') or ''}|{row.get('lthr') or ''}")
 
     def counts(self) -> dict[str, int]:
         """Row counts for every table, in a single round trip.

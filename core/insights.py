@@ -215,7 +215,12 @@ def intensity_insight(data: dict, today: date) -> PageInsight:
     if not zones:
         return PageInsight("No zone data yet.", ["Sync from Garmin to see this."], "info")
     since = today - timedelta(days=28)
-    pol = polarisation(zones, since=since)
+    # `split` is the share counted against the athlete's own easy ceiling, from
+    # their stored samples. Garmin's zone buckets are the fallback, and the two
+    # disagree — 50% against 42% on the same page, because Garmin's Z2 top is
+    # fixed and the ceiling is not. Whichever the intensity panel shows, this has
+    # to show the same, or the page argues with itself.
+    pol = data.get("split") or polarisation(zones, since=since)
     dist = zone_distribution(zones, since=since)
     total = sum(dist.values())
     bullets = [

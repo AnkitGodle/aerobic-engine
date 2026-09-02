@@ -145,6 +145,39 @@ def import_exercise_sets(store: Store, client: GarminClient) -> tuple[int, int]:
     return sets_stored, logged
 
 
+# Whether the aerobic ceiling follows Garmin's own Z2 top or was set by hand.
+# "garmin" is the default: the athlete asked for Garmin's ceiling, and Garmin
+# revises its zones as the threshold estimate moves, so following it means the
+# ceiling keeps meaning the same thing rather than being a number from August.
+CEILING_MODE_KEY = "aerobic_ceiling_mode"
+CEILING_KEY = "aerobic_ceiling_bpm"
+
+
+def follow_garmin_ceiling(db: str | None = None) -> int | None:
+    """Keep the aerobic ceiling on Garmin's Z2 top while that is the chosen mode.
+
+    Returns the ceiling if it changed, else None. A ceiling the athlete set by
+    hand is never touched: saving one on the Rules page sets the mode to manual.
+    """
+    from core.analysis import zone_bounds
+
+    store = Store(db)
+    try:
+        if (store.get_state(CEILING_MODE_KEY) or "garmin") != "garmin":
+            return None
+        top = zone_bounds(store.zones()).get(2, (None, None))[1]
+        if not top:
+            return None
+        current = store.get_state(CEILING_KEY)
+        if current and int(float(current)) == int(top):
+            return None
+        store.set_state(CEILING_KEY, str(int(top)))
+        log.info("Aerobic ceiling follows Garmin's Z2 top: %s bpm", int(top))
+        return int(top)
+    finally:
+        store.close()
+
+
 def ensure_week_plan(db: str | None = None, today: date | None = None) -> bool:
     """Build this week's plan if the week does not have one yet.
 
@@ -894,6 +927,13 @@ def _sync_locked(
     applog.event(db or default_db(), "Garmin sync complete", **{
         k: v for k, v in stats.items() if isinstance(v, (int, float))})
     store.close()
+
+    try:
+        moved = follow_garmin_ceiling(db)
+        if moved:
+            stats["ceiling_bpm"] = moved
+    except Exception as exc:  # noqa: BLE001 - never worth a failed sync
+        log.warning("Could not update the aerobic ceiling: %s", exc)
 
     if progress:
         progress("Making sure this week has a plan…")
