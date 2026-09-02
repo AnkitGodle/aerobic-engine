@@ -586,7 +586,11 @@ def test_a_set_becomes_one_step_each_with_rest_between():
     presc = strength.build_session([], session_index=0)
     steps = garmin_workout.build(presc, "Legs A")["workoutSegments"][0]["workoutSteps"]
     work = [s for s in steps if s["stepType"]["stepTypeKey"] == "interval"]
-    assert len(work) == sum(max(1, p.sets) for p in presc)
+    # A single-leg exercise is two steps per set: the watch counts steps, and
+    # one step for "3 x 5 per side" is half the session.
+    assert len(work) == sum(
+        max(1, p.sets) * (2 if strength.EXERCISES[p.exercise_id].unilateral else 1)
+        for p in presc)
     # Rest between every pair of working sets, and none trailing at the end.
     assert steps[-1]["stepType"]["stepTypeKey"] == "interval"
     assert all(s["stepOrder"] == i + 1 for i, s in enumerate(steps))
@@ -1296,3 +1300,82 @@ def test_replanning_leaves_finished_sessions_alone(healthy):
     assert not planned_days & set(facts.trained_days), (
         f"planned on days already trained: "
         f"{sorted(planned_days & set(facts.trained_days))}")
+
+
+# --------------------------------------------------------------------------
+# One leg at a time is two sets of work
+# --------------------------------------------------------------------------
+
+
+def _prescribe(exercise_id: str, sets: int = 3, reps: int = 5, hold: int | None = None):
+    from core.schemas import StrengthPrescription
+    return StrengthPrescription(
+        exercise_id=exercise_id, name=strength.EXERCISES[exercise_id].name,
+        sets=sets, reps=None if hold else reps, hold_s=hold)
+
+
+def _steps(prescriptions):
+    from core.garmin_workout import build
+    payload = build(prescriptions, "test")
+    return payload["workoutSegments"][0]["workoutSteps"]
+
+
+def test_a_single_leg_exercise_is_pushed_as_both_legs():
+    """Reported: a session with single-leg work was planned for one side only.
+
+    The watch counts the steps it is given, so three steps of a single-leg RDL
+    is three sets of work when six were prescribed.
+    """
+    steps = _steps([_prescribe("single_leg_rdl", sets=3, reps=5)])
+    work = [s for s in steps if s["stepType"]["stepTypeKey"] != "rest"]
+    assert len(work) == 6
+    assert [s["description"].split("—")[1].strip() for s in work] == [
+        "left leg", "right leg"] * 3
+    assert all(s["endConditionValue"] == 5.0 for s in work)
+
+
+def test_a_two_legged_exercise_is_pushed_once_per_set():
+    steps = _steps([_prescribe("calf_raise_straight", sets=3, reps=8)])
+    work = [s for s in steps if s["stepType"]["stepTypeKey"] != "rest"]
+    assert len(work) == 3
+    assert all("leg" not in s["description"].split("—")[-1] for s in work)
+
+
+def test_the_rest_falls_between_pairs_not_between_legs():
+    """The other leg is the rest. A minute between sides makes a 20-minute
+    session 30."""
+    steps = _steps([_prescribe("single_leg_rdl", sets=2, reps=5)])
+    kinds = [s["stepType"]["stepTypeKey"] for s in steps]
+    assert kinds == ["interval", "interval", "rest", "interval", "interval"]
+
+
+def test_a_unilateral_hold_gets_both_sides_too():
+    steps = _steps([_prescribe("single_leg_calf_hold", sets=2, hold=30)])
+    work = [s for s in steps if s["stepType"]["stepTypeKey"] != "rest"]
+    assert len(work) == 4
+    assert all(s["endConditionValue"] == 30.0 for s in work)
+    assert all(s["endCondition"]["conditionTypeKey"] == "time" for s in work)
+
+
+def test_step_order_stays_sequential_with_both_sides():
+    steps = _steps([_prescribe("step_up", sets=3), _prescribe("wall_sit", sets=2, hold=45)])
+    assert [s["stepOrder"] for s in steps] == list(range(1, len(steps) + 1))
+
+
+def test_the_log_counts_a_set_the_same_way_the_plan_asks_for_it():
+    """Six recorded sets of a single-leg exercise is three sets per leg."""
+    sets = [{"exercise_id": "single_leg_rdl", "reps": 5, "load_kg": 8.0}
+            for _ in range(6)]
+    rows = strength.sets_to_log_rows("2026-09-03", "abc", sets)
+    assert rows[0]["sets"] == 3
+    assert rows[0]["reps"] == 5
+
+
+def test_a_skipped_side_is_not_rounded_away():
+    sets = [{"exercise_id": "single_leg_rdl", "reps": 5} for _ in range(5)]
+    assert strength.sets_to_log_rows("2026-09-03", "abc", sets)[0]["sets"] == 3
+
+
+def test_a_two_legged_exercise_is_counted_as_recorded():
+    sets = [{"exercise_id": "calf_raise_straight", "reps": 8} for _ in range(4)]
+    assert strength.sets_to_log_rows("2026-09-03", "abc", sets)[0]["sets"] == 4

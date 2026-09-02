@@ -135,7 +135,8 @@ APP_MARKER = "· Aerobic Engine"
 REST_SECONDS = 60
 
 
-def _step(order: int, prescription: Any, exercise: Any) -> dict[str, Any]:
+def _step(order: int, prescription: Any, exercise: Any,
+          side: str | None = None) -> dict[str, Any]:
     category, name = GARMIN_TARGET.get(exercise.id, ("SQUAT", None))
     # Fail here rather than at the API: an unknown category is a 400 that
     # rejects the whole session, and an unverified name is accepted and then
@@ -144,8 +145,6 @@ def _step(order: int, prescription: Any, exercise: Any) -> dict[str, Any]:
         raise ValueError(f"{exercise.id}: {category!r} is not a Garmin category")
     if name and name not in VERIFIED_NAMES:
         raise ValueError(f"{exercise.id}: {name!r} was not kept by Garmin")
-    # Per side is doubled here rather than left to the athlete to remember: the
-    # watch counts what it sees, and a unilateral set is two sets of work.
     hold = prescription.hold_s
     step: dict[str, Any] = {
         "type": "ExecutableStepDTO",
@@ -155,7 +154,11 @@ def _step(order: int, prescription: Any, exercise: Any) -> dict[str, Any]:
         "targetType": NO_TARGET,
         "description": (
             f"{exercise.name}"
-            + (" (per side)" if exercise.unilateral else "")
+            # Which leg, when it is one leg at a time. The watch has no field
+            # for a side in this payload shape, so the description carries it —
+            # and it has to, because a set of step-ups labelled only "per side"
+            # is one step on the watch and two sets of work in the room.
+            + (f" — {side} leg" if side else "")
             + (f" — {exercise.tempo}" if exercise.tempo else "")
         )[:512],
     }
@@ -187,19 +190,30 @@ def build(prescriptions: list[Any], name: str) -> dict[str, Any]:
         exercise = strength.EXERCISES.get(presc.exercise_id)
         if exercise is None:            # cannot happen via the planner; be safe
             continue
+        # One leg at a time means two steps per set, not one labelled "per side".
+        # The watch counts the steps it is given: a single-leg RDL prescribed as
+        # 3 x 5 went to the watch as three steps, so the athlete either did half
+        # the work or lost count keeping track themselves — reported, and the
+        # comment here used to claim this was already handled.
+        sides = ("left", "right") if exercise.unilateral else (None,)
         for set_index in range(max(1, presc.sets)):
-            steps.append(_step(order, presc, exercise))
-            order += 1
-            last = (presc is prescriptions[-1]
-                    and set_index == max(1, presc.sets) - 1)
-            if not last:
-                steps.append({
-                    "type": "ExecutableStepDTO", "stepOrder": order,
-                    "stepType": STEP_REST, "endCondition": END_TIME,
-                    "endConditionValue": float(REST_SECONDS),
-                    "targetType": NO_TARGET, "description": "Rest",
-                })
+            for side_index, side in enumerate(sides):
+                steps.append(_step(order, presc, exercise, side=side))
                 order += 1
+                # No rest between the two sides. The other leg is the rest, and
+                # a 60-second gap between them turns a 20-minute session into 30.
+                if side_index < len(sides) - 1:
+                    continue
+                last = (presc is prescriptions[-1]
+                        and set_index == max(1, presc.sets) - 1)
+                if not last:
+                    steps.append({
+                        "type": "ExecutableStepDTO", "stepOrder": order,
+                        "stepType": STEP_REST, "endCondition": END_TIME,
+                        "endConditionValue": float(REST_SECONDS),
+                        "targetType": NO_TARGET, "description": "Rest",
+                    })
+                    order += 1
     return {
         "sportType": STRENGTH_SPORT,
         "workoutName": name[:80],

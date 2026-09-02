@@ -954,6 +954,12 @@ def sets_to_log_rows(
 
     The log stores a session's work per exercise, so N sets of an exercise become
     one row: set count, the top weight used, and the modal rep count.
+
+    Unilateral work is halved, because a set means the same thing on both sides
+    of this app: the prescription asks for three sets of a single-leg RDL meaning
+    three per leg, and the watch records six. Storing six would make the history
+    read as double the prescription for ever. Rounded up, so a session where one
+    side was skipped still shows as the sets that happened.
     """
     grouped: dict[str, list[dict[str, Any]]] = {}
     for s in sets:
@@ -966,13 +972,15 @@ def sets_to_log_rows(
         reps = [int(i["reps"]) for i in items if i.get("reps")]
         loads = [float(i["load_kg"]) for i in items if i.get("load_kg")]
         holds = [float(i["duration_s"]) for i in items if i.get("duration_s")]
-        is_iso = EXERCISES[exercise_id].kind == ISOMETRIC
+        ex = EXERCISES[exercise_id]
+        is_iso = ex.kind == ISOMETRIC
+        sets = -(-len(items) // 2) if ex.unilateral else len(items)
         rows.append(
             {
                 "day": day,
                 "activity_id": activity_id,
                 "exercise_id": exercise_id,
-                "sets": len(items),
+                "sets": sets,
                 "reps": max(set(reps), key=reps.count) if reps and not is_iso else None,
                 "hold_s": int(max(holds)) if holds and is_iso else None,
                 "load_kg": max(loads) if loads else None,
