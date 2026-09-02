@@ -198,3 +198,85 @@ def test_a_failed_sync_still_releases_the_lock(tmp_path, monkeypatch):
         sync_mod.sync(db=db)
     with Store(db) as store:
         assert "already running" not in GarminGuard(store).can_sync()[1]
+
+
+# --------------------------------------------------------------------------
+# A new week arrives with a plan in it
+# --------------------------------------------------------------------------
+
+
+def test_a_week_with_no_plan_gets_one(tmp_path, monkeypatch):
+    """Reported as "the plan is also not coming automatically, this week was
+    all blank". Nothing created it: every Monday the week arrived empty and
+    stayed empty until someone pressed a button."""
+    from conftest import TODAY, build_db
+    from core import sync as sync_mod
+    from core.store import week_start_of
+
+    monkeypatch.setattr("core.ai.available", lambda: False)
+    monkeypatch.setattr("core.clock.today", lambda tz=None: TODAY)
+    store = build_db(str(tmp_path / "plan.db"), today=TODAY)
+    store.execute("DELETE FROM plans")
+    store.conn.commit()
+    store.close()
+
+    assert sync_mod.ensure_week_plan(str(tmp_path / "plan.db"), today=TODAY) is True
+    from core.store import Store
+    with Store(str(tmp_path / "plan.db")) as s:
+        plan = s.latest_plan(week_start_of(TODAY))
+        assert plan is not None
+        sessions = [d for d in plan["plan"]["week_plan"] if d["duration_min"] > 0]
+        assert sessions, "a plan with no sessions in it is not a plan"
+
+
+def test_a_plan_the_athlete_edited_is_never_overwritten(tmp_path, monkeypatch):
+    from conftest import TODAY, build_db
+    from core import sync as sync_mod
+    from core.store import Store, week_start_of
+
+    monkeypatch.setattr("core.ai.available", lambda: False)
+    path = str(tmp_path / "manual.db")
+    store = build_db(path, today=TODAY)
+    store.execute("DELETE FROM plans")
+    store.save_plan(week_start_of(TODAY),
+                    {"week_plan": [{"day": "Mon", "sport": "bike",
+                                    "duration_min": 90, "target_zone": "Z2"}],
+                     "flags": [], "adjustments_made": [], "source": "manual"},
+                    "manual")
+    store.conn.commit()
+    store.close()
+
+    assert sync_mod.ensure_week_plan(path, today=TODAY) is False
+    with Store(path) as s:
+        assert s.latest_plan(week_start_of(TODAY))["source"] == "manual"
+
+
+def test_a_rules_only_plan_is_upgraded_when_the_model_comes_back(tmp_path, monkeypatch):
+    """The fallback is a complete week, but it is still the fallback."""
+    from conftest import TODAY, build_db
+    from core import sync as sync_mod
+    from core.store import Store, week_start_of
+
+    path = str(tmp_path / "upgrade.db")
+    monkeypatch.setattr("core.ai.available", lambda: False)
+    store = build_db(path, today=TODAY)
+    store.execute("DELETE FROM plans")
+    store.conn.commit()
+    store.close()
+    sync_mod.ensure_week_plan(path, today=TODAY)
+    with Store(path) as s:
+        assert s.latest_plan(week_start_of(TODAY))["source"] == "rules"
+
+    # With no AI it stays put; with AI available it is tried again.
+    assert sync_mod.ensure_week_plan(path, today=TODAY) is False
+    monkeypatch.setattr("core.ai.available", lambda: True)
+    monkeypatch.setattr(
+        "core.ai.plan_week",
+        lambda payload, **kw: {"week_plan": [
+            {"day": "Wed", "sport": "bike", "duration_min": 60,
+             "target_zone": "Z2", "purpose": "aerobic base",
+             "exercise_ids": [], "why": "from the model"}],
+            "flags": [], "adjustments_made": []})
+    assert sync_mod.ensure_week_plan(path, today=TODAY) is True
+    with Store(path) as s:
+        assert s.latest_plan(week_start_of(TODAY))["source"] != "rules"

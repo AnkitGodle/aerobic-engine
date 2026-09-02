@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from core.analysis import MIN_PARTIAL_SPLIT, km_splits
 
 # A metre of latitude, near enough, for building a straight synthetic course.
@@ -144,3 +146,52 @@ def test_samples_out_of_order_are_sorted_first():
     shuffled = stream[::-1]
     assert km_splits(shuffled, 1000.0, total_m=8000.0) == \
         km_splits(stream, 1000.0, total_m=8000.0)
+
+
+# --------------------------------------------------------------------------
+# Cadence, per split
+# --------------------------------------------------------------------------
+
+
+def with_cadence(stream: list[dict], spm: float, from_t: float = 0.0,
+                 then: float | None = None, after_t: float = 1e9) -> list[dict]:
+    for row in stream:
+        row["cadence"] = spm if row["t_s"] < after_t else (then or spm)
+    return stream
+
+
+def test_cadence_is_averaged_within_each_split():
+    stream = straight_line(4.0, 2500)
+    # 160 for the first half of the session, 170 for the second.
+    with_cadence(stream, 160.0, then=170.0, after_t=1250.0)
+    rows = km_splits(stream, 1000.0, total_m=10_000.0)
+    assert rows[0]["avg_cadence"] == pytest.approx(160.0, abs=1.0)
+    assert rows[-1]["avg_cadence"] == pytest.approx(170.0, abs=1.0)
+
+
+def test_a_split_with_no_cadence_says_so_rather_than_guessing():
+    rows = km_splits(straight_line(4.0, 2500), 1000.0, total_m=10_000.0)
+    assert all(r["avg_cadence"] is None for r in rows)
+
+
+def test_single_leg_cadence_is_doubled_to_what_the_watch_shows():
+    """Some firmware reports one leg. 78 spm on a run is 156, not 78."""
+    stream = with_cadence(straight_line(4.0, 2500), 78.0)
+    rows = km_splits(stream, 1000.0, total_m=10_000.0)
+    assert rows[0]["avg_cadence"] == pytest.approx(156.0, abs=1.0)
+
+
+def test_a_plausible_cadence_is_left_alone():
+    stream = with_cadence(straight_line(4.0, 2500), 168.0)
+    rows = km_splits(stream, 1000.0, total_m=10_000.0)
+    assert rows[0]["avg_cadence"] == pytest.approx(168.0, abs=1.0)
+
+
+def test_cadence_does_not_leak_across_a_split_boundary():
+    """Each split's average is its own, like the heart rate beside it."""
+    stream = straight_line(4.0, 2500)
+    for row in stream:
+        row["cadence"] = 150.0 if row["t_s"] < 250 else 180.0
+    rows = km_splits(stream, 1000.0, total_m=10_000.0)
+    assert rows[0]["avg_cadence"] < 160
+    assert rows[1]["avg_cadence"] > 175

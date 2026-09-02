@@ -1076,6 +1076,7 @@ def split_rows(act: dict, laps: list[dict], zones: list[dict],
                       if r.get("partial") else f"{r['index']}"),
             "speed": r.get("speed_mps") or 0.0,
             "hr": r.get("avg_hr"),
+            "spm": r.get("avg_cadence"),
             "gain": r.get("elev_gain_m"),
         } for r in even]
     else:
@@ -1106,6 +1107,7 @@ def split_rows(act: dict, laps: list[dict], zones: list[dict],
         hr = row.get("hr")
         zone = zone_of(float(hr), bounds) if hr and bounds else None
         gain = row.get("gain")
+        spm = row.get("spm")
         out.append({
             "label": row["label"],
             "pace": pace,
@@ -1113,6 +1115,13 @@ def split_rows(act: dict, laps: list[dict], zones: list[dict],
             "bar_color": SPORT_COLOR.get(act.get("sport"), TONE["neutral"]),
             "hr": float(hr) if hr else None,
             "hr_color": ZONE_COLOR.get(zone or 0, ""),
+            "spm": float(spm) if spm else None,
+            # Against the same thresholds the cadence panel uses, so a number
+            # that is green here is green there.
+            "spm_color": ("" if not spm else
+                          TONE["good"] if spm >= CADENCE_TARGET_SPM else
+                          TONE["caution"] if spm >= CADENCE_LOW_SPM else
+                          TONE["bad"]),
             "elev": f"{gain:+.0f} m" if gain else "",
         })
     return out
@@ -1292,7 +1301,7 @@ def page_today(data: dict, today: date) -> None:
 
     ui.section("This week",
                f"{hm(wk.total_minutes)} done of a {hm(env.max_week_minutes)} ceiling")
-    ui.week_strip(week_cells(plan, today))
+    ui.week_strip(week_cells(plan, today, activities=data.get("all_activities")))
 
     done_sessions_block(data, today)
 
@@ -1354,11 +1363,37 @@ def next_week_plan(today: date, sports: list[str] | None = None) -> dict | None:
 
 
 def week_cells(plan: dict | None, today: date,
-               mark_today: bool = True) -> list[dict]:
-    """`mark_today=False` for a future week, which has no today to highlight."""
+               mark_today: bool = True,
+               activities: list[dict] | None = None) -> list[dict]:
+    """`mark_today=False` for a future week, which has no today to highlight.
+
+    Built from the plan *and* from what was actually recorded. It used to be the
+    plan alone, and a week with no plan saved therefore showed seven empty days
+    however much training was in it — two runs logged and "This week" blank,
+    which is what was reported. Training that happened is not conditional on
+    having been planned.
+    """
     start = week_start_of(today)
     entries = (plan or {}).get("week_plan", [])
     real_today = today_local()
+
+    # What the week actually holds, by day. Multisport parents are skipped: their
+    # legs are stored as their own activities and would otherwise count twice.
+    logged: dict[date, list[dict]] = {}
+    for a in activities or []:
+        if a.get("is_multisport_parent") or not a.get("start_date"):
+            continue
+        try:
+            day = date.fromisoformat(str(a["start_date"])[:10])
+        except (ValueError, TypeError):
+            continue
+        if not start <= day <= start + timedelta(days=6):
+            continue
+        logged.setdefault(day, []).append({
+            "sport": a.get("sport") or "other",
+            "minutes": round((a.get("duration_s") or 0) / 60),
+        })
+
     cells = []
     for i, name in enumerate(DAYS):
         d = start + timedelta(days=i)
@@ -1372,6 +1407,19 @@ def week_cells(plan: dict | None, today: date,
              "missed": e.get("purpose") != "completed" and d < real_today}
             for e in entries if e["day"] == name and e["sport"] != "rest"
         ]
+        # Anything recorded that the plan does not already account for. Counted
+        # per sport, so a planned run marked completed is not shown twice while a
+        # second run the same day still appears.
+        claimed: dict[str, int] = {}
+        for item in items:
+            if item["done"]:
+                claimed[item["sport"]] = claimed.get(item["sport"], 0) + 1
+        for actual in logged.get(d, []):
+            if claimed.get(actual["sport"]):
+                claimed[actual["sport"]] -= 1
+                continue
+            items.append({"sport": actual["sport"], "minutes": actual["minutes"],
+                          "zone": "", "hr": "", "done": True, "missed": False})
         cells.append({"name": name, "date": d.strftime("%d-%m"),
                       "today": mark_today and d == real_today, "items": items})
     return cells
@@ -2898,7 +2946,8 @@ def page_plan(data: dict, today: date) -> None:
               "manual": "your own plan"}.get(stored.get("source", "rules"), "")
     with week_slot:
         ui.section("Your week", origin)
-        ui.week_strip(week_cells(stored, today))
+        ui.week_strip(week_cells(stored, today,
+                                 activities=data.get("all_activities")))
         for f in stored.get("flags", []):
             st.caption(("🤖 " if f.startswith("AI:") else "⚠ ") + f)
         if stored.get("adjustments_made"):

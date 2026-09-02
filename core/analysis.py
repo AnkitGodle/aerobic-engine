@@ -1331,17 +1331,24 @@ def km_splits(
     split_start_t = float(samples[0]["t_s"])
     split_distance = 0.0
     beats: list[tuple[float, float]] = []   # (hr, seconds it stood for)
+    steps_taken: list[tuple[float, float]] = []   # (cadence, seconds)
     climb = 0.0
     boundary = unit_m
 
     def close(at_time: float, length: float, partial: bool) -> None:
         held = sum(w for _, w in beats)
+        turning = sum(w for _, w in steps_taken)
         out.append({
             "index": len(out) + 1,
             "distance_m": round(length, 1),
             "seconds": round(max(0.0, at_time - split_start_t), 1),
             "avg_hr": (round(sum(hr * w for hr, w in beats) / held, 1)
                        if held else None),
+            # Cadence per split, for the same reason heart rate is per split:
+            # the average over a session hides the thing worth seeing, which is
+            # whether the stride shortened as the run went on or fell apart.
+            "avg_cadence": (round(sum(spm * w for spm, w in steps_taken) / turning, 1)
+                            if turning else None),
             "elev_gain_m": round(climb, 1),
             "partial": partial,
             "speed_mps": (round(length / (at_time - split_start_t), 3)
@@ -1359,6 +1366,14 @@ def km_splits(
         hr = after.get("hr") if after.get("hr") is not None else before.get("hr")
         if hr is not None and dt > 0:
             beats.append((float(hr), dt))
+        spm = (after.get("cadence") if after.get("cadence") is not None
+               else before.get("cadence"))
+        if spm is not None and dt > 0:
+            # Garmin's run cadence stream is steps per minute for one leg on
+            # some firmware and both on others; a value under 120 for a run is
+            # the single-leg form and doubles to what the watch itself shows.
+            value = float(spm)
+            steps_taken.append((value * 2 if 0 < value < 120 else value, dt))
         if (before.get("altitude_m") is not None
                 and after.get("altitude_m") is not None):
             climb += max(0.0, float(after["altitude_m"]) - float(before["altitude_m"]))
@@ -1374,6 +1389,8 @@ def km_splits(
             split_start_t = at
             split_distance = over
             beats = [(float(hr), max(0.0, t_after - at))] if hr is not None else []
+            steps_taken = ([(steps_taken[-1][0], max(0.0, t_after - at))]
+                           if steps_taken else [])
             climb = 0.0
             boundary += unit_m
 

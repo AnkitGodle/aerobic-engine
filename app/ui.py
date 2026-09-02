@@ -369,19 +369,26 @@ CSS = """
      A table of divs rather than a chart — it is a list, and a list renders
      instantly. */
   .ic-splits { margin: .2rem 0 .9rem; font-variant-numeric: tabular-nums; }
+  /* Six columns when cadence is there, five when it is not: the grid is set
+     per-row from the same template, so the header and the body cannot drift. */
   .ic-split { display: grid; grid-template-columns: 2.6rem 3.4rem 1fr 4.2rem 3.4rem;
               align-items: center; gap: .55rem; padding: .3rem .1rem;
               border-bottom: 1px solid var(--ic-line); font-size: .84rem; }
+  .ic-splits.with-spm .ic-split {
+      grid-template-columns: 2.6rem 3.4rem 1fr 4rem 3.6rem 3.4rem; }
   .ic-split.head { font-size: .68rem; letter-spacing: .07em; opacity: .5;
                    text-transform: uppercase; border-bottom-width: 1px; }
   .ic-split-bar { height: 9px; border-radius: 5px; background: var(--ic-surface);
                   overflow: hidden; }
   .ic-split-bar span { display: block; height: 100%; border-radius: 5px; }
   .ic-split-hr { text-align: right; font-weight: 600; }
+  .ic-split-spm { text-align: right; font-weight: 600; }
   .ic-split-elev { text-align: right; opacity: .55; font-size: .78rem; }
   .ic-split-num { opacity: .55; }
   @media (max-width: 700px) {
     .ic-split { grid-template-columns: 2.2rem 3.2rem 1fr 3.8rem; }
+    .ic-splits.with-spm .ic-split {
+        grid-template-columns: 2rem 3rem 1fr 3.3rem 3.3rem; }
     .ic-split-elev { display: none; }
   }
 
@@ -755,29 +762,43 @@ def splits(rows: list[dict], unit: str = "km") -> None:
     rows = [r for r in rows if r]
     if not rows:
         return
+    show_spm = any(r.get("spm") for r in rows)
     head = ('<div class="ic-split head"><div>' + esc(unit) + "</div><div>pace</div>"
             "<div></div><div class='ic-split-hr'>bpm</div>"
-            "<div class='ic-split-elev'>elev</div></div>")
+            + ("<div class='ic-split-spm'>spm</div>" if show_spm else "")
+            + "<div class='ic-split-elev'>elev</div></div>")
     body = []
     for row in rows:
         width = max(4.0, min(100.0, float(row.get("bar") or 0) * 100))
         colour = row.get("bar_color") or TONE_COLOR["neutral"]
         hr = row.get("hr")
         hr_colour = row.get("hr_color") or ""
+        # Cadence beside the pulse, because the two together are the story:
+        # heart rate climbing while the stride shortens is a different session
+        # from heart rate climbing as it lengthens. Built as its own cell so the
+        # markup stays readable and the column can be absent entirely.
+        spm_cell = ""
+        if show_spm:
+            spm = row.get("spm")
+            style = (f' style="color:{esc(row["spm_color"])}"'
+                     if row.get("spm_color") else "")
+            spm_cell = (f'<div class="ic-split-spm"{style}>'
+                        + esc(f"{spm:.0f}" if spm else "—") + "</div>")
+        hr_style = f' style="color:{esc(hr_colour)}"' if hr_colour else ""
         body.append(
             '<div class="ic-split">'
             f'<div class="ic-split-num">{esc(row.get("label", ""))}</div>'
             f'<div>{esc(row.get("pace", "—"))}</div>'
             f'<div class="ic-split-bar"><span style="width:{width:.1f}%;'
             f'background:{esc(colour)}"></span></div>'
-            f'<div class="ic-split-hr"'
-            + (f' style="color:{esc(hr_colour)}"' if hr_colour else "")
-            + f">{esc(f'{hr:.0f}' if hr else '—')}</div>"
-            f'<div class="ic-split-elev">'
+            f'<div class="ic-split-hr"{hr_style}>'
+            + esc(f"{hr:.0f}" if hr else "—") + "</div>"
+            + spm_cell
+            + '<div class="ic-split-elev">'
             + (esc(row["elev"]) if row.get("elev") else "")
             + "</div></div>")
-    st.markdown(f'<div class="ic-splits">{head}{"".join(body)}</div>',
-                unsafe_allow_html=True)
+    st.markdown(f'<div class="ic-splits{" with-spm" if show_spm else ""}">'
+                f'{head}{"".join(body)}</div>', unsafe_allow_html=True)
 
 
 def week_strip(days: list[dict], key: bool = True) -> None:

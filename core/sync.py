@@ -19,7 +19,7 @@ from core import applog, strength
 from core.analysis import compute_activity_metrics
 from core.garmin_client import GarminClient, date_range
 from core.garmin_guard import GarminGuard
-from core.store import Store, default_db
+from core.store import Store, default_db, week_start_of
 
 log = logging.getLogger("aerobic_engine.sync")
 
@@ -143,6 +143,58 @@ def import_exercise_sets(store: Store, client: GarminClient) -> tuple[int, int]:
             logged += store.log_strength(rows)
             already.add(act["start_date"])
     return sets_stored, logged
+
+
+def ensure_week_plan(db: str | None = None, today: date | None = None) -> bool:
+    """Build this week's plan if the week does not have one yet.
+
+    Nothing used to create it. Every Monday the week arrived empty and stayed
+    empty until the athlete opened the Plan page and pressed a button — so
+    "this week was all blank" was the accurate description of a Wednesday.
+
+    Here rather than on page render for two reasons: a plan costs a model call,
+    and Streamlit re-executes a page body on every click. The sync runs once,
+    has nobody waiting on it, and already generates the written summaries.
+
+    Never overwrites. A week that has any plan — the rules', the model's, or one
+    the athlete edited by hand — is left exactly as it is.
+    """
+    from core import ai, clock, planner
+
+    store = Store(db)
+    try:
+        day = today or clock.today()
+        week = week_start_of(day)
+        stored = store.latest_plan(week)
+        if stored:
+            # One exception to "never overwrites": a plan this function built
+            # from the rules alone because the model was unreachable. That is a
+            # complete, usable week, but it is the fallback — a later sync may
+            # upgrade it. Anything the model wrote, anything enforce() repaired
+            # and anything the athlete edited by hand is left alone.
+            if stored.get("source") != "rules" or not ai.available():
+                return False
+            log.info("Upgrading this week's rules-only plan with the AI layer")
+        upgrading = bool(stored)
+        # An upgrade attempt is only saved if it produced something better than
+        # what is already there. Otherwise a week whose model call keeps timing
+        # out collects an identical rules plan on every sync.
+        plan = planner.plan_week(store, today=day, use_ai=ai.available(),
+                                 save=not upgrading)
+        if upgrading:
+            if plan.source == "rules":
+                log.info("The model is still unreachable; keeping the rules plan")
+                return False
+            store.save_plan(week, plan.model_dump(mode="json"), plan.source)
+        log.info("%s this week's plan (%s): %d sessions",
+                 "Upgraded" if upgrading else "Built", plan.source,
+                 len([d for d in plan.week_plan if d.duration_min > 0]))
+        applog.event(db or default_db(), "Built this week's plan",
+                     week=week.isoformat(), source=plan.source,
+                     sessions=len(plan.week_plan))
+        return True
+    finally:
+        store.close()
 
 
 def generate_ai_notes(db: str | None = None, today: date | None = None) -> int:
@@ -642,11 +694,20 @@ def _sync_locked(
         # keeps the tokens Garmin refreshed rather than re-resuming the blob
         # pasted into its secrets weeks ago. Same secrecy as the secret itself:
         # the database is private, and this grants the same access.
-        load_tokens=lambda: store.get_state(TOKEN_STATE_KEY) or None,
-        save_tokens=lambda blob: (store.set_state(TOKEN_STATE_KEY, blob),
-                                  store.set_state(TOKEN_SAVED_KEY,
-                                                  datetime.now().isoformat(
-                                                      timespec="seconds"))),
+        # Only where a login is impossible — a hosted app. Two clients sharing
+        # one session is a race: Garmin rotates the tokens on refresh, so the
+        # host refreshing at 15:16 left the laptop resuming a grant Garmin had
+        # already moved on from, and the laptop got a 401 on a session it had
+        # just been handed. A machine that *can* log in keeps its own token file
+        # and re-mints when it needs to; the host, which cannot, keeps the
+        # database copy. Independent grants, no race.
+        load_tokens=((lambda: store.get_state(TOKEN_STATE_KEY) or None)
+                     if not allow_password_login else None),
+        save_tokens=((lambda blob: (store.set_state(TOKEN_STATE_KEY, blob),
+                                    store.set_state(TOKEN_SAVED_KEY,
+                                                    datetime.now().isoformat(
+                                                        timespec="seconds"))))
+                     if not allow_password_login else None),
     )
     client.connect()
     log.info("Connected to Garmin as %s", client.display_name or "(unknown)")
@@ -833,6 +894,14 @@ def _sync_locked(
     applog.event(db or default_db(), "Garmin sync complete", **{
         k: v for k, v in stats.items() if isinstance(v, (int, float))})
     store.close()
+
+    if progress:
+        progress("Making sure this week has a plan…")
+    try:
+        stats["plan_created"] = int(ensure_week_plan(db))
+    except Exception as exc:  # noqa: BLE001 - never worth a failed sync
+        log.warning("Could not build this week's plan: %s", exc)
+        stats["plan_created"] = 0
 
     if progress:
         progress("Writing summaries…")
